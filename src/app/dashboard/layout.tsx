@@ -1,9 +1,8 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -17,6 +16,11 @@ import {
   Settings,
   LogOut,
   PackageCheck,
+  Menu,
+  X,
+  PanelLeftClose,
+  PanelLeftOpen,
+  UserCheck,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -43,6 +47,25 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [me, setMe] = useState<Me | null>(null);
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
+
+  // Close mobile drawer on route change
+  useEffect(() => {
+    setIsMobileNavOpen(false);
+  }, [pathname]);
+
+  // Prevent body scroll when mobile drawer is open
+  useEffect(() => {
+    if (isMobileNavOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isMobileNavOpen]);
 
   useEffect(() => {
     api<Me>('/api/v1/auth/me').then(setMe).catch(() => setMe(null));
@@ -54,49 +77,136 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     router.refresh();
   }
 
+  // Get readable current page context for topbar
+  const currentItem = NAV_ITEMS.find(
+    (item) => pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href)),
+  );
+  const currentPageTitle = currentItem ? currentItem.label : 'E-Fulfill Hub';
+
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
-      <aside className="sidebar">
+    <div className="dashboard-root">
+      {/* Mobile Drawer Overlay Backdrop */}
+      <div
+        className={`sidebar-overlay ${isMobileNavOpen ? 'active' : ''}`}
+        onClick={() => setIsMobileNavOpen(false)}
+        aria-hidden="true"
+      />
+
+      {/* Sidebar Navigation */}
+      <aside
+        className={`sidebar ${isMobileNavOpen ? 'mobile-open' : ''} ${isDesktopCollapsed ? 'collapsed' : ''}`}
+        aria-label="Navigasi Utama"
+      >
         <div className="sidebar-brand">
-          <span style={{ display: 'flex', width: 32, height: 32, alignItems: 'center', justifyContent: 'center', background: 'var(--primary)', color: '#fff', borderRadius: 'var(--r-md)' }}>
-            <PackageCheck size={18} aria-hidden />
-          </span>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>E-Fulfill Hub</span>
+          <Link href="/dashboard" className="sidebar-brand-content">
+            <span className="sidebar-brand-logo">
+              <PackageCheck size={20} aria-hidden />
+            </span>
+            <span className="sidebar-brand-title">E-Fulfill Hub</span>
+          </Link>
+          <button
+            type="button"
+            className="sidebar-close-btn"
+            onClick={() => setIsMobileNavOpen(false)}
+            aria-label="Tutup menu navigasi"
+          >
+            <X size={20} aria-hidden />
+          </button>
         </div>
+
         <nav className="sidebar-nav">
           {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(item.href + '/');
+            const active = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href + '/'));
             const Icon = item.icon;
             return (
-              <Link key={item.href} href={item.href} className={`sidebar-link ${active ? 'active' : ''}`}>
-                <Icon size={18} strokeWidth={1.75} aria-hidden />
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`sidebar-link ${active ? 'active' : ''}`}
+                title={isDesktopCollapsed ? item.label : undefined}
+                onClick={() => setIsMobileNavOpen(false)}
+              >
+                <Icon size={19} strokeWidth={active ? 2.2 : 1.75} aria-hidden />
                 <span>{item.label}</span>
               </Link>
             );
           })}
         </nav>
-        <div style={{ padding: 12, borderTop: '1px solid var(--divider)' }}>
+
+        <div className="sidebar-footer">
           {me?.user ? (
-            <div style={{ marginBottom: 8, padding: '0 4px' }}>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>{me.user.name}</div>
-              <div className="muted small">{me.tenantName ?? '—'}</div>
+            <div className="mb12 user-info-text">
+              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--on-surface)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {me.user.name}
+              </div>
+              <div className="muted small" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {me.tenantName ?? 'Toko Utama'}
+              </div>
             </div>
           ) : null}
-          <button onClick={handleLogout} className="btn btn-ghost" style={{ width: '100%', justifyContent: 'flex-start' }}>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="btn btn-ghost"
+            style={{ width: '100%', justifyContent: isDesktopCollapsed ? 'center' : 'flex-start', padding: isDesktopCollapsed ? '8px 0' : '8px 12px' }}
+            title={isDesktopCollapsed ? 'Keluar' : undefined}
+          >
             <LogOut size={16} aria-hidden />
-            Keluar
+            <span style={{ display: isDesktopCollapsed ? 'none' : 'inline' }}>Keluar</span>
           </button>
         </div>
       </aside>
 
-      <div className="main-content">
+      {/* Main Content Area */}
+      <div className={`main-content ${isDesktopCollapsed ? 'collapsed' : ''}`}>
         <header className="topbar">
-          <div className="small muted">
-            {pathname === '/dashboard' ? 'Ringkasan operasional' : 'E-Fulfill Hub · Terhubung ke Shopee'}
+          <div className="topbar-left">
+            {/* Mobile Hamburger Button */}
+            <button
+              type="button"
+              className="hamburger-btn"
+              onClick={() => setIsMobileNavOpen(true)}
+              aria-label="Buka menu navigasi"
+            >
+              <Menu size={20} aria-hidden />
+            </button>
+
+            {/* Desktop Collapse / Expand Button */}
+            <button
+              type="button"
+              className="desktop-collapse-btn"
+              onClick={() => setIsDesktopCollapsed((prev) => !prev)}
+              aria-label={isDesktopCollapsed ? 'Lebarkan sidebar' : 'Ciutkan sidebar'}
+              title={isDesktopCollapsed ? 'Lebarkan sidebar' : 'Ciutkan sidebar'}
+            >
+              {isDesktopCollapsed ? <PanelLeftOpen size={18} aria-hidden /> : <PanelLeftClose size={18} aria-hidden />}
+            </button>
+
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--on-surface)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>{currentPageTitle}</span>
+              </div>
+              <div className="small muted topbar-subtitle" style={{ fontSize: 12 }}>
+                {pathname === '/dashboard' ? 'Ringkasan operasional terpadu' : 'E-Fulfill Hub · Shopee Open Platform'}
+              </div>
+            </div>
           </div>
-          {me?.role ? <span className="badge badge-secondary">{me.role}</span> : null}
+
+          <div className="topbar-right">
+            <span className="badge badge-success" style={{ display: 'inline-flex', gap: 4 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
+              Shopee Terhubung
+            </span>
+            {me?.role ? (
+              <span className="badge badge-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <UserCheck size={12} aria-hidden />
+                {me.role}
+              </span>
+            ) : null}
+          </div>
         </header>
-        <div className="page-body">{children}</div>
+
+        <main className="page-body">{children}</main>
       </div>
     </div>
   );

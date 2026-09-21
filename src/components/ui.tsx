@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -11,6 +11,10 @@ import {
   Circle,
   Inbox,
   CircleAlert,
+  X,
+  TrendingUp,
+  Clock,
+  Package,
 } from 'lucide-react';
 
 export type Tone = 'primary' | 'secondary' | 'warning' | 'danger' | 'success' | 'neutral';
@@ -107,7 +111,7 @@ export function StatusBadge({ status }: { status: string | null | undefined }) {
   const Icon = TONE_ICON[tone];
   return (
     <span className={`badge ${TONE_CLASS[tone]}`}>
-      <Icon size={12} strokeWidth={2} aria-hidden />
+      <Icon size={12} strokeWidth={2.2} aria-hidden />
       {label}
     </span>
   );
@@ -126,73 +130,189 @@ export function StatCard({
   tone?: Tone;
   href?: string;
 }) {
-  const color =
-    tone === 'danger' ? 'var(--on-error-container)'
-    : tone === 'warning' ? 'var(--on-tertiary-container)'
-    : tone === 'success' ? 'var(--on-success-container)'
-    : tone === 'secondary' ? 'var(--on-secondary-container)'
-    : 'var(--on-surface)';
+  const accentColor =
+    tone === 'danger'
+      ? 'var(--error)'
+      : tone === 'warning'
+      ? 'var(--tertiary)'
+      : tone === 'success'
+      ? 'var(--success)'
+      : tone === 'secondary'
+      ? 'var(--secondary)'
+      : 'var(--primary)';
+
+  const valueColor =
+    tone === 'danger'
+      ? 'var(--on-error-container)'
+      : tone === 'warning'
+      ? 'var(--on-tertiary-container)'
+      : tone === 'success'
+      ? 'var(--on-success-container)'
+      : tone === 'secondary'
+      ? 'var(--on-secondary-container)'
+      : 'var(--on-surface)';
 
   const inner = (
-    <div className="stat-card">
-      <div className="stat-value" style={{ color }}>{value}</div>
-      <div style={{ fontWeight: 600 }}>{label}</div>
-      {hint ? <div className="muted small">{hint}</div> : null}
+    <div
+      className="stat-card"
+      style={{ '--stat-accent': accentColor } as React.CSSProperties}
+    >
+      <div className="stat-header">
+        <span className="stat-label">{label}</span>
+      </div>
+      <div>
+        <div className="stat-value" style={{ color: valueColor }}>
+          {value}
+        </div>
+        {hint ? <div className="stat-hint mt8">{hint}</div> : null}
+      </div>
     </div>
   );
-  return href ? <Link href={href} style={{ color: 'inherit' }}>{inner}</Link> : inner;
+
+  return href ? (
+    <Link href={href} style={{ color: 'inherit', display: 'block', height: '100%' }}>
+      {inner}
+    </Link>
+  ) : (
+    inner
+  );
 }
 
-export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
+export function PageHeader({
+  title,
+  subtitle,
+  actions,
+}: {
+  title: string;
+  subtitle?: string;
+  actions?: ReactNode;
+}) {
   return (
-    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
-      <div>
+    <div className="page-header-container">
+      <div className="page-header-text">
         <h1 className="page-title">{title}</h1>
         {subtitle ? <p className="page-subtitle">{subtitle}</p> : null}
       </div>
-      {actions ? <div className="row" style={{ gap: 8 }}>{actions}</div> : null}
+      {actions ? <div className="page-actions">{actions}</div> : null}
     </div>
   );
 }
 
-export function LoadingState() {
+export function LoadingState({ message = 'Memuat data...' }: { message?: string }) {
   return (
     <div className="center-state">
       <div className="spinner" role="status" aria-label="Memuat" />
-      <span>Memuat data...</span>
+      <span style={{ fontSize: 13.5, fontWeight: 500 }}>{message}</span>
     </div>
   );
 }
 
-export function EmptyState({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
+export function EmptyState({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
   return (
     <div className="center-state">
-      <Inbox size={32} strokeWidth={1.5} style={{ opacity: 0.5 }} aria-hidden />
-      <div style={{ fontWeight: 600, color: 'var(--on-surface)' }}>{title}</div>
-      {description ? <div className="small">{description}</div> : null}
-      {action}
+      <Inbox size={36} strokeWidth={1.5} style={{ opacity: 0.45 }} aria-hidden />
+      <div style={{ fontWeight: 600, color: 'var(--on-surface)', fontSize: 15 }}>{title}</div>
+      {description ? <div className="small muted" style={{ maxWidth: 360 }}>{description}</div> : null}
+      {action ? <div className="mt8">{action}</div> : null}
     </div>
   );
 }
 
-export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function ErrorState({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry?: () => void;
+}) {
   return (
-    <div className="center-state">
-      <CircleAlert size={32} strokeWidth={1.5} style={{ color: 'var(--on-error-container)' }} aria-hidden />
-      <div style={{ fontWeight: 600, color: 'var(--on-error-container)' }}>{message}</div>
+    <div className="center-state" style={{ borderColor: 'var(--error-border)' }}>
+      <CircleAlert size={36} strokeWidth={1.5} style={{ color: 'var(--error)' }} aria-hidden />
+      <div style={{ fontWeight: 600, color: 'var(--on-error-container)', fontSize: 15 }}>{message}</div>
       {onRetry ? (
-        <button className="btn btn-secondary btn-sm" onClick={onRetry}>Coba Lagi</button>
+        <button type="button" className="btn btn-secondary btn-sm mt8" onClick={onRetry}>
+          Coba Lagi
+        </button>
       ) : null}
     </div>
   );
 }
 
-export function Alert({ tone, children }: { tone: 'info' | 'warning' | 'danger' | 'success'; children: ReactNode }) {
-  const Icon = tone === 'danger' ? AlertOctagon : tone === 'warning' ? AlertTriangle : tone === 'success' ? CheckCircle2 : Info;
+export function Alert({
+  tone,
+  children,
+}: {
+  tone: 'info' | 'warning' | 'danger' | 'success';
+  children: ReactNode;
+}) {
+  const Icon =
+    tone === 'danger'
+      ? AlertOctagon
+      : tone === 'warning'
+      ? AlertTriangle
+      : tone === 'success'
+      ? CheckCircle2
+      : Info;
   return (
     <div className={`alert alert-${tone}`} role="status">
       <Icon size={18} strokeWidth={2} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden />
       <div className="grow">{children}</div>
+    </div>
+  );
+}
+
+export function Modal({
+  isOpen,
+  onClose,
+  title,
+  children,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      window.addEventListener('keydown', onKeyDown);
+    }
+    return () => {
+      document.body.style.overflow = '';
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--divider)' }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700 }}>{title}</h2>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onClose}
+            aria-label="Tutup modal"
+            style={{ padding: 4, height: 'auto' }}
+          >
+            <X size={18} aria-hidden />
+          </button>
+        </div>
+        <div style={{ padding: '20px' }}>{children}</div>
+      </div>
     </div>
   );
 }

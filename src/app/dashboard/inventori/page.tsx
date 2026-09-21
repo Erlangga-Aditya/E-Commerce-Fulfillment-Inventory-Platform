@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Pencil, Search } from 'lucide-react';
+import { RefreshCw, Pencil, Search, Warehouse, Boxes } from 'lucide-react';
 import { api } from '@/lib/api';
-import { PageHeader, LoadingState, ErrorState, EmptyState, Alert } from '@/components/ui';
+import { PageHeader, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
 
 interface InvItem {
   id: string;
@@ -20,7 +20,13 @@ interface InvItem {
 
 const REASONS = ['STOCK_COUNT', 'DAMAGE', 'EXPIRY', 'THEFT', 'TRANSFER', 'RECEIVING_ERROR', 'OTHER'] as const;
 const REASON_LABEL: Record<string, string> = {
-  STOCK_COUNT: 'Stock Opname', DAMAGE: 'Rusak', EXPIRY: 'Kedaluwarsa', THEFT: 'Hilang', TRANSFER: 'Transfer', RECEIVING_ERROR: 'Salah Terima', OTHER: 'Lainnya',
+  STOCK_COUNT: 'Stock Opname (Hitung Fisik)',
+  DAMAGE: 'Barang Rusak',
+  EXPIRY: 'Kedaluwarsa',
+  THEFT: 'Barang Hilang / Selisih',
+  TRANSFER: 'Transfer Antar Gudang',
+  RECEIVING_ERROR: 'Koreksi Penerimaan',
+  OTHER: 'Alasan Lainnya',
 };
 
 export default function InventoriPage() {
@@ -35,6 +41,7 @@ export default function InventoriPage() {
   const [modal, setModal] = useState<InvItem | null>(null);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<string>('STOCK_COUNT');
+  const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(() => {
     const q = new URLSearchParams();
@@ -47,10 +54,12 @@ export default function InventoriPage() {
   }, [warehouseId, search]);
 
   useEffect(() => {
-    api<Array<{ id: string; name: string }>>('/api/v1/warehouses').then((w) => {
-      setWarehouses(w);
-      if (w[0]) setWarehouseId(w[0].id);
-    }).catch(() => undefined);
+    api<Array<{ id: string; name: string }>>('/api/v1/warehouses')
+      .then((w) => {
+        setWarehouses(w);
+        if (w[0]) setWarehouseId(w[0].id);
+      })
+      .catch(() => undefined);
   }, []);
 
   useEffect(load, [load]);
@@ -59,55 +68,159 @@ export default function InventoriPage() {
     e.preventDefault();
     if (!modal) return;
     setNotice(null);
+    setSubmitting(true);
     try {
       await api('/api/v1/inventory/adjustments', {
         method: 'POST',
         body: { warehouseId: modal.warehouseId, variantId: modal.variantId, quantityDelta: Number(delta), reason },
       });
-      setNotice({ tone: 'success', text: `Stok ${modal.sku} berhasil disesuaikan.` });
+      setNotice({ tone: 'success', text: `Stok produk ${modal.sku} berhasil disesuaikan.` });
       setModal(null);
       load();
     } catch (err) {
       setNotice({ tone: 'danger', text: (err as Error).message });
+    } finally {
+      setSubmitting(false);
     }
   }
 
   return (
     <div>
-      <PageHeader title="Inventori" subtitle="Saldo stok per gudang (ledger tersimpan otomatis)" />
+      <PageHeader
+        title="Inventori & Stok Fisik"
+        subtitle="Saldo persediaan per gudang dengan pencatatan buku besar (ledger) mutasi stok otomatis"
+        actions={
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => {
+              setLoading(true);
+              setError('');
+              load();
+            }}
+          >
+            <RefreshCw size={14} aria-hidden />
+            <span>Muat Ulang</span>
+          </button>
+        }
+      />
 
-      <div className="row mb16" style={{ flexWrap: 'wrap' }}>
-        <select className="input" style={{ width: 200 }} value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
-          {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-        </select>
-        <div className="row grow" style={{ position: 'relative' }}>
-          <Search size={16} style={{ position: 'absolute', left: 10, color: '#9e9e9e' }} aria-hidden />
-          <input className="input" style={{ paddingLeft: 32 }} placeholder="Cari SKU / nama..." value={search} onChange={(e) => setSearch(e.target.value)} />
+      {notice ? (
+        <div className="mb16">
+          <Alert tone={notice.tone}>{notice.text}</Alert>
         </div>
-        <button className="btn btn-secondary btn-sm" onClick={() => { setLoading(true); setError(''); load(); }}><RefreshCw size={14} aria-hidden /> Muat Ulang</button>
+      ) : null}
+
+      {/* Responsive Filter Bar */}
+      <div className="filter-bar">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 180 }}>
+          <Warehouse size={16} style={{ color: 'var(--on-surface-variant)' }} aria-hidden />
+          <select
+            className="input"
+            style={{ width: '100%', maxWidth: 220, height: 38 }}
+            value={warehouseId}
+            onChange={(e) => setWarehouseId(e.target.value)}
+          >
+            {warehouses.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="search-input-wrapper">
+          <Search size={16} aria-hidden />
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Cari SKU / nama produk..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
       </div>
 
-      {notice ? <div className="mb16"><Alert tone={notice.tone}>{notice.text}</Alert></div> : null}
-
-      {loading ? <LoadingState /> : error ? <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); load(); }} /> : items.length === 0 ? (
-        <EmptyState title="Tidak ada data stok" description="Sinkronkan produk atau terima stok masuk." />
+      {loading ? (
+        <LoadingState message="Memuat data persediaan gudang..." />
+      ) : error ? (
+        <ErrorState
+          message={error}
+          onRetry={() => {
+            setLoading(true);
+            setError('');
+            load();
+          }}
+        />
+      ) : items.length === 0 ? (
+        <EmptyState
+          title="Tidak ada data stok produk"
+          description="Sinkronkan katalog produk dari Shopee atau lakukan penambahan stok awal."
+        />
       ) : (
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>SKU</th><th>Produk</th><th>Varian</th><th>Barcode</th><th className="num">On Hand</th><th className="num">Reserved</th><th className="num">Tersedia</th><th></th></tr>
+              <tr>
+                <th>SKU</th>
+                <th>Produk & Varian</th>
+                <th>Barcode</th>
+                <th className="num">Stok Fisik (On Hand)</th>
+                <th className="num">Ter-Reserve</th>
+                <th className="num">Tersedia Dijual</th>
+                <th style={{ textAlign: 'center' }}>Aksi</th>
+              </tr>
             </thead>
             <tbody>
               {items.map((it) => (
                 <tr key={it.id}>
-                  <td className="mono">{it.sku}</td>
-                  <td>{it.productName}</td>
-                  <td>{it.variantName}</td>
-                  <td className="mono">{it.barcode ?? '—'}</td>
-                  <td className="num">{it.onHand}</td>
-                  <td className="num">{it.reserved}</td>
-                  <td className="num"><strong>{it.available}</strong></td>
-                  <td><button className="btn btn-ghost btn-sm" onClick={() => { setModal(it); setDelta(''); }}><Pencil size={13} aria-hidden /> Sesuaikan</button></td>
+                  <td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Boxes size={15} style={{ color: 'var(--primary)', flexShrink: 0 }} aria-hidden />
+                      <span className="mono" style={{ fontWeight: 700 }}>{it.sku}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{it.productName}</div>
+                    <div className="small muted">{it.variantName}</div>
+                  </td>
+                  <td>
+                    <span className="mono small" style={{ color: it.barcode ? 'var(--on-surface)' : 'var(--on-surface-muted)' }}>
+                      {it.barcode ?? '—'}
+                    </span>
+                  </td>
+                  <td className="num">
+                    <span style={{ fontWeight: 500 }}>{it.onHand}</span>
+                  </td>
+                  <td className="num">
+                    <span style={{ color: it.reserved > 0 ? 'var(--on-tertiary-container)' : 'var(--on-surface-muted)', fontWeight: it.reserved > 0 ? 600 : 400 }}>
+                      {it.reserved}
+                    </span>
+                  </td>
+                  <td className="num">
+                    <span
+                      style={{
+                        fontWeight: 700,
+                        fontSize: 14,
+                        color: it.available > 0 ? 'var(--success)' : 'var(--error)',
+                      }}
+                    >
+                      {it.available}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'center' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => {
+                        setModal(it);
+                        setDelta('');
+                      }}
+                    >
+                      <Pencil size={12} aria-hidden />
+                      <span>Sesuaikan</span>
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -115,30 +228,51 @@ export default function InventoriPage() {
         </div>
       )}
 
-      {modal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div className="card" style={{ width: 380 }}>
-            <h2 style={{ fontSize: 16, marginBottom: 16 }}>Sesuaikan Stok — {modal.sku}</h2>
-            <form onSubmit={submitAdjust}>
-              <div className="field">
-                <label>Selisih (+/-)</label>
-                <input type="number" className="input" value={delta} onChange={(e) => setDelta(e.target.value)} required />
-                <p className="muted small">Positif menambah, negatif mengurangi stok.</p>
-              </div>
-              <div className="field">
-                <label>Alasan</label>
-                <select className="input" value={reason} onChange={(e) => setReason(e.target.value)}>
-                  {REASONS.map((r) => <option key={r} value={r}>{REASON_LABEL[r]}</option>)}
-                </select>
-              </div>
-              <div className="row">
-                <button type="submit" className="btn btn-primary grow">Simpan</button>
-                <button type="button" className="btn btn-ghost" onClick={() => setModal(null)}>Batal</button>
-              </div>
-            </form>
+      {/* Accessible Responsive Adjustment Modal */}
+      <Modal isOpen={Boolean(modal)} onClose={() => setModal(null)} title={`Penyesuaian Stok — ${modal?.sku}`}>
+        <form onSubmit={submitAdjust}>
+          <div className="field">
+            <label>Produk Terpilih</label>
+            <div style={{ padding: '8px 12px', background: 'var(--surface-low)', borderRadius: 'var(--r-sm)', fontSize: 13 }}>
+              <strong>{modal?.productName}</strong> ({modal?.variantName}) — Stok saat ini: <strong>{modal?.onHand}</strong> pcs
+            </div>
           </div>
-        </div>
-      )}
+
+          <div className="field">
+            <label>Jumlah Selisih (+ atau -)</label>
+            <input
+              type="number"
+              className="input"
+              placeholder="Contoh: +5 atau -2"
+              value={delta}
+              onChange={(e) => setDelta(e.target.value)}
+              required
+              autoFocus
+            />
+            <p className="muted small">Gunakan angka positif untuk menambah stok fisik, atau angka negatif untuk pengurangan.</p>
+          </div>
+
+          <div className="field">
+            <label>Alasan Penyesuaian (Audit Log)</label>
+            <select className="input" value={reason} onChange={(e) => setReason(e.target.value)}>
+              {REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {REASON_LABEL[r]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
+            <button type="submit" className="btn btn-primary grow" disabled={submitting || !delta}>
+              {submitting ? 'Menyimpan...' : 'Simpan Mutasi Stok'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={() => setModal(null)}>
+              Batal
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }
