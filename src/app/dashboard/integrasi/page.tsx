@@ -213,6 +213,13 @@ export default function IntegrasiPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   // ── Sync handlers ────────────────────────────────────────────────────────
 
   async function doSync(endpoint: string, label: string) {
@@ -491,6 +498,25 @@ export default function IntegrasiPage() {
       {!connected && (
         <div className="mb16">
           <Alert tone="info">Semua operasi sinkronisasi akan aktif setelah toko berhasil diotorisasi.</Alert>
+        </div>
+      )}
+
+      {connected && (
+        <div className="card mb20" style={{ borderLeft: '4px solid var(--success, #10b981)', background: 'var(--surface-low)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ color: 'var(--success, #10b981)', marginTop: 2, flexShrink: 0 }}>
+              <Zap size={20} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--on-surface)', marginBottom: 4 }}>
+                🟢 Sinkronisasi Otomatis Real-time Aktif
+              </div>
+              <p className="small muted" style={{ margin: 0, lineHeight: 1.5 }}>
+                Sistem E-Fulfill Hub menyinkronkan data toko secara otomatis tanpa perlu mengklik tombol manual:
+                <strong> Push Webhook Shopee</strong> menerima pesanan baru &amp; resi seketika, serta <strong>Auto-Sync Heartbeat</strong> memeriksa pembaruan di latar belakang setiap 3 menit. Tombol manual di bawah ini hanya opsi percepatan jika Anda ingin sinkronisasi instan.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 

@@ -254,6 +254,13 @@ export default function PesananPage() {
 
   useEffect(load, [load]);
 
+  // Realtime auto-update whenever background auto-sync or webhook completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   const filteredOrders = useMemo(() => {
     if (!searchQuery.trim()) return orders;
     const q = searchQuery.toLowerCase();

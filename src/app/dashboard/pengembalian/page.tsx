@@ -73,6 +73,13 @@ export default function PengembalianPage() {
 
   useEffect(load, [load]);
 
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   const filteredReturns = useMemo(() => {
     return returns.filter((r) => {
       if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;

@@ -89,6 +89,13 @@ export default function PengirimanPage() {
 
   useEffect(load, [load]);
 
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   const filteredShipments = useMemo(() => {
     return shipments.filter((s) => {
       if (statusFilter !== 'ALL' && s.status !== statusFilter) return false;

@@ -57,10 +57,10 @@ function configFromEnv(): ShopeeConfig {
   if (!partnerId || !partnerKey) {
     throw new Error('SHOPEE_PARTNER_ID dan SHOPEE_PARTNER_KEY wajib disetel sebelum integrasi Shopee digunakan.');
   }
-  const apiHost =
-    (process.env.SHOPEE_SANDBOX === 'true' ? process.env.SHOPEE_SANDBOX_HOST : undefined) ??
-    process.env.SHOPEE_API_HOST ??
-    'https://partner.shopeemobile.com';
+  const isSandbox = process.env.SHOPEE_SANDBOX === 'true';
+  const apiHost = isSandbox
+    ? (process.env.SHOPEE_SANDBOX_HOST || 'https://openplatform.sandbox.test-stable.shopee.sg')
+    : (process.env.SHOPEE_API_HOST || 'https://partner.shopeemobile.com');
   return { partnerId, partnerKey, apiHost };
 }
 

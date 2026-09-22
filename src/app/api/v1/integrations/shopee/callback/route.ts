@@ -24,6 +24,27 @@ export async function GET(request: NextRequest) {
     let localShopId: string;
     let actorId = 'system';
 
+    async function resolveOrCreateDefaultShop(): Promise<{ tenantId: string; shopId: string }> {
+      const existing = await prisma.shop.findFirst({ where: { provider: 'shopee' } });
+      if (existing) return { tenantId: existing.tenantId, shopId: existing.id };
+
+      let tenant = await prisma.tenant.findFirst();
+      if (!tenant) {
+        tenant = await prisma.tenant.create({
+          data: { name: 'Toko Utama', slug: `toko-utama-${Date.now()}` },
+        });
+      }
+
+      const newShop = await prisma.shop.create({
+        data: {
+          tenantId: tenant.id,
+          name: 'Shopee Official Store',
+          provider: 'shopee',
+        },
+      });
+      return { tenantId: tenant.id, shopId: newShop.id };
+    }
+
     if (state) {
       try {
         const decoded = JSON.parse(Buffer.from(state, 'base64url').toString('utf8')) as {
@@ -31,20 +52,26 @@ export async function GET(request: NextRequest) {
           shopId: string;
           userId?: string;
         };
-        tenantId = decoded.tenantId;
-        localShopId = decoded.shopId;
+        // Verify shop actually exists in DB
+        const shopInDb = await prisma.shop.findFirst({ where: { id: decoded.shopId, tenantId: decoded.tenantId } });
+        if (shopInDb) {
+          tenantId = decoded.tenantId;
+          localShopId = decoded.shopId;
+        } else {
+          const resolved = await resolveOrCreateDefaultShop();
+          tenantId = resolved.tenantId;
+          localShopId = resolved.shopId;
+        }
         if (decoded.userId) actorId = decoded.userId;
       } catch {
-        const defaultShop = await prisma.shop.findFirst({ where: { provider: 'shopee' } });
-        if (!defaultShop) throw new Error('Toko Shopee tidak ditemukan di database.');
-        tenantId = defaultShop.tenantId;
-        localShopId = defaultShop.id;
+        const resolved = await resolveOrCreateDefaultShop();
+        tenantId = resolved.tenantId;
+        localShopId = resolved.shopId;
       }
     } else {
-      const defaultShop = await prisma.shop.findFirst({ where: { provider: 'shopee' } });
-      if (!defaultShop) throw new Error('Toko Shopee tidak ditemukan di database.');
-      tenantId = defaultShop.tenantId;
-      localShopId = defaultShop.id;
+      const resolved = await resolveOrCreateDefaultShop();
+      tenantId = resolved.tenantId;
+      localShopId = resolved.shopId;
     }
 
     const adapter = new ShopeeAdapter();

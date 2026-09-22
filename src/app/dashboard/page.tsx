@@ -36,6 +36,13 @@ export default function DashboardPage() {
 
   useEffect(load, [load]);
 
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   if (loading) return <LoadingState message="Memuat metrik operasional..." />;
   if (error) return <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); load(); }} />;
   if (!metrics) return null;

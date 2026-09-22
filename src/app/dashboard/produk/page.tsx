@@ -13,6 +13,10 @@ import {
   AlertCircle,
   X,
   ExternalLink,
+  Image as ImageIcon,
+  DollarSign,
+  Maximize2,
+  Warehouse,
 } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
@@ -56,6 +60,9 @@ export default function ProdukPage() {
   const [variantsModalProduct, setVariantsModalProduct] = useState<Product | null>(null);
   const [deleteProductTarget, setDeleteProductTarget] = useState<Product | null>(null);
 
+  // Warehouses list for initial stock allocation
+  const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([]);
+
   // Forms state
   const [createForm, setCreateForm] = useState({
     name: '',
@@ -65,6 +72,9 @@ export default function ProdukPage() {
     variantName: 'Standar',
     weight: 200,
     barcode: '',
+    imageUrl: '',
+    initialStock: 10,
+    warehouseId: '',
   });
 
   const [editForm, setEditForm] = useState({
@@ -79,9 +89,26 @@ export default function ProdukPage() {
     name: '',
     barcode: '',
     weight: 200,
+    imageUrl: '',
+    initialStock: 0,
+    warehouseId: '',
   });
 
   const [submitting, setSubmitting] = useState(false);
+
+  // Load warehouses on mount
+  useEffect(() => {
+    api<Array<{ id: string; name: string }>>('/api/v1/warehouses')
+      .then((whs) => {
+        setWarehouses(whs);
+        const firstWh = whs[0];
+        if (firstWh) {
+          setCreateForm((prev) => ({ ...prev, warehouseId: firstWh.id }));
+          setNewVariantForm((prev) => ({ ...prev, warehouseId: firstWh.id }));
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   const load = useCallback(() => {
     const q = new URLSearchParams();
@@ -95,6 +122,13 @@ export default function ProdukPage() {
   }, [statusFilter, search]);
 
   useEffect(load, [load]);
+
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
 
   const filteredProducts = useMemo(() => {
     return products.filter((p) => {
@@ -131,11 +165,19 @@ export default function ProdukPage() {
               name: createForm.variantName,
               weight: Number(createForm.weight) || 100,
               barcode: createForm.barcode || undefined,
+              imageUrl: createForm.imageUrl.trim() || undefined,
+              initialStock: Number(createForm.initialStock) || 0,
+              warehouseId: createForm.warehouseId || undefined,
             },
           ],
         },
       });
-      setNotice({ tone: 'success', text: `Produk "${createForm.name}" berhasil dibuat.` });
+      setNotice({
+        tone: 'success',
+        text: `Produk "${createForm.name}" berhasil dibuat${
+          Number(createForm.initialStock) > 0 ? ` beserta stok awal ${createForm.initialStock} pcs di gudang.` : '.'
+        }`,
+      });
       setCreateModalOpen(false);
       setCreateForm({
         name: '',
@@ -145,6 +187,9 @@ export default function ProdukPage() {
         variantName: 'Standar',
         weight: 200,
         barcode: '',
+        imageUrl: '',
+        initialStock: 10,
+        warehouseId: warehouses[0]?.id ?? '',
       });
       load();
     } catch (err) {
@@ -208,14 +253,22 @@ export default function ProdukPage() {
           name: newVariantForm.name,
           weight: Number(newVariantForm.weight) || 100,
           barcode: newVariantForm.barcode || undefined,
+          imageUrl: newVariantForm.imageUrl.trim() || undefined,
         },
       });
       setNotice({
         tone: 'success',
         text: `Varian SKU ${newVariantForm.sku} berhasil ditambahkan.`,
       });
-      setNewVariantForm({ sku: '', name: '', barcode: '', weight: 200 });
-      // Refresh single product
+      setNewVariantForm({
+        sku: '',
+        name: '',
+        barcode: '',
+        weight: 200,
+        imageUrl: '',
+        initialStock: 0,
+        warehouseId: warehouses[0]?.id ?? '',
+      });
       const updated = await api<Product>(`/api/v1/catalog/products/${variantsModalProduct.id}`);
       setVariantsModalProduct(updated);
       load();
@@ -245,7 +298,7 @@ export default function ProdukPage() {
     <div>
       <PageHeader
         title="Katalog Produk & Master SKU"
-        subtitle="Kelola master produk, SKU varian, bobot timbangan, dan informasi barcode untuk sinkronisasi pesanan & stok"
+        subtitle="Kelola master produk, foto barang, SKU varian, bobot timbangan, barcode, dan persediaan awal inventori"
         actions={
           <div style={{ display: 'flex', gap: 8 }}>
             <button
@@ -338,7 +391,8 @@ export default function ProdukPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>Produk</th>
+                <th style={{ width: 64 }}>Foto</th>
+                <th>Nama Produk</th>
                 <th>Kategori</th>
                 <th>Varian & SKU Utama</th>
                 <th>Total Stok Fisik</th>
@@ -351,20 +405,56 @@ export default function ProdukPage() {
               {filteredProducts.map((p) => {
                 const totalStock = p.variants.reduce((acc, v) => acc + (v.stock?.onHand ?? 0), 0);
                 const totalAvailable = p.variants.reduce((acc, v) => acc + (v.stock?.available ?? 0), 0);
+                const primaryVariant = p.variants[0];
+                const mainImage = primaryVariant?.imageUrl;
 
                 return (
                   <tr key={p.id}>
                     <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Package size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
-                          {p.description && (
-                            <div className="small muted" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {p.description}
-                            </div>
-                          )}
-                        </div>
+                      <div
+                        style={{
+                          width: 44,
+                          height: 44,
+                          borderRadius: 8,
+                          overflow: 'hidden',
+                          background: 'var(--subtle)',
+                          border: '1px solid var(--border)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        {mainImage ? (
+                          <img
+                            src={mainImage}
+                            alt={p.name}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            onError={(e) => {
+                              // fallback on image broken
+                              (e.target as HTMLElement).style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <Package size={20} style={{ color: 'var(--primary)', opacity: 0.6 }} />
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
+                        {p.description && (
+                          <div
+                            className="small muted"
+                            style={{
+                              maxWidth: 260,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {p.description}
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td>
@@ -374,7 +464,7 @@ export default function ProdukPage() {
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span className="mono" style={{ fontWeight: 600, fontSize: 12 }}>
-                            {p.variants[0]?.sku ?? '—'}
+                            {primaryVariant?.sku ?? '—'}
                           </span>
                           {p.variants.length > 1 && (
                             <span className="badge badge-neutral" style={{ fontSize: 10 }}>
@@ -382,7 +472,9 @@ export default function ProdukPage() {
                             </span>
                           )}
                         </div>
-                        <div className="small muted">{p.variants[0]?.name}</div>
+                        <div className="small muted">
+                          {primaryVariant?.name} {primaryVariant?.weight ? `• ${primaryVariant.weight}g` : ''}
+                        </div>
                       </div>
                     </td>
                     <td>
@@ -445,7 +537,7 @@ export default function ProdukPage() {
       <Modal
         isOpen={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
-        title="Tambah Produk & SKU Baru"
+        title="Tambah Produk & Master SKU Baru"
       >
         <form onSubmit={handleCreateProduct}>
           <div className="field">
@@ -460,15 +552,32 @@ export default function ProdukPage() {
             />
           </div>
 
-          <div className="field">
-            <label>Kategori (Opsional)</label>
-            <input
-              type="text"
-              className="input"
-              placeholder="Contoh: Pakaian Pria / Aksesoris"
-              value={createForm.category}
-              onChange={(e) => setCreateForm({ ...createForm, category: e.target.value })}
-            />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="field">
+              <label>Kategori (Opsional)</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="Contoh: Pakaian Pria"
+                value={createForm.category}
+                onChange={(e) => setCreateForm({ ...createForm, category: e.target.value })}
+              />
+            </div>
+
+            <div className="field">
+              <label>Gudang Lokasi Stok Awal</label>
+              <select
+                className="input"
+                value={createForm.warehouseId}
+                onChange={(e) => setCreateForm({ ...createForm, warehouseId: e.target.value })}
+              >
+                {warehouses.map((wh) => (
+                  <option key={wh.id} value={wh.id}>
+                    {wh.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="field">
@@ -476,16 +585,61 @@ export default function ProdukPage() {
             <textarea
               className="input"
               rows={2}
-              placeholder="Keterangan singkat produk..."
+              placeholder="Keterangan singkat spesifikasi produk..."
               value={createForm.description}
               onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
             />
           </div>
 
+          {/* Varian Awal & Gambar Card */}
           <div style={{ background: 'var(--subtle)', padding: 14, borderRadius: 8, marginTop: 14, marginBottom: 14 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
               <Layers size={14} style={{ color: 'var(--primary)' }} />
-              Varian Awal (Default SKU)
+              Spesifikasi SKU Varian Awal
+            </div>
+
+            {/* Image URL with live preview */}
+            <div className="field">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ImageIcon size={13} style={{ color: 'var(--primary)' }} />
+                URL Foto Produk (Wajib di Shopee / Opsional Web App)
+              </label>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  className="input grow"
+                  placeholder="https://images.unsplash.com/... atau link gambar JPG/PNG"
+                  value={createForm.imageUrl}
+                  onChange={(e) => setCreateForm({ ...createForm, imageUrl: e.target.value })}
+                />
+                <div
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'var(--surface)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                    flexShrink: 0,
+                  }}
+                >
+                  {createForm.imageUrl.trim() ? (
+                    <img
+                      src={createForm.imageUrl.trim()}
+                      alt="Preview"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none';
+                      }}
+                    />
+                  ) : (
+                    <ImageIcon size={18} className="muted" />
+                  )}
+                </div>
+              </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -507,14 +661,14 @@ export default function ProdukPage() {
                   type="text"
                   className="input"
                   required
-                  placeholder="Contoh: Putih - Ukuran L"
+                  placeholder="Contoh: Putih - L"
                   value={createForm.variantName}
                   onChange={(e) => setCreateForm({ ...createForm, variantName: e.target.value })}
                 />
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginTop: 10 }}>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label>Berat (gram) *</label>
                 <input
@@ -528,7 +682,19 @@ export default function ProdukPage() {
               </div>
 
               <div className="field" style={{ marginBottom: 0 }}>
-                <label>Barcode EAN/UPC (Opsional)</label>
+                <label>Stok Awal Fisik (Pcs)</label>
+                <input
+                  type="number"
+                  className="input"
+                  min={0}
+                  placeholder="10"
+                  value={createForm.initialStock}
+                  onChange={(e) => setCreateForm({ ...createForm, initialStock: Number(e.target.value) })}
+                />
+              </div>
+
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Barcode EAN (Opsional)</label>
                 <input
                   type="text"
                   className="input mono"
@@ -541,8 +707,12 @@ export default function ProdukPage() {
           </div>
 
           <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
-            <button type="submit" className="btn btn-primary grow" disabled={submitting || !createForm.name || !createForm.sku}>
-              {submitting ? 'Menyimpan...' : 'Simpan Produk'}
+            <button
+              type="submit"
+              className="btn btn-primary grow"
+              disabled={submitting || !createForm.name || !createForm.sku}
+            >
+              {submitting ? 'Menyimpan...' : 'Simpan Produk & Alokasi Stok'}
             </button>
             <button type="button" className="btn btn-secondary" onClick={() => setCreateModalOpen(false)}>
               Batal
@@ -586,7 +756,7 @@ export default function ProdukPage() {
               value={editForm.status}
               onChange={(e) => setEditForm({ ...editForm, status: e.target.value as any })}
             >
-              <option value="ACTIVE">ACTIVE (Aktif)</option>
+              <option value="ACTIVE">ACTIVE (Aktif di Katalog)</option>
               <option value="INACTIVE">INACTIVE (Nonaktif)</option>
               <option value="ARCHIVED">ARCHIVED (Diarsipkan)</option>
             </select>
@@ -630,21 +800,47 @@ export default function ProdukPage() {
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
-                    padding: '8px 12px',
+                    padding: '10px 12px',
                     background: 'var(--subtle)',
-                    borderRadius: 6,
+                    borderRadius: 8,
                     border: '1px solid var(--border)',
                   }}
                 >
-                  <div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <span className="mono" style={{ fontWeight: 700, fontSize: 13 }}>
-                        {v.sku}
-                      </span>
-                      <StatusBadge status={v.status} />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div
+                      style={{
+                        width: 38,
+                        height: 38,
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {v.imageUrl ? (
+                        <img
+                          src={v.imageUrl}
+                          alt={v.name}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      ) : (
+                        <Package size={16} className="muted" />
+                      )}
                     </div>
-                    <div className="small muted">
-                      {v.name} {v.weight ? `• ${v.weight}g` : ''} {v.barcode ? `• Barcode: ${v.barcode}` : ''}
+                    <div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <span className="mono" style={{ fontWeight: 700, fontSize: 13 }}>
+                          {v.sku}
+                        </span>
+                        <StatusBadge status={v.status} />
+                      </div>
+                      <div className="small muted">
+                        {v.name} {v.weight ? `• ${v.weight}g` : ''} {v.barcode ? `• Barcode: ${v.barcode}` : ''}
+                      </div>
                     </div>
                   </div>
 
@@ -673,7 +869,16 @@ export default function ProdukPage() {
               marginTop: 16,
             }}
           >
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div
+              style={{
+                fontWeight: 600,
+                fontSize: 13,
+                marginBottom: 10,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
               <Plus size={14} style={{ color: 'var(--primary)' }} />
               Tambah Varian Baru
             </div>
@@ -687,7 +892,9 @@ export default function ProdukPage() {
                   required
                   placeholder="Contoh: KMJ-HITAM-XL"
                   value={newVariantForm.sku}
-                  onChange={(e) => setNewVariantForm({ ...newVariantForm, sku: e.target.value.toUpperCase() })}
+                  onChange={(e) =>
+                    setNewVariantForm({ ...newVariantForm, sku: e.target.value.toUpperCase() })
+                  }
                 />
               </div>
 
@@ -704,6 +911,17 @@ export default function ProdukPage() {
               </div>
             </div>
 
+            <div className="field">
+              <label>URL Foto Varian (Opsional)</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="https://... link gambar foto varian"
+                value={newVariantForm.imageUrl}
+                onChange={(e) => setNewVariantForm({ ...newVariantForm, imageUrl: e.target.value })}
+              />
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div className="field">
                 <label>Berat (gram) *</label>
@@ -713,7 +931,9 @@ export default function ProdukPage() {
                   required
                   min={1}
                   value={newVariantForm.weight}
-                  onChange={(e) => setNewVariantForm({ ...newVariantForm, weight: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setNewVariantForm({ ...newVariantForm, weight: Number(e.target.value) })
+                  }
                 />
               </div>
 

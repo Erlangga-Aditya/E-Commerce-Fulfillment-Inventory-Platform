@@ -24,6 +24,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { AutoSyncStatus } from '@/components/AutoSyncStatus';
 
 const NAV_ITEMS = [
   { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -194,11 +195,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          <div className="topbar-right">
-            <span className="badge badge-success" style={{ display: 'inline-flex', gap: 4 }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
-              Shopee Terhubung
-            </span>
+          <div className="topbar-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AutoSyncStatus />
             {me?.role ? (
               <span className="badge badge-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 <UserCheck size={12} aria-hidden />

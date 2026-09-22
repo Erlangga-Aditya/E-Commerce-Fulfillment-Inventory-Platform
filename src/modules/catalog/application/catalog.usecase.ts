@@ -13,7 +13,9 @@ export const CreateVariantSchema = z.object({
   barcode: z.string().max(100).optional(),
   name: z.string().min(1).max(200),
   weight: z.number().positive().optional(),
-  imageUrl: z.string().url().optional().or(z.literal('')),
+  imageUrl: z.string().optional().or(z.literal('')),
+  initialStock: z.number().int().min(0).optional(),
+  warehouseId: z.string().optional(),
 });
 
 export const CreateProductSchema = z.object({
@@ -34,7 +36,7 @@ export const UpdateVariantSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   barcode: z.string().max(100).optional(),
   weight: z.number().positive().optional(),
-  imageUrl: z.string().url().optional().or(z.literal('')),
+  imageUrl: z.string().optional().or(z.literal('')),
   status: z.enum(['ACTIVE', 'INACTIVE', 'ARCHIVED']).optional(),
 });
 
@@ -84,6 +86,46 @@ export async function createProduct(
     },
     include: { variants: true },
   });
+
+  // Allocate initial stock to warehouse if specified
+  for (let i = 0; i < input.variants.length; i++) {
+    const vInput = input.variants[i];
+    const createdVariant = product.variants[i];
+    if (vInput && createdVariant && vInput.initialStock && vInput.initialStock > 0) {
+      let targetWarehouseId = vInput.warehouseId;
+      if (!targetWarehouseId) {
+        const wh = await prisma.warehouse.findFirst({ where: { tenantId, status: 'ACTIVE' } });
+        targetWarehouseId = wh?.id;
+      }
+      if (targetWarehouseId) {
+        await prisma.inventoryBalance.upsert({
+          where: { warehouseId_variantId: { warehouseId: targetWarehouseId, variantId: createdVariant.id } },
+          create: {
+            warehouseId: targetWarehouseId,
+            variantId: createdVariant.id,
+            onHand: vInput.initialStock,
+            version: 1,
+          },
+          update: { onHand: { increment: vInput.initialStock } },
+        });
+
+        // Resolve valid actor id for inventory movement foreign key
+        const user = await prisma.user.findUnique({ where: { id: actorId }, select: { id: true } });
+        await prisma.inventoryMovement.create({
+          data: {
+            tenantId,
+            warehouseId: targetWarehouseId,
+            variantId: createdVariant.id,
+            movementType: 'RECEIVE',
+            quantityDelta: vInput.initialStock,
+            referenceType: 'initial_stock',
+            reason: 'Penerimaan stok awal produk baru',
+            actorId: user ? user.id : null,
+          },
+        });
+      }
+    }
+  }
 
   await auditLog({
     tenantId,

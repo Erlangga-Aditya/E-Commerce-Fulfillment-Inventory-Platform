@@ -57,6 +57,13 @@ export default function FulfillmentPage() {
 
   useEffect(load, [load]);
 
+  // Realtime auto-update whenever background auto-sync completes
+  useEffect(() => {
+    const handleSync = () => load();
+    window.addEventListener('shopee:synced', handleSync);
+    return () => window.removeEventListener('shopee:synced', handleSync);
+  }, [load]);
+
   async function act(id: string, endpoint: string, msg: string, body?: unknown) {
     setNotice(null);
     setActingId(id);
