@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
       throw new ValidationError('Kredensial partner Shopee belum disetel di .env.');
     }
     const adapter = new ShopeeAdapter();
-    const redirectUri = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/v1/integrations/shopee/callback`;
+    const redirectUri = process.env.SHOPEE_REDIRECT_URL || `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/v1/integrations/shopee/callback`;
     const state = Buffer.from(JSON.stringify({ tenantId: ctx.tenantId, shopId })).toString('base64url');
     const url = adapter.buildAuthUrl(redirectUri, state);
     return successResponse({ url }, { requestId });

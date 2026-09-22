@@ -7,17 +7,31 @@ import { processOrderForFulfillment } from '@/modules/fulfillment/application/fu
 import { NotFoundError, ExternalIntegrationError } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
 import { logger } from '@/shared/observability/logger';
+import type { ShopCredentials, ArrangeShipmentInput } from '../domain/marketplace.adapter';
 
 const shopee = new ShopeeAdapter();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal types
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface StoredCredentials {
   shopId: string;
   accessToken: string;
   refreshToken: string;
-  tokenExpiresAt: number; // epoch ms
+  /** Epoch milliseconds when access_token expires. */
+  tokenExpiresAt: number;
   mainAccountId?: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Load shop + integration connection from DB.
+ * Throws NotFoundError when shop or credentials are missing.
+ */
 async function loadConnection(tenantId: string, shopId: string) {
   const shop = await prisma.shop.findFirst({ where: { id: shopId, tenantId } });
   if (!shop) throw new NotFoundError('Toko', shopId);
@@ -26,38 +40,73 @@ async function loadConnection(tenantId: string, shopId: string) {
     where: { shopId, provider: 'shopee' },
   });
   if (!conn?.encryptedCredentials) {
-    throw new ExternalIntegrationError('shopee', 'Koneksi Shopee belum dikonfigurasi. Hubungkan toko terlebih dahulu.');
+    throw new ExternalIntegrationError(
+      'shopee',
+      'Koneksi Shopee belum dikonfigurasi. Hubungkan toko terlebih dahulu melalui menu Integrasi.',
+    );
   }
   const creds = JSON.parse(decryptSecret(conn.encryptedCredentials)) as StoredCredentials;
   return { shop, conn, creds };
 }
 
-/** Refresh access_token if expired/near-expiry; persist new tokens (encrypted). */
+/**
+ * Build ShopCredentials for adapter calls from stored creds + env.
+ */
+function buildShopCredentials(creds: StoredCredentials): ShopCredentials {
+  return {
+    shopId: creds.shopId,
+    accessToken: creds.accessToken,
+    partnerId: process.env.SHOPEE_PARTNER_ID ?? '',
+    partnerKey: process.env.SHOPEE_PARTNER_KEY ?? '',
+  };
+}
+
+/**
+ * Refresh access_token if expired or within 5 minutes of expiry.
+ * Persists refreshed credentials (encrypted) back to DB.
+ */
 async function ensureFreshToken(connId: string, creds: StoredCredentials): Promise<StoredCredentials> {
   const now = Date.now();
-  if (creds.tokenExpiresAt - now > 5 * 60 * 1000) return creds; // still valid >5min
+  if (creds.tokenExpiresAt - now > 5 * 60 * 1000) return creds; // still valid
 
+  logger.info('Shopee access_token mendekati expiry, refresh...', { shopId: creds.shopId });
   const refreshed = await shopee.refreshAccessToken(creds.refreshToken, creds.shopId);
+
+  if (refreshed.error && refreshed.error !== '') {
+    throw new ExternalIntegrationError(
+      'shopee',
+      `Gagal refresh token: [${refreshed.error}] ${refreshed.message ?? ''}. Otorisasi ulang diperlukan.`,
+    );
+  }
+
   const next: StoredCredentials = {
     ...creds,
     accessToken: refreshed.access_token,
-    refreshToken: refreshed.refresh_token,
+    refreshToken: refreshed.refresh_token, // single-use; always update
     tokenExpiresAt: now + refreshed.expire_in * 1000,
   };
   await prisma.integrationConnection.update({
     where: { id: connId },
-    data: { encryptedCredentials: encryptSecret(JSON.stringify(next)), status: 'ACTIVE', lastSyncAt: new Date() },
+    data: {
+      encryptedCredentials: encryptSecret(JSON.stringify(next)),
+      status: 'ACTIVE',
+      lastSyncAt: new Date(),
+    },
   });
-  logger.info('Shopee token refreshed', { shopId: creds.shopId });
+  logger.info('Shopee token refreshed berhasil', { shopId: creds.shopId });
   return next;
 }
 
-/** Map Shopee order_status → internal OrderStatus (provider-specific). */
-function mapShopeeStatusToInternal(status: string): 'NEW' | 'CONFIRMED' | 'CANCELLED' | 'COMPLETED' {
+/**
+ * Map Shopee order_status → internal OrderStatus enum.
+ * Source: 20-SHOPEE-API-REFERENCE.md §5.1 (verified).
+ */
+export function mapShopeeStatusToInternal(status: string): 'NEW' | 'CONFIRMED' | 'CANCELLED' | 'COMPLETED' {
   switch (status) {
     case 'UNPAID':
     case 'PENDING':
     case 'IN_CANCEL':
+    case 'TO_RETURN':
       return 'NEW';
     case 'READY_TO_SHIP':
     case 'PROCESSED':
@@ -74,47 +123,143 @@ function mapShopeeStatusToInternal(status: string): 'NEW' | 'CONFIRMED' | 'CANCE
   }
 }
 
-/** Resolve or create a local variant from a marketplace SKU. */
-async function resolveVariant(tenantId: string, sku: string) {
-  const variant = await prisma.productVariant.findFirst({
-    where: { product: { tenantId }, sku },
-  });
-  return variant;
+/**
+ * Map Shopee return status → internal ReturnStatus.
+ */
+export function mapReturnStatus(
+  status: string,
+): 'REQUESTED' | 'IN_TRANSIT' | 'RECEIVED' | 'INSPECTION' | 'RESTOCKED' | 'DAMAGED' | 'REJECTED' | 'CLOSED' {
+  switch (status.toUpperCase()) {
+    case 'REQUESTED':
+    case 'PROCESSING':
+      return 'REQUESTED';
+    case 'ACCEPTED':
+      return 'IN_TRANSIT';
+    case 'RECEIVED':
+    case 'TO_RECEIVE':
+      return 'RECEIVED';
+    case 'COMPLETED':
+      return 'CLOSED';
+    case 'REJECTED':
+      return 'REJECTED';
+    default:
+      return 'REQUESTED';
+  }
 }
 
+/**
+ * Resolve a local ProductVariant from a Shopee order item.
+ * Strategy (in order):
+ *  1. Lookup via ExternalProductMapping (most reliable after product sync)
+ *  2. Fallback: match by SKU across the tenant's products
+ *  3. Returns null if not found (we log & skip the item but NOT the whole order)
+ */
+async function resolveVariant(
+  tenantId: string,
+  shopId: string,
+  externalVariantId: string,
+  sku: string,
+  externalProductId?: string,
+) {
+  // Strategy 1: ExternalProductMapping by externalVariantId
+  if (externalVariantId && externalVariantId !== '0') {
+    const mapping = await prisma.externalProductMapping.findFirst({
+      where: { shopId, externalVariantId },
+      include: { variant: true },
+    });
+    if (mapping?.variant) return mapping.variant;
+  }
+
+  // Strategy 2: ExternalProductMapping by externalProductId (for single-variant items)
+  if (externalProductId) {
+    const mapping = await prisma.externalProductMapping.findFirst({
+      where: { shopId, externalProductId },
+      include: { variant: true },
+    });
+    if (mapping?.variant) return mapping.variant;
+  }
+
+  // Strategy 3: SKU fallback across tenant
+  if (sku) {
+    const variant = await prisma.productVariant.findFirst({
+      where: { product: { tenantId }, sku },
+    });
+    if (variant) return variant;
+  }
+
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sync orders from Shopee → local DB.
+ * - Uses cursor-based pagination (7-day default window)
+ * - Maps items via ExternalProductMapping first, SKU as fallback
+ * - Skips unmapped items (not orders) to avoid data loss
+ * - Auto-creates Shipment when order has a tracking number
+ * - Auto-processes CONFIRMED orders (reserve stock + create fulfillment)
+ */
 export async function triggerOrderSync(tenantId: string, shopId: string, actorId: string) {
   const { conn, creds } = await loadConnection(tenantId, shopId);
   const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
 
   const syncRun = await prisma.syncRun.create({
     data: { tenantId, shopId, operation: 'import_orders', status: 'RUNNING' },
   });
 
-  const warehouse = await prisma.warehouse.findFirst({ where: { tenantId }, orderBy: { createdAt: 'asc' } });
+  const warehouse = await prisma.warehouse.findFirst({
+    where: { tenantId, status: 'ACTIVE' },
+    orderBy: { createdAt: 'asc' },
+  });
 
   try {
-    const credentials = {
-      shopId: fresh.shopId,
-      accessToken: fresh.accessToken,
-      partnerId: process.env.SHOPEE_PARTNER_ID ?? '',
-      partnerKey: process.env.SHOPEE_PARTNER_KEY ?? '',
-    };
-
     const orders = await shopee.getOrders(credentials, {});
+    let recordsRead = orders.length;
     let recordsWritten = 0;
+    let skippedOrders = 0;
+
+    logger.info(`Shopee sync: ${orders.length} pesanan diterima dari API`, { shopId: fresh.shopId });
 
     for (const mOrder of orders) {
-      // Map items to local variants by SKU.
+      // Build local item list (skip unmapped items, but not the whole order)
       const items: Array<{ variantId: string; quantity: number; unitPrice?: number }> = [];
+      const unmappedSkus: string[] = [];
+
       for (const mi of mOrder.items) {
-        const variant = await resolveVariant(tenantId, mi.sku);
+        const variant = await resolveVariant(
+          tenantId,
+          shopId,
+          mi.externalVariantId,
+          mi.sku,
+          mi.externalItemId,
+        );
         if (variant) {
           items.push({ variantId: variant.id, quantity: mi.quantity, unitPrice: mi.unitPrice });
+        } else {
+          unmappedSkus.push(mi.sku || mi.externalVariantId);
         }
       }
+
       if (items.length === 0) {
-        logger.warn('Order tanpa varian yang cocok, dilewati', { externalOrderId: mOrder.externalOrderId });
+        // All items unmapped → skip this order but log clearly
+        logger.warn(
+          `Order ${mOrder.externalOrderId} dilewati: semua item tidak ter-mapping (SKU: ${unmappedSkus.join(', ')}). ` +
+            `Lakukan sinkronisasi produk terlebih dahulu.`,
+          { externalOrderId: mOrder.externalOrderId },
+        );
+        skippedOrders++;
         continue;
+      }
+
+      if (unmappedSkus.length > 0) {
+        logger.warn(
+          `Order ${mOrder.externalOrderId}: ${unmappedSkus.length} item tidak ter-mapping (${unmappedSkus.join(', ')}), ` +
+            `diimpor dengan ${items.length} item yang dikenali.`,
+        );
       }
 
       const result = await importOrder(tenantId, {
@@ -129,38 +274,646 @@ export async function triggerOrderSync(tenantId: string, shopId: string, actorId
         items,
       });
 
-      // Auto-process CONFIRMED orders (reserve + create fulfillment) when a warehouse exists.
+      // Auto-create/update Shipment if order has tracking info
+      if (mOrder.trackingNumber) {
+        await upsertShipment(tenantId, result.orderId, mOrder.trackingNumber, mOrder.carrier, mOrder.rawStatus);
+      }
+
+      // Auto-process newly imported CONFIRMED orders
       if (result.created && warehouse && mapShopeeStatusToInternal(mOrder.rawStatus) === 'CONFIRMED') {
         try {
           await processOrderForFulfillment(tenantId, result.orderId, warehouse.id, actorId);
         } catch (err) {
-          logger.warn('Gagal memproses fulfillment otomatis', { orderId: result.orderId, error: (err as Error).message });
+          logger.warn('Gagal memproses fulfillment otomatis', {
+            orderId: result.orderId,
+            error: (err as Error).message,
+          });
         }
       }
+
       if (result.created) recordsWritten++;
     }
 
     const completed = await prisma.syncRun.update({
       where: { id: syncRun.id },
-      data: { status: 'COMPLETED', recordsRead: orders.length, recordsWritten, finishedAt: new Date() },
+      data: { status: 'COMPLETED', recordsRead, recordsWritten, finishedAt: new Date() },
     });
 
     await auditLog({
-      tenantId, actorId, action: 'sync_orders_complete', entityType: 'Shop', entityId: shopId,
-      metadata: { recordsRead: orders.length, recordsWritten },
+      tenantId,
+      actorId,
+      action: 'sync_orders_complete',
+      entityType: 'Shop',
+      entityId: shopId,
+      metadata: { recordsRead, recordsWritten, skippedOrders },
     });
 
+    logger.info(`Shopee sync selesai: ${recordsWritten} baru, ${skippedOrders} dilewati`, { shopId: fresh.shopId });
     return completed;
   } catch (err) {
-    const msg = (err as Error).message || 'Sync error';
-    await prisma.syncRun.update({ where: { id: syncRun.id }, data: { status: 'FAILED', errorMessage: msg, finishedAt: new Date() } });
+    const msg = (err as Error).message || 'Sync error tidak diketahui';
+    await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: { status: 'FAILED', errorMessage: msg, finishedAt: new Date() },
+    });
     throw new ExternalIntegrationError('shopee', msg);
   }
 }
 
 /**
- * Process a verified Shopee push (webhook). Idempotent: the unique constraint on
- * (shopId, provider, externalEventId) is enforced atomically by create-then-catch.
+ * Sync products & variants from Shopee → local DB.
+ * - Upserts Product + ProductVariant records
+ * - Creates ExternalProductMapping linking externalVariantId → local variantId
+ * - Initializes InventoryBalance (0) for new variants in the default warehouse
+ * This is the REQUIRED first step before order sync can work.
+ */
+export async function triggerProductSync(tenantId: string, shopId: string, actorId: string) {
+  const { conn, creds, shop } = await loadConnection(tenantId, shopId);
+  const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
+
+  const syncRun = await prisma.syncRun.create({
+    data: { tenantId, shopId, operation: 'sync_products', status: 'RUNNING' },
+  });
+
+  const warehouse = await prisma.warehouse.findFirst({
+    where: { tenantId, status: 'ACTIVE' },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  try {
+    const products = await shopee.getProducts(credentials);
+    let productsWritten = 0;
+    let variantsWritten = 0;
+
+    logger.info(`Shopee sync produk: ${products.length} produk dari API`, { shopId: fresh.shopId });
+
+    for (const mp of products) {
+      // Upsert Product (match by externalProductId stored via mapping, or existing SKU, or create new)
+      let localProduct = await findLocalProduct(tenantId, shopId, mp.externalProductId);
+
+      if (!localProduct && mp.sku) {
+        const existingVariant = await prisma.productVariant.findFirst({
+          where: { product: { tenantId }, sku: mp.sku },
+          include: { product: true },
+        });
+        if (existingVariant?.product) {
+          localProduct = existingVariant.product;
+        }
+      }
+
+      if (!localProduct) {
+        localProduct = await prisma.product.create({
+          data: {
+            tenantId,
+            name: mp.name,
+            description: null,
+            category: null,
+            status: 'ACTIVE',
+          },
+        });
+        productsWritten++;
+      } else {
+        // Update name if changed
+        await prisma.product.update({
+          where: { id: localProduct.id },
+          data: { name: mp.name, updatedAt: new Date() },
+        });
+      }
+
+      // Upsert variants
+      for (const mv of mp.variants) {
+        if (!mv.externalVariantId) continue;
+
+        // Check existing mapping
+        const existingMapping = await prisma.externalProductMapping.findFirst({
+          where: { shopId, externalVariantId: mv.externalVariantId },
+          include: { variant: true },
+        });
+
+        let localVariant = existingMapping?.variant ?? null;
+
+        if (!localVariant) {
+          // Check by SKU within the product first
+          const bySku = mv.sku
+            ? await prisma.productVariant.findFirst({
+                where: { productId: localProduct.id, sku: mv.sku },
+              })
+            : null;
+
+          if (bySku) {
+            localVariant = bySku;
+          } else {
+            // Create new variant
+            const sku = mv.sku || `${mp.externalProductId}-${mv.externalVariantId}`;
+            localVariant = await prisma.productVariant.create({
+              data: {
+                productId: localProduct.id,
+                sku,
+                name: mv.name || mp.name,
+                imageUrl: mp.imageUrl,
+                status: 'ACTIVE',
+              },
+            });
+            variantsWritten++;
+          }
+        } else {
+          // Update variant name and imageUrl if changed
+          await prisma.productVariant.update({
+            where: { id: localVariant.id },
+            data: {
+              name: mv.name || mp.name,
+              ...(mp.imageUrl && !localVariant.imageUrl ? { imageUrl: mp.imageUrl } : {}),
+              updatedAt: new Date(),
+            },
+          });
+        }
+
+        // Upsert ExternalProductMapping
+        await prisma.externalProductMapping.upsert({
+          where: { shopId_externalVariantId: { shopId, externalVariantId: mv.externalVariantId } },
+          create: {
+            shopId,
+            variantId: localVariant.id,
+            externalProductId: mp.externalProductId,
+            externalVariantId: mv.externalVariantId,
+          },
+          update: {
+            variantId: localVariant.id,
+            externalProductId: mp.externalProductId,
+          },
+        });
+
+        // Initialize InventoryBalance for new variant (stock = Shopee stock or 0)
+        if (warehouse) {
+          const stockQty = mv.stock ?? 0;
+          await prisma.inventoryBalance.upsert({
+            where: { warehouseId_variantId: { warehouseId: warehouse.id, variantId: localVariant.id } },
+            create: {
+              warehouseId: warehouse.id,
+              variantId: localVariant.id,
+              onHand: stockQty,
+              reserved: 0,
+              blocked: 0,
+            },
+            update: {
+              onHand: stockQty, // sync with Shopee stock
+            },
+          });
+        }
+      }
+    }
+
+    const completed = await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: {
+        status: 'COMPLETED',
+        recordsRead: products.length,
+        recordsWritten: productsWritten + variantsWritten,
+        finishedAt: new Date(),
+      },
+    });
+
+    await auditLog({
+      tenantId,
+      actorId,
+      action: 'sync_products_complete',
+      entityType: 'Shop',
+      entityId: shopId,
+      metadata: { productsFromShopee: products.length, productsWritten, variantsWritten },
+    });
+
+    logger.info(`Shopee sync produk selesai: ${productsWritten} produk baru, ${variantsWritten} varian baru`, {
+      shopId: shop.externalShopId,
+    });
+    return completed;
+  } catch (err) {
+    const msg = (err as Error).message || 'Sync produk error';
+    await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: { status: 'FAILED', errorMessage: msg, finishedAt: new Date() },
+    });
+    throw new ExternalIntegrationError('shopee', msg);
+  }
+}
+
+/**
+ * Find local product via ExternalProductMapping (any variant of this product).
+ */
+async function findLocalProduct(tenantId: string, shopId: string, externalProductId: string) {
+  const mapping = await prisma.externalProductMapping.findFirst({
+    where: { shopId, externalProductId },
+    include: { variant: { include: { product: true } } },
+  });
+  if (mapping?.variant?.product?.tenantId === tenantId) {
+    return mapping.variant.product;
+  }
+  return null;
+}
+
+/**
+ * Sync returns from Shopee → local DB.
+ * Maps Shopee return_sn → local Return record, linked to the local Order.
+ */
+export async function triggerReturnSync(tenantId: string, shopId: string, actorId: string) {
+  const { conn, creds } = await loadConnection(tenantId, shopId);
+  const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
+
+  const syncRun = await prisma.syncRun.create({
+    data: { tenantId, shopId, operation: 'sync_returns', status: 'RUNNING' },
+  });
+
+  try {
+    const returns = await shopee.getReturns(credentials);
+    let recordsWritten = 0;
+
+    for (const mr of returns) {
+      // Find local order
+      const order = await prisma.order.findUnique({
+        where: { shopId_externalOrderId: { shopId, externalOrderId: mr.externalOrderId } },
+      });
+      if (!order) {
+        logger.warn(`Return ${mr.externalReturnId}: order ${mr.externalOrderId} tidak ditemukan di DB lokal`);
+        continue;
+      }
+
+      // Upsert Return
+      const existing = await prisma.return.findFirst({
+        where: { orderId: order.id, externalReturnId: mr.externalReturnId },
+      });
+
+      const status = mapReturnStatus(mr.status);
+
+      if (!existing) {
+        // Build return items (only those with resolvable variants)
+        const returnItems: Array<{ variantId: string; quantity: number }> = [];
+        for (const ri of mr.items) {
+          const variant = await resolveVariant(
+            tenantId,
+            shopId,
+            ri.externalVariantId,
+            ri.sku,
+            ri.externalItemId,
+          );
+          if (variant) {
+            returnItems.push({ variantId: variant.id, quantity: ri.quantity });
+          }
+        }
+
+        if (returnItems.length > 0) {
+          await prisma.return.create({
+            data: {
+              orderId: order.id,
+              externalReturnId: mr.externalReturnId,
+              status,
+              reason: mr.reason,
+              items: { create: returnItems },
+            },
+          });
+          recordsWritten++;
+        }
+      } else if (existing.status !== status) {
+        await prisma.return.update({
+          where: { id: existing.id },
+          data: { status },
+        });
+      }
+    }
+
+    const completed = await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: {
+        status: 'COMPLETED',
+        recordsRead: returns.length,
+        recordsWritten,
+        finishedAt: new Date(),
+      },
+    });
+
+    await auditLog({
+      tenantId,
+      actorId,
+      action: 'sync_returns_complete',
+      entityType: 'Shop',
+      entityId: shopId,
+      metadata: { returnsFromShopee: returns.length, recordsWritten },
+    });
+
+    return completed;
+  } catch (err) {
+    const msg = (err as Error).message || 'Sync return error';
+    await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: { status: 'FAILED', errorMessage: msg, finishedAt: new Date() },
+    });
+    throw new ExternalIntegrationError('shopee', msg);
+  }
+}
+
+/**
+ * Sync tracking information for all active shipments AND active orders without shipment yet.
+ * - For orders with tracking_number in Shopee (SHIPPED/TO_CONFIRM_RECEIVE) but no local Shipment,
+ *   auto-creates Shipment + ShipmentEvents.
+ * - For orders with existing Shipment not yet DELIVERED/FAILED, updates status and events.
+ */
+export async function triggerTrackingSync(tenantId: string, shopId: string, actorId: string) {
+  const { conn, creds, shop } = await loadConnection(tenantId, shopId);
+  const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
+
+  const syncRun = await prisma.syncRun.create({
+    data: { tenantId, shopId, operation: 'sync_tracking', status: 'RUNNING' },
+  });
+
+  try {
+    let recordsWritten = 0;
+
+    // ── 1. Active shipments that need status update ──────────────────────────
+    const activeShipments = await prisma.shipment.findMany({
+      where: {
+        order: { shopId, tenantId },
+        status: { notIn: ['DELIVERED', 'FAILED', 'RETURNED'] },
+      },
+      include: { order: { select: { externalOrderId: true, status: true } } },
+      take: 200,
+    });
+
+    for (const shipment of activeShipments) {
+      const orderSn = shipment.order.externalOrderId;
+      const tracking = await shopee.getTrackingInfo(credentials, orderSn);
+      if (!tracking) continue;
+
+      const newStatus = mapLogisticsStatus(tracking.status);
+      await prisma.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          awb: tracking.awb && tracking.awb !== orderSn ? tracking.awb : (shipment.awb ?? undefined),
+          carrier: tracking.carrier || shipment.carrier,
+          status: newStatus,
+          ...(newStatus === 'DELIVERED' && !shipment.deliveredAt ? { deliveredAt: new Date() } : {}),
+          ...(newStatus !== 'PENDING' && newStatus !== 'READY_TO_SHIP' && !shipment.shippedAt ? { shippedAt: new Date() } : {}),
+        },
+      });
+
+      // Upsert tracking events (use update_time as surrogate key)
+      for (const ev of tracking.events) {
+        if (!ev.externalEventId) continue;
+        await prisma.shipmentEvent.upsert({
+          where: { shipmentId_externalEventId: { shipmentId: shipment.id, externalEventId: ev.externalEventId } },
+          create: {
+            shipmentId: shipment.id,
+            externalEventId: ev.externalEventId,
+            status: ev.status,
+            description: ev.description,
+            occurredAt: ev.occurredAt,
+          },
+          update: { status: ev.status, description: ev.description },
+        });
+      }
+      recordsWritten++;
+    }
+
+    // ── 2. CONFIRMED orders without local Shipment — check if Shopee has AWB ─
+    const ordersWithoutShipment = await prisma.order.findMany({
+      where: {
+        shopId,
+        tenantId,
+        status: 'CONFIRMED',
+        shipments: { none: {} },
+      },
+      select: { id: true, externalOrderId: true },
+      take: 100,
+    });
+
+    for (const order of ordersWithoutShipment) {
+      const awb = await shopee.getTrackingNumber(credentials, order.externalOrderId);
+      if (!awb) continue; // no AWB yet from Shopee
+
+      const tracking = await shopee.getTrackingInfo(credentials, order.externalOrderId);
+      const rawStatus = tracking?.status ?? 'LOGISTICS_REQUEST_CREATED';
+      await upsertShipment(tenantId, order.id, awb, tracking?.carrier ?? null, rawStatus);
+
+      if (tracking) {
+        const newShipment = await prisma.shipment.findFirst({ where: { orderId: order.id } });
+        if (newShipment) {
+          for (const ev of tracking.events) {
+            if (!ev.externalEventId) continue;
+            await prisma.shipmentEvent.upsert({
+              where: { shipmentId_externalEventId: { shipmentId: newShipment.id, externalEventId: ev.externalEventId } },
+              create: {
+                shipmentId: newShipment.id,
+                externalEventId: ev.externalEventId,
+                status: ev.status,
+                description: ev.description,
+                occurredAt: ev.occurredAt,
+              },
+              update: { status: ev.status, description: ev.description },
+            });
+          }
+        }
+      }
+      recordsWritten++;
+      logger.info(`Shipment auto-created via tracking sync: order ${order.externalOrderId}, AWB ${awb}`);
+    }
+
+    const completed = await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: {
+        status: 'COMPLETED',
+        recordsRead: activeShipments.length + ordersWithoutShipment.length,
+        recordsWritten,
+        finishedAt: new Date(),
+      },
+    });
+
+    await auditLog({
+      tenantId,
+      actorId,
+      action: 'sync_tracking_complete',
+      entityType: 'Shop',
+      entityId: shopId,
+      metadata: {
+        shipmentsChecked: activeShipments.length,
+        ordersWithoutShipment: ordersWithoutShipment.length,
+        updated: recordsWritten,
+      },
+    });
+
+    return completed;
+  } catch (err) {
+    const msg = (err as Error).message || 'Sync tracking error';
+    await prisma.syncRun.update({
+      where: { id: syncRun.id },
+      data: { status: 'FAILED', errorMessage: msg, finishedAt: new Date() },
+    });
+    throw new ExternalIntegrationError('shopee', msg);
+  }
+}
+
+/**
+ * Force-refresh the Shopee access token immediately.
+ * Useful for UI-triggered refresh and webhook expiry alerts.
+ */
+export async function forceRefreshToken(tenantId: string, shopId: string) {
+  const { conn, creds } = await loadConnection(tenantId, shopId);
+  // Force expiry so ensureFreshToken always refreshes
+  const expiredCreds: StoredCredentials = { ...creds, tokenExpiresAt: 0 };
+  const refreshed = await ensureFreshToken(conn.id, expiredCreds);
+  return {
+    refreshed: true,
+    tokenExpiresAt: new Date(refreshed.tokenExpiresAt).toISOString(),
+    expiresInMinutes: Math.floor((refreshed.tokenExpiresAt - Date.now()) / 60000),
+  };
+}
+
+/**
+ * Sinkronisasi penuh — jalankan semua operasi secara berurutan:
+ * 1. Sinkronkan Produk (wajib pertama, agar mapping SKU terbentuk)
+ * 2. Tarik Pesanan (auto-process CONFIRMED orders)
+ * 3. Update Tracking (deteksi AWB baru + update status pengiriman)
+ * 4. Sinkronkan Return
+ *
+ * Idempoten — aman untuk dipanggil berkali-kali.
+ * Non-blocking per tahap: jika satu tahap gagal, tahap berikutnya tetap dijalankan.
+ */
+export async function triggerFullSync(tenantId: string, shopId: string, actorId: string) {
+  logger.info('triggerFullSync dimulai', { tenantId, shopId });
+
+  const results: Record<string, { status: string; error?: string; recordsWritten?: number }> = {};
+
+  // Step 1: Produk
+  try {
+    const r = await triggerProductSync(tenantId, shopId, actorId);
+    results.products = { status: 'COMPLETED', recordsWritten: r.recordsWritten };
+  } catch (err) {
+    results.products = { status: 'FAILED', error: (err as Error).message };
+    logger.warn('triggerFullSync: sync produk gagal (lanjut ke step berikutnya)', { error: (err as Error).message });
+  }
+
+  // Step 2: Pesanan
+  try {
+    const r = await triggerOrderSync(tenantId, shopId, actorId);
+    results.orders = { status: 'COMPLETED', recordsWritten: r.recordsWritten };
+  } catch (err) {
+    results.orders = { status: 'FAILED', error: (err as Error).message };
+    logger.warn('triggerFullSync: sync pesanan gagal (lanjut ke step berikutnya)', { error: (err as Error).message });
+  }
+
+  // Step 3: Tracking
+  try {
+    const r = await triggerTrackingSync(tenantId, shopId, actorId);
+    results.tracking = { status: 'COMPLETED', recordsWritten: r.recordsWritten };
+  } catch (err) {
+    results.tracking = { status: 'FAILED', error: (err as Error).message };
+    logger.warn('triggerFullSync: sync tracking gagal (lanjut ke step berikutnya)', { error: (err as Error).message });
+  }
+
+  // Step 4: Return
+  try {
+    const r = await triggerReturnSync(tenantId, shopId, actorId);
+    results.returns = { status: 'COMPLETED', recordsWritten: r.recordsWritten };
+  } catch (err) {
+    results.returns = { status: 'FAILED', error: (err as Error).message };
+    logger.warn('triggerFullSync: sync return gagal', { error: (err as Error).message });
+  }
+
+  const allOk = Object.values(results).every((r) => r.status === 'COMPLETED');
+  logger.info('triggerFullSync selesai', { results });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'full_sync_complete',
+    entityType: 'Shop',
+    entityId: shopId,
+    metadata: results,
+  });
+
+  return { success: allOk, results };
+}
+
+/**
+ * Mengatur pengiriman untuk satu pesanan ("Atur Pengiriman").
+ * Memanggil Shopee logistics/init, kemudian auto-menyimpan AWB ke database lokal.
+ */
+export async function arrangeShipmentForOrder(
+  tenantId: string,
+  shopId: string,
+  orderId: string,
+  input: Omit<ArrangeShipmentInput, 'orderSn'>,
+  actorId: string,
+) {
+  const { conn, creds } = await loadConnection(tenantId, shopId);
+  const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, tenantId },
+  });
+  if (!order) throw new NotFoundError('Pesanan', orderId);
+
+  const result = await shopee.arrangeShipment(credentials, {
+    orderSn: order.externalOrderId,
+    ...input,
+  });
+
+  if (result.success && result.trackingNumber) {
+    // Simpan AWB ke database
+    await upsertShipment(tenantId, orderId, result.trackingNumber, null, 'LOGISTICS_REQUEST_CREATED');
+    logger.info(`Pengiriman diatur: order ${order.externalOrderId}, AWB ${result.trackingNumber}`);
+  }
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'arrange_shipment',
+    entityType: 'Order',
+    entityId: orderId,
+    metadata: { externalOrderId: order.externalOrderId, ...result },
+  });
+
+  return result;
+}
+
+/**
+ * Generate/cetak label pengiriman untuk satu pesanan.
+ * Mengembalikan URL PDF label yang bisa dibuka di browser atau dicetak.
+ */
+export async function generateShippingLabel(
+  tenantId: string,
+  shopId: string,
+  orderId: string,
+  packageNumber?: string,
+) {
+  const { conn, creds } = await loadConnection(tenantId, shopId);
+  const fresh = await ensureFreshToken(conn.id, creds);
+  const credentials = buildShopCredentials(fresh);
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, tenantId },
+  });
+  if (!order) throw new NotFoundError('Pesanan', orderId);
+
+  const labelUrl = await shopee.printShippingLabel(credentials, order.externalOrderId, packageNumber);
+  return { labelUrl, orderSn: order.externalOrderId };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhook event processing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Process a verified Shopee push (webhook).
+ * Idempotent: unique constraint on (shopId, provider, externalEventId).
+ *
+ * Handled push codes:
+ *   code 3  → order_status_push: reconcile order status
+ *   code 4  → order_trackingno_push: update shipment AWB
+ *   code 29 → return_updates_push: create/update return
+ *   code 30 → package_fulfillment_status_push: update fulfillment status
+ *   code 12 → open_api_authorization_expiry: log warning
+ *   others  → logged and acknowledged
  */
 export async function processWebhookEvent(
   tenantId: string,
@@ -177,34 +930,45 @@ export async function processWebhookEvent(
       data: { tenantId, shopId, provider, externalEventId, eventType, payloadHash, status: 'PROCESSING' },
     });
 
-    // Handle order status push (code 3) → reconcile order status.
     const data = (payload.data ?? {}) as Record<string, unknown>;
+
+    // ── Code 3: order_status_push ──────────────────────────────────────────
     if (eventType === 'order_status_push' && data.ordersn) {
-      const status = mapShopeeStatusToInternal(String(data.status ?? ''));
-      const order = await prisma.order.findUnique({
-        where: { shopId_externalOrderId: { shopId, externalOrderId: String(data.ordersn) } },
-      });
-      if (order && order.status !== status) {
-        await importOrder(tenantId, {
-          shopId,
-          externalOrderId: String(data.ordersn),
-          placedAt: order.placedAt,
-          shipByAt: order.shipByAt ?? undefined,
-          buyerName: order.buyerName,
-          buyerPhone: order.buyerPhone,
-          shippingAddress: (order.shippingAddress as Record<string, unknown>) ?? undefined,
-          status,
-          items: [{ variantId: '', quantity: 1 }], // placeholder; importOrder reconciles existing without touching items
-        });
-      }
+      await handleOrderStatusPush(tenantId, shopId, data);
     }
 
-    await prisma.webhookEvent.update({ where: { id: created.id }, data: { status: 'PROCESSED', processedAt: new Date() } });
+    // ── Code 4: order_trackingno_push ─────────────────────────────────────
+    else if (eventType === 'order_trackingno_push' && (data.ordersn || data.order_sn)) {
+      await handleTrackingNoPush(tenantId, shopId, data);
+    }
+
+    // ── Code 29: return_updates_push ──────────────────────────────────────
+    else if (eventType === 'return_updates_push' && data.return_sn) {
+      await handleReturnPush(tenantId, shopId, data);
+    }
+
+    // ── Code 30: package_fulfillment_status_push ──────────────────────────
+    else if (eventType === 'package_fulfillment_status_push' && (data.ordersn || data.order_sn)) {
+      await handlePackageFulfillmentPush(tenantId, shopId, data);
+    }
+
+    // ── Code 12: authorization_expiry ─────────────────────────────────────
+    else if (eventType === 'open_api_authorization_expiry') {
+      logger.warn('Shopee otorisasi mendekati habis masa berlaku. Segera re-authorize.', {
+        shopId,
+        payload: data,
+      });
+    }
+
+    await prisma.webhookEvent.update({
+      where: { id: created.id },
+      data: { status: 'PROCESSED', processedAt: new Date() },
+    });
     return { status: 'PROCESSED' };
   } catch (err) {
-    // Duplicate → already processed.
+    // Duplicate event → already processed (P2002 = unique constraint violation)
     if ((err as { code?: string }).code === 'P2002') {
-      logger.info(`Webhook duplikat diabaikan: ${externalEventId}`);
+      logger.info(`Webhook duplikat diabaikan: ${externalEventId}`, { eventType });
       return { status: 'SKIPPED' };
     }
     await prisma.webhookEvent.updateMany({
@@ -215,9 +979,226 @@ export async function processWebhookEvent(
   }
 }
 
-export async function listSyncRuns(tenantId: string, shopId?: string) {
+/** Handle code 3: order_status_push */
+async function handleOrderStatusPush(
+  tenantId: string,
+  shopId: string,
+  data: Record<string, unknown>,
+) {
+  const orderSn = String(data.ordersn ?? '');
+  const status = mapShopeeStatusToInternal(String(data.status ?? ''));
+  const order = await prisma.order.findUnique({
+    where: { shopId_externalOrderId: { shopId, externalOrderId: orderSn } },
+  });
+  if (!order) {
+    logger.warn(`Webhook order_status_push: order ${orderSn} tidak ditemukan di DB lokal`);
+    return;
+  }
+  if (order.status !== status) {
+    // Direct update (skip importOrder to avoid fake variantId validation failure)
+    await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: order.id },
+        data: { status: status as import('@prisma/client').OrderStatus },
+      });
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: order.status as import('@prisma/client').OrderStatus,
+          toStatus: status as import('@prisma/client').OrderStatus,
+          reason: 'Diperbarui via Shopee push webhook',
+        },
+      });
+    });
+    logger.info(`Order ${orderSn} status diupdate via webhook: ${order.status} → ${status}`);
+  }
+}
+
+
+/** Handle code 4: order_trackingno_push */
+async function handleTrackingNoPush(
+  tenantId: string,
+  shopId: string,
+  data: Record<string, unknown>,
+) {
+  const orderSn = String(data.ordersn ?? data.order_sn ?? '');
+  const trackingNo = String(data.tracking_no ?? data.tracking_number ?? '');
+  if (!orderSn || !trackingNo) return;
+
+  const order = await prisma.order.findUnique({
+    where: { shopId_externalOrderId: { shopId, externalOrderId: orderSn } },
+  });
+  if (!order) return;
+
+  await upsertShipment(tenantId, order.id, trackingNo, null, 'PROCESSED');
+  logger.info(`Shipment AWB diupdate via webhook: order ${orderSn}, AWB ${trackingNo}`);
+}
+
+/** Handle code 29: return_updates_push */
+async function handleReturnPush(
+  tenantId: string,
+  shopId: string,
+  data: Record<string, unknown>,
+) {
+  const returnSn = String(data.return_sn ?? '');
+  const orderSn = String(data.order_sn ?? data.ordersn ?? '');
+  if (!returnSn || !orderSn) return;
+
+  const order = await prisma.order.findUnique({
+    where: { shopId_externalOrderId: { shopId, externalOrderId: orderSn } },
+  });
+  if (!order) return;
+
+  const updatedValues = (data.updated_values ?? []) as string[];
+  const statusFromPush = updatedValues.includes('status') ? (data.status as string) : null;
+
+  const existing = await prisma.return.findFirst({
+    where: { orderId: order.id, externalReturnId: returnSn },
+  });
+
+  if (!existing) {
+    // Create a minimal return record; full detail can be synced via triggerReturnSync
+    const status = statusFromPush ? mapReturnStatus(statusFromPush) : 'REQUESTED';
+    await prisma.return.create({
+      data: {
+        orderId: order.id,
+        externalReturnId: returnSn,
+        status,
+        reason: 'Diperbarui dari webhook Shopee',
+      },
+    });
+    logger.info(`Return ${returnSn} dibuat via webhook untuk order ${orderSn}`);
+  } else if (statusFromPush) {
+    const newStatus = mapReturnStatus(statusFromPush);
+    await prisma.return.update({
+      where: { id: existing.id },
+      data: { status: newStatus },
+    });
+  }
+}
+
+/** Handle code 30: package_fulfillment_status_push */
+async function handlePackageFulfillmentPush(
+  tenantId: string,
+  shopId: string,
+  data: Record<string, unknown>,
+) {
+  const orderSn = String(data.ordersn ?? data.order_sn ?? '');
+  const fulfillmentStatus = String(data.fulfillment_status ?? '');
+  if (!orderSn) return;
+
+  const order = await prisma.order.findUnique({
+    where: { shopId_externalOrderId: { shopId, externalOrderId: orderSn } },
+  });
+  if (!order) return;
+
+  // Map Shopee package fulfillment status to shipment status
+  const shipmentStatus = mapLogisticsStatus(fulfillmentStatus);
+  const shipment = await prisma.shipment.findFirst({ where: { orderId: order.id } });
+  if (shipment) {
+    await prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        status: shipmentStatus,
+        ...(shipmentStatus === 'DELIVERED' ? { deliveredAt: new Date() } : {}),
+        ...(shipmentStatus === 'IN_TRANSIT' ? { shippedAt: shipment.shippedAt ?? new Date() } : {}),
+      },
+    });
+    logger.info(`Shipment ${shipment.id} status diupdate via webhook: ${shipmentStatus}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Upsert a Shipment record for a given order.
+ */
+async function upsertShipment(
+  tenantId: string,
+  orderId: string,
+  awb: string,
+  carrier: string | null,
+  rawStatus: string,
+) {
+  const status = mapLogisticsStatus(rawStatus);
+  const existing = await prisma.shipment.findFirst({ where: { orderId } });
+
+  if (existing) {
+    await prisma.shipment.update({
+      where: { id: existing.id },
+      data: {
+        awb: awb || existing.awb,
+        carrier: carrier || existing.carrier,
+        status,
+        ...(status === 'DELIVERED' ? { deliveredAt: existing.deliveredAt ?? new Date() } : {}),
+        ...(status === 'IN_TRANSIT' && !existing.shippedAt ? { shippedAt: new Date() } : {}),
+      },
+    });
+  } else {
+    await prisma.shipment.create({
+      data: {
+        orderId,
+        awb,
+        carrier,
+        status,
+        shippedAt: status !== 'PENDING' && status !== 'READY_TO_SHIP' ? new Date() : null,
+      },
+    });
+  }
+}
+
+/**
+ * Map Shopee logistics/fulfillment status strings → internal ShipmentStatus.
+ */
+export function mapLogisticsStatus(
+  status: string,
+): 'PENDING' | 'READY_TO_SHIP' | 'PICKED_UP' | 'IN_TRANSIT' | 'DELIVERED' | 'FAILED' | 'RETURNED' {
+  switch (status.toUpperCase()) {
+    case 'LOGISTICS_NOT_START':
+    case 'LOGISTICS_PENDING_ARRANGE':
+      return 'PENDING';
+    case 'LOGISTICS_READY':
+    case 'READY_TO_SHIP':
+      return 'READY_TO_SHIP';
+    case 'LOGISTICS_REQUEST_CREATED':
+    case 'LOGISTICS_PICKUP_RETRY':
+    case 'PROCESSED':
+      return 'PICKED_UP';
+    case 'LOGISTICS_PICKUP_DONE':
+    case 'SHIPPED':
+    case 'TO_CONFIRM_RECEIVE':
+      return 'IN_TRANSIT';
+    case 'LOGISTICS_DELIVERY_DONE':
+    case 'COMPLETED':
+      return 'DELIVERED';
+    case 'LOGISTICS_INVALID':
+    case 'LOGISTICS_REQUEST_CANCELED':
+    case 'LOGISTICS_PICKUP_FAILED':
+    case 'LOGISTICS_DELIVERY_FAILED':
+    case 'LOGISTICS_LOST':
+    case 'CANCELLED':
+      return 'FAILED';
+    case 'TO_RETURN':
+    case 'RETURNED':
+      return 'RETURNED';
+    default:
+      return 'IN_TRANSIT';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public query functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function listSyncRuns(tenantId: string, shopId?: string, operation?: string) {
   return prisma.syncRun.findMany({
-    where: { tenantId, ...(shopId ? { shopId } : {}) },
+    where: {
+      tenantId,
+      ...(shopId ? { shopId } : {}),
+      ...(operation ? { operation } : {}),
+    },
     include: { shop: { select: { name: true, provider: true } } },
     orderBy: { startedAt: 'desc' },
     take: 50,
@@ -228,12 +1209,18 @@ export async function listSyncRuns(tenantId: string, shopId?: string) {
 export async function connectShopee(
   tenantId: string,
   shopId: string,
-  input: { externalShopId: string; accessToken: string; refreshToken: string; tokenExpiresAt?: number; mainAccountId?: string },
+  input: {
+    externalShopId: string;
+    accessToken: string;
+    refreshToken: string;
+    tokenExpiresAt?: number;
+    mainAccountId?: string;
+  },
 ) {
   const shop = await prisma.shop.findFirst({ where: { id: shopId, tenantId } });
   if (!shop) throw new NotFoundError('Toko', shopId);
 
-  const creds = {
+  const creds: StoredCredentials = {
     shopId: input.externalShopId,
     accessToken: input.accessToken,
     refreshToken: input.refreshToken,
@@ -258,8 +1245,23 @@ export async function connectShopee(
 export async function getShopeeConnectionStatus(tenantId: string, shopId: string) {
   const shop = await prisma.shop.findFirst({ where: { id: shopId, tenantId } });
   if (!shop) throw new NotFoundError('Toko', shopId);
+
   const conn = await prisma.integrationConnection.findFirst({ where: { shopId, provider: 'shopee' } });
   const partnerConfigured = Boolean(process.env.SHOPEE_PARTNER_ID && process.env.SHOPEE_PARTNER_KEY);
+
+  // Decode token expiry info if available (non-sensitive)
+  let tokenExpiresAt: string | null = null;
+  let tokenExpiresInMinutes: number | null = null;
+  if (conn?.encryptedCredentials) {
+    try {
+      const stored = JSON.parse(decryptSecret(conn.encryptedCredentials)) as StoredCredentials;
+      tokenExpiresAt = new Date(stored.tokenExpiresAt).toISOString();
+      tokenExpiresInMinutes = Math.floor((stored.tokenExpiresAt - Date.now()) / 60000);
+    } catch {
+      // ignore decryption errors in status check
+    }
+  }
+
   return {
     connected: Boolean(conn?.encryptedCredentials),
     status: conn?.status ?? 'PENDING',
@@ -267,6 +1269,7 @@ export async function getShopeeConnectionStatus(tenantId: string, shopId: string
     lastSyncAt: conn?.lastSyncAt ?? null,
     partnerConfigured,
     externalShopId: shop.externalShopId,
+    tokenExpiresAt,
+    tokenExpiresInMinutes,
   };
 }
-

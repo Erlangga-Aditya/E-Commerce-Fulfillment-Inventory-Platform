@@ -637,7 +637,7 @@ model IntegrationConnection {
   provider             String
   /// AES-256-GCM encrypted JSON: { shop_id, access_token, refresh_token, token_expires_at, main_account_id? }
   /// Never store plaintext tokens (10-SECURITY.md, FR-INT-001).
-  encryptedCredentials String?          @map("encrypted_credentials")
+  encryptedCredentials String?          @map("encrypted_credentials") @db.Text
   sandbox              Boolean          @default(false)
   status               ConnectionStatus @default(PENDING)
   lastSyncAt           DateTime?        @map("last_sync_at")

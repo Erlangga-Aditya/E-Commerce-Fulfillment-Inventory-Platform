@@ -155,8 +155,13 @@ export function calculatePriority(
   const factors: PriorityFactor[] = [];
   let weightedSum = 0;
   let totalWeight = 0;
+  const rawCriteria = Array.isArray(rule?.criteria)
+    ? rule.criteria
+    : (rule as any)?.weights && typeof (rule as any).weights === 'object'
+    ? Object.entries((rule as any).weights).map(([code, weight]) => ({ code, weight: Number(weight) }))
+    : DEFAULT_PRIORITY_RULE.criteria;
 
-  for (const criterion of rule.criteria) {
+  for (const criterion of rawCriteria) {
     const calculator = FACTOR_CALCULATORS[criterion.code];
     if (!calculator) continue;
 

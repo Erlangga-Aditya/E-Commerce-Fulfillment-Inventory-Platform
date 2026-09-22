@@ -35,3 +35,7 @@ Thumbs.db
 
 # Testing
 coverage/
+
+# Temporary / Scratch
+scratch_*.ts
+*.jfif

@@ -3,23 +3,33 @@ import type {
   MarketplaceAdapter,
   MarketplaceOrder,
   MarketplaceProduct,
+  MarketplaceProductVariant,
   ShopCredentials,
   SyncOptions,
   TrackingInfo,
+  ArrangeShipmentInput,
+  ArrangeShipmentResult,
 } from '../domain/marketplace.adapter';
+import type { MarketplaceReturn } from '../domain/marketplace.adapter';
 import { logger } from '@/shared/observability/logger';
 
 /**
  * Real Shopee Open Platform v2 adapter (partner/ISV app).
  *
  * Every fact below was VERIFIED against the official docs (2026-09-17), see
- * 08-INTEGRATION-SHOPEE.md and the research reference. Key rules:
- *  - Sign = HMAC-SHA256(partner_id + api_path + timestamp + access_token + shop_id) → lowercase HEX.
- *    Public API omits access_token/shop_id.
+ * 08-INTEGRATION-SHOPEE.md and 20-SHOPEE-API-REFERENCE.md. Key rules:
+ *  - Sign = HMAC-SHA256(partner_id + api_path + timestamp [+ access_token + shop_id]) → lowercase HEX.
+ *    Public API omits access_token/shop_id from base string.
  *  - POST: common params in query string, request params in JSON body.
  *  - get_order_list window max 15 days, cursor pagination.
  *  - access_token 4h, refresh_token 30d (single-use), code 10min.
+ *  - All API responses: { error, message, request_id, response: <data> }
+ *    EXCEPT auth/* which return token fields at top-level (no .response wrapper).
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface ShopeeTokenResponse {
   access_token: string;
@@ -27,7 +37,13 @@ export interface ShopeeTokenResponse {
   expire_in: number; // seconds
   shop_id_list?: number[];
   merchant_id_list?: number[];
+  error?: string;
+  message?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal config & crypto helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface ShopeeConfig {
   partnerId: string;
@@ -48,25 +64,87 @@ function configFromEnv(): ShopeeConfig {
   return { partnerId, partnerKey, apiHost };
 }
 
-function buildBaseString(partnerId: string, apiPath: string, timestamp: number, accessToken?: string, shopId?: string): string {
+function buildBaseString(
+  partnerId: string,
+  apiPath: string,
+  timestamp: number,
+  accessToken?: string,
+  shopId?: string,
+): string {
+  // Base string rule (verified from official docs §2.1):
+  // Shop API:   partner_id + api_path + timestamp + access_token + shop_id
+  // Public API: partner_id + api_path + timestamp  (no access_token or shop_id)
   let base = `${partnerId}${apiPath}${timestamp}`;
   if (accessToken) base += accessToken;
   if (shopId !== undefined && shopId !== '') base += shopId;
   return base;
 }
 
-export function signShopee(partnerId: string, partnerKey: string, apiPath: string, timestamp: number, accessToken?: string, shopId?: string): string {
-  return crypto.createHmac('sha256', partnerKey).update(buildBaseString(partnerId, apiPath, timestamp, accessToken, shopId)).digest('hex');
+export function signShopee(
+  partnerId: string,
+  partnerKey: string,
+  apiPath: string,
+  timestamp: number,
+  accessToken?: string,
+  shopId?: string,
+): string {
+  return crypto
+    .createHmac('sha256', partnerKey)
+    .update(buildBaseString(partnerId, apiPath, timestamp, accessToken, shopId))
+    .digest('hex');
 }
 
-interface ShopeeError {
-  error: string;
-  message: string;
+// ─────────────────────────────────────────────────────────────────────────────
+// Core HTTP client for Shopee API
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ShopeeRawResponse {
+  error?: string;
+  message?: string;
   request_id?: string;
   response?: unknown;
+  // Auth endpoints return tokens at top-level instead of inside .response
+  access_token?: string;
+  refresh_token?: string;
+  expire_in?: number;
 }
 
-async function callShopee<T>(cfg: ShopeeConfig, apiPath: string, body: Record<string, unknown>, creds?: { shopId?: string; accessToken?: string }): Promise<T> {
+export interface ShopeeRequestOptions {
+  method?: 'GET' | 'POST';
+  params?: Record<string, unknown>;
+  body?: Record<string, unknown>;
+}
+
+/**
+ * Make a signed Shopee API call.
+ * - HTTP GET: query params serialized to URL search string (for read APIs)
+ * - HTTP POST: common auth params in query string, payload in JSON body (for write APIs)
+ * Handles: connection errors, non-JSON responses, Shopee API errors.
+ * Returns the `.response` sub-object when present, otherwise the full body.
+ */
+async function callShopee<T>(
+  cfg: ShopeeConfig,
+  apiPath: string,
+  optionsOrBody: ShopeeRequestOptions | Record<string, unknown>,
+  creds?: { shopId?: string; accessToken?: string },
+): Promise<T> {
+  const isOptionsObject =
+    optionsOrBody &&
+    typeof optionsOrBody === 'object' &&
+    ('method' in optionsOrBody || 'params' in optionsOrBody || 'body' in optionsOrBody);
+
+  const method: 'GET' | 'POST' = isOptionsObject
+    ? (optionsOrBody as ShopeeRequestOptions).method ?? 'GET'
+    : 'POST';
+
+  const params: Record<string, unknown> = isOptionsObject
+    ? (optionsOrBody as ShopeeRequestOptions).params ?? {}
+    : {};
+
+  const body: Record<string, unknown> | undefined = isOptionsObject
+    ? (optionsOrBody as ShopeeRequestOptions).body
+    : (optionsOrBody as Record<string, unknown>);
+
   const timestamp = Math.floor(Date.now() / 1000);
   const shopId = creds?.shopId;
   const accessToken = creds?.accessToken;
@@ -79,25 +157,69 @@ async function callShopee<T>(cfg: ShopeeConfig, apiPath: string, body: Record<st
   if (accessToken) url.searchParams.set('access_token', accessToken);
   if (shopId) url.searchParams.set('shop_id', shopId);
 
-  let res: Response;
-  try {
-    res = await fetch(url.toString(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new Error(`Tidak dapat terhubung ke Shopee API: ${(err as Error).message}`);
+  if (method === 'GET' && params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null) continue;
+      if (Array.isArray(v)) {
+        for (const item of v) {
+          url.searchParams.append(k, String(item));
+        }
+      } else {
+        url.searchParams.set(k, String(v));
+      }
+    }
   }
 
-  const json = (await res.json()) as ShopeeError & Record<string, unknown>;
+  let res: Response;
+  try {
+    const fetchInit: RequestInit = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    };
+    if (method === 'POST' && body) {
+      fetchInit.body = JSON.stringify(body);
+    }
+    res = await fetch(url.toString(), fetchInit);
+  } catch (err) {
+    throw new Error(`Tidak dapat terhubung ke Shopee API (${apiPath}): ${(err as Error).message}`);
+  }
+
+  // ── Safe JSON parsing ──────────────────────────────────────────────────────
+  let rawText: string;
+  try {
+    rawText = await res.text();
+  } catch (err) {
+    throw new Error(`Gagal membaca response dari Shopee API (${apiPath}): ${(err as Error).message}`);
+  }
+
+  let json: ShopeeRawResponse;
+  try {
+    json = JSON.parse(rawText) as ShopeeRawResponse;
+  } catch (_parseErr) {
+    logger.error('Shopee API mengembalikan response non-JSON', {
+      apiPath,
+      httpStatus: res.status,
+      body: rawText.slice(0, 500),
+    });
+    throw new Error(
+      `Shopee API mengembalikan response tidak valid (HTTP ${res.status}) di ${apiPath}. ` +
+        `Respons: ${rawText.slice(0, 200)}`,
+    );
+  }
+
+  // ── Shopee API-level error handling ───────────────────────────────────────
   if (json.error && json.error !== '') {
-    const msg = `Shopee API error [${json.error}] ${json.message ?? ''}`;
-    logger.error(msg, { apiPath, request_id: json.request_id });
+    const msg = `Shopee API error [${json.error}] pada ${apiPath}: ${json.message ?? '(no message)'}`;
+    logger.error(msg, { apiPath, request_id: json.request_id, error: json.error });
     throw new Error(msg);
   }
-  return (json.response as T) ?? (json as unknown as T);
+
+  return ((json.response as T) ?? (json as unknown as T));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 function toDate(ts: unknown): Date | null {
   if (typeof ts !== 'number' || ts <= 0) return null;
@@ -106,9 +228,12 @@ function toDate(ts: unknown): Date | null {
 
 /** Map Shopee order_status → internal rawStatus string (kept provider-agnostic upstream). */
 export function mapShopeeOrderStatus(status: string): string {
-  // Pass-through; the sync service maps to internal OrderStatus enum.
-  return status;
+  return status; // pass-through; sync.service maps to internal OrderStatus enum
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ShopeeAdapter — implements MarketplaceAdapter port
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class ShopeeAdapter implements MarketplaceAdapter {
   readonly provider = 'shopee';
@@ -117,11 +242,15 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     return configFromEnv();
   }
 
+  // ── Auth ─────────────────────────────────────────────────────────────────
+
   /** Build the authorization URL (seller grants access). */
   buildAuthUrl(redirectUri: string, state?: string): string {
     const { partnerId } = this.cfg();
     const sandbox = process.env.SHOPEE_SANDBOX === 'true';
-    const base = sandbox ? 'https://open.sandbox.test-stable.shopee.com/auth' : 'https://open.shopee.com/auth';
+    const base = sandbox
+      ? 'https://open.sandbox.test-stable.shopee.com/auth'
+      : 'https://open.shopee.com/auth';
     const params = new URLSearchParams({
       partner_id: partnerId,
       auth_type: 'seller',
@@ -132,13 +261,16 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     return `${base}?${params.toString()}`;
   }
 
-  /** Exchange authorization `code` → tokens (public API). */
+  /** Exchange authorization `code` → tokens (public API, no shop creds needed). */
   async exchangeCodeForToken(code: string, shopId?: string, mainAccountId?: string): Promise<ShopeeTokenResponse> {
     const cfg = this.cfg();
-    const body: Record<string, unknown> = { code, partner_id: cfg.partnerId };
+    const body: Record<string, unknown> = { code, partner_id: Number(cfg.partnerId) };
     if (shopId) body.shop_id = Number(shopId);
     if (mainAccountId) body.main_account_id = Number(mainAccountId);
-    const res = await callShopee<Record<string, unknown>>(cfg, '/api/v2/auth/token/get', body);
+    const res = await callShopee<Record<string, unknown>>(cfg, '/api/v2/auth/token/get', {
+      method: 'POST',
+      body,
+    });
     return res as unknown as ShopeeTokenResponse;
   }
 
@@ -146,34 +278,52 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   async refreshAccessToken(refreshToken: string, shopId: string): Promise<ShopeeTokenResponse> {
     const cfg = this.cfg();
     const res = await callShopee<Record<string, unknown>>(cfg, '/api/v2/auth/access_token/get', {
-      refresh_token: refreshToken,
-      partner_id: cfg.partnerId,
-      shop_id: Number(shopId),
+      method: 'POST',
+      body: {
+        refresh_token: refreshToken,
+        partner_id: Number(cfg.partnerId),
+        shop_id: Number(shopId),
+      },
     });
     return res as unknown as ShopeeTokenResponse;
   }
 
-  private async getOrderList(cfg: ShopeeConfig, creds: ShopCredentials, options?: SyncOptions): Promise<Array<{ orderSn: string; status: string }>> {
+  // ── Orders ────────────────────────────────────────────────────────────────
+
+  /** Paginate order list (cursor-based) for a given time window (max 15 days). Uses HTTP GET. */
+  private async getOrderList(
+    cfg: ShopeeConfig,
+    creds: ShopCredentials,
+    options?: SyncOptions,
+  ): Promise<Array<{ orderSn: string; status: string }>> {
     const now = Math.floor(Date.now() / 1000);
     const to = options?.toDate ? Math.floor(options.toDate.getTime() / 1000) : now;
-    const from = options?.fromDate ? Math.floor(options.fromDate.getTime() / 1000) : to - 15 * 24 * 3600;
+    // Default window: last 14 days (stay safely within 15-day limit)
+    const from = options?.fromDate ? Math.floor(options.fromDate.getTime() / 1000) : to - 14 * 24 * 3600;
 
     const results: Array<{ orderSn: string; status: string }> = [];
     let cursor = '';
     let more = true;
 
     while (more) {
+      const params: Record<string, unknown> = {
+        time_range_field: 'create_time',
+        time_from: from,
+        time_to: to,
+        page_size: 50,
+        response_optional_fields: 'order_status',
+        request_order_status_pending: true,
+      };
+      if (cursor) {
+        params.cursor = cursor;
+      }
+
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/order/get_order_list',
         {
-          time_range_field: 'create_time',
-          time_from: from,
-          time_to: to,
-          page_size: 100,
-          cursor,
-          response_optional_fields: 'order_status',
-          request_order_status_pending: true,
+          method: 'GET',
+          params,
         },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
@@ -183,20 +333,48 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       }
       more = (res?.more as boolean) === true;
       cursor = (res?.next_cursor as string) ?? '';
-      if (!more) break;
+      if (!cursor && more) break;
     }
     return results;
   }
 
-  private async getOrderDetails(cfg: ShopeeConfig, creds: ShopCredentials, orderSns: string[]): Promise<Record<string, unknown>[]> {
+  /** Fetch full order details in batches of 50 via HTTP GET. */
+  private async getOrderDetails(
+    cfg: ShopeeConfig,
+    creds: ShopCredentials,
+    orderSns: string[],
+  ): Promise<Record<string, unknown>[]> {
     const all: Record<string, unknown>[] = [];
-    const OPTIONAL = 'buyer_username,recipient_address,item_list,pay_time,payment_method,package_list,shipping_carrier,total_amount,currency,cod,note';
+    const OPTIONAL = [
+      'buyer_username',
+      'recipient_address',
+      'actual_shipping_fee',
+      'item_list',
+      'pay_time',
+      'payment_method',
+      'package_list',
+      'shipping_carrier',
+      'total_amount',
+      'currency',
+      'cod',
+      'note',
+      'pickup_done_time',
+      'fulfillment_flag',
+    ].join(',');
+
     for (let i = 0; i < orderSns.length; i += 50) {
       const batch = orderSns.slice(i, i + 50);
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/order/get_order_detail',
-        { order_sn_list: batch.join(','), response_optional_fields: OPTIONAL, request_order_status_pending: true },
+        {
+          method: 'GET',
+          params: {
+            order_sn_list: batch.join(','),
+            response_optional_fields: OPTIONAL,
+            request_order_status_pending: true,
+          },
+        },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
       const list = (res?.order_list as Record<string, unknown>[]) ?? [];
@@ -209,6 +387,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     const cfg = this.cfg();
     const summaries = await this.getOrderList(cfg, creds, options);
     if (summaries.length === 0) return [];
+    logger.info(`Shopee: ditemukan ${summaries.length} pesanan, mengambil detail...`, { shopId: creds.shopId });
     const details = await this.getOrderDetails(cfg, creds, summaries.map((s) => s.orderSn));
     return details.map((d) => this.mapOrder(d)).filter((o): o is MarketplaceOrder => o !== null);
   }
@@ -224,14 +403,22 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     if (!orderSn) return null;
 
     const itemsRaw = (d.item_list as Array<Record<string, unknown>>) ?? [];
-    const items = itemsRaw.map((it) => ({
-      externalItemId: String(it.item_id ?? ''),
-      externalVariantId: String(it.model_id ?? it.item_id ?? ''),
-      sku: String(it.model_sku ?? it.item_sku ?? ''),
-      name: String(it.model_name ?? it.item_name ?? ''),
-      quantity: Number(it.model_quantity_purchased ?? it.model_quantity ?? 1),
-      unitPrice: Number(it.model_discounted_price ?? it.model_original_price ?? 0),
-    }));
+    const items = itemsRaw.map((it) => {
+      const itemId = String(it.item_id ?? '');
+      const modelId = it.model_id != null && Number(it.model_id) !== 0 ? String(it.model_id) : '';
+      const externalVariantId = modelId || itemId;
+      const rawSku = String(it.model_sku ?? it.item_sku ?? '').trim();
+      const sku = rawSku || (modelId ? `SHOPEE-${itemId}-${modelId}` : `SHOPEE-${itemId}`);
+
+      return {
+        externalItemId: itemId,
+        externalVariantId,
+        sku,
+        name: String(it.model_name ?? it.item_name ?? ''),
+        quantity: Number(it.model_quantity_purchased ?? it.model_quantity ?? 1),
+        unitPrice: Number(it.model_discounted_price ?? it.model_original_price ?? 0),
+      };
+    });
 
     const recipient = (d.recipient_address ?? {}) as Record<string, unknown>;
     const packages = (d.package_list as Array<Record<string, unknown>>) ?? [];
@@ -259,90 +446,476 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       items,
       rawStatus: String(d.order_status ?? ''),
       trackingNumber,
-      carrier: (firstPackage.shipping_carrier as string) ?? null,
+      carrier: (firstPackage.shipping_carrier as string) ?? (d.shipping_carrier as string) ?? null,
     };
   }
 
+  // ── Products ──────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch all products + variants from Shopee via HTTP GET.
+   * Uses: get_item_list (GET) → get_item_base_info (GET) → get_model_list (GET).
+   */
   async getProducts(creds: ShopCredentials): Promise<MarketplaceProduct[]> {
     const cfg = this.cfg();
-    // 1. get_item_list (offset pagination)
+
+    // Step 1: get all item IDs using GET with multiple item_status
     const itemIds: string[] = [];
-    for (let offset = 0; offset < 1000; offset += 100) {
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore && offset < 5000) {
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/product/get_item_list',
-        { offset, page_size: 100, item_status: ['NORMAL'] },
+        {
+          method: 'GET',
+          params: {
+            offset,
+            page_size: 50,
+            item_status: ['NORMAL', 'UNLIST', 'BANNED'],
+          },
+        },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
-      const list = (res?.item as Array<Record<string, unknown>>) ?? [];
-      for (const it of list) if (it.item_id) itemIds.push(String(it.item_id));
-      if (!res?.has_next_item) break;
-    }
-    if (itemIds.length === 0) return [];
+      const list =
+        (res?.item as Array<Record<string, unknown>>) ??
+        (res?.item_list as Array<Record<string, unknown>>) ??
+        [];
 
-    // 2. get_item_base_info (batches of 50)
+      for (const it of list) {
+        if (it.item_id) itemIds.push(String(it.item_id));
+      }
+
+      const hasNext = Boolean(res?.has_next_page ?? res?.has_next_item);
+      if (!hasNext || list.length === 0) {
+        break;
+      }
+      offset += list.length;
+    }
+
+    if (itemIds.length === 0) {
+      logger.info('Shopee getProducts: tidak ada produk di toko ini', { shopId: creds.shopId });
+      return [];
+    }
+    logger.info(`Shopee: ditemukan ${itemIds.length} produk, mengambil detail + model...`, { shopId: creds.shopId });
+
+    // Step 2: get_item_base_info in batches of 50 via GET
     const products: MarketplaceProduct[] = [];
     for (let i = 0; i < itemIds.length; i += 50) {
+      const batch = itemIds.slice(i, i + 50);
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/product/get_item_base_info',
-        { item_id_list: itemIds.slice(i, i + 50).map((x) => Number(x)) },
+        {
+          method: 'GET',
+          params: {
+            item_id_list: batch.join(','),
+          },
+        },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
       const list = (res?.item_list as Array<Record<string, unknown>>) ?? [];
+
       for (const it of list) {
-        const priceInfo = (it.price_info ?? {}) as Record<string, unknown>;
-        products.push({
-          externalProductId: String(it.item_id),
-          name: String(it.item_name ?? ''),
-          sku: String(it.item_sku ?? ''),
-          price: priceInfo.current_price != null ? Number(priceInfo.current_price) : null,
-          imageUrl: null,
-          variants: [],
-        });
+        const itemId = String(it.item_id ?? '');
+        const itemName = String(it.item_name ?? '');
+        const rawSku = String(it.item_sku ?? '').trim();
+        const itemSku = rawSku || `SHOPEE-${itemId}`;
+
+        // Price handling: Shopee price_info is an array of objects
+        const priceArr = Array.isArray(it.price_info) ? it.price_info : [];
+        const firstPrice = priceArr[0] as Record<string, unknown> | undefined;
+        const basePrice =
+          firstPrice?.current_price != null
+            ? Number(firstPrice.current_price)
+            : firstPrice?.original_price != null
+              ? Number(firstPrice.original_price)
+              : it.price != null
+                ? Number(it.price)
+                : null;
+
+        const imageObj = (it.image ?? {}) as Record<string, unknown>;
+        const imageUrl = (imageObj.image_url_list as string[])?.[0] ?? null;
+
+        // Check if item has models (variants)
+        const hasModel = Boolean(it.has_model);
+
+        if (hasModel) {
+          // Step 3: get_model_list for items with variants
+          const modelVariants = await this.fetchModelVariants(cfg, creds, itemId);
+          products.push({
+            externalProductId: itemId,
+            name: itemName,
+            sku: itemSku,
+            price: basePrice,
+            imageUrl,
+            variants:
+              modelVariants.length > 0
+                ? modelVariants
+                : [
+                    {
+                      externalVariantId: itemId,
+                      sku: itemSku,
+                      name: itemName,
+                      price: basePrice,
+                      stock: null,
+                    },
+                  ],
+          });
+        } else {
+          // Single-variant item — treat item itself as the only variant
+          const stock = (it.stock_info_v2 as Record<string, unknown>)?.summary_info as Record<string, unknown> | undefined;
+          const stockQty = stock
+            ? Number(stock.total_available_stock ?? stock.total_reserved_stock ?? 0)
+            : null;
+          products.push({
+            externalProductId: itemId,
+            name: itemName,
+            sku: itemSku,
+            price: basePrice,
+            imageUrl,
+            variants: [
+              {
+                externalVariantId: itemId,
+                sku: itemSku,
+                name: itemName,
+                price: basePrice,
+                stock: stockQty,
+              },
+            ],
+          });
+        }
       }
     }
     return products;
   }
 
-  async updateStock(creds: ShopCredentials, externalVariantId: string, quantity: number): Promise<boolean> {
-    // Requires per-model stock_list shape; verify against sandbox before enabling writes.
-    // Implemented as a safe no-op returning false until validated — never fake success.
-    logger.warn('updateStock belum diaktifkan — validasi struktur stock_list di sandbox terlebih dahulu.', {
-      shopId: creds.shopId,
-      externalVariantId,
-      quantity,
-    });
-    return false;
+  /** Fetch model (variant) list for a single item via HTTP GET. */
+  private async fetchModelVariants(
+    cfg: ShopeeConfig,
+    creds: ShopCredentials,
+    itemId: string,
+  ): Promise<MarketplaceProductVariant[]> {
+    try {
+      const res = await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/product/get_model_list',
+        {
+          method: 'GET',
+          params: { item_id: itemId },
+        },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      const models = (res?.model as Array<Record<string, unknown>>) ?? [];
+      return models.map((m) => {
+        const priceArr = Array.isArray(m.price_info) ? m.price_info : [];
+        const priceInfo = (priceArr[0] ?? {}) as Record<string, unknown>;
+        const stockArr = Array.isArray(m.stock_info) ? m.stock_info : [];
+        const stockInfo = (stockArr[0] ?? {}) as Record<string, unknown>;
+        const modelId = String(m.model_id ?? '');
+        const rawSku = String(m.model_sku ?? '').trim();
+        const modelSku = rawSku || `SHOPEE-${itemId}-${modelId}`;
+
+        return {
+          externalVariantId: modelId,
+          sku: modelSku,
+          name: String(m.model_name ?? ''),
+          price:
+            priceInfo.current_price != null
+              ? Number(priceInfo.current_price)
+              : priceInfo.original_price != null
+                ? Number(priceInfo.original_price)
+                : null,
+          stock:
+            stockInfo.current_stock != null
+              ? Number(stockInfo.current_stock)
+              : stockInfo.normal_stock != null
+                ? Number(stockInfo.normal_stock)
+                : null,
+        };
+      });
+    } catch (err) {
+      logger.warn(`Gagal ambil model untuk item ${itemId}: ${(err as Error).message}`);
+      return [];
+    }
   }
 
-  async getTrackingInfo(creds: ShopCredentials, orderSn: string): Promise<TrackingInfo | null> {
+  // ── Stock Update ──────────────────────────────────────────────────────────
+
+  /**
+   * Update stock for a single variant in Shopee.
+   * Uses HTTP POST: /api/v2/product/update_stock.
+   */
+  async updateStock(
+    creds: ShopCredentials,
+    externalVariantId: string,
+    quantity: number,
+    externalProductId?: string,
+  ): Promise<boolean> {
     const cfg = this.cfg();
-    const res = await callShopee<Record<string, unknown>>(
-      cfg,
-      '/api/v2/logistics/get_tracking_info',
-      { order_sn: orderSn },
-      { shopId: creds.shopId, accessToken: creds.accessToken },
-    );
-    const info = (res?.tracking_info ?? res) as Record<string, unknown>;
-    if (!info) return null;
-    const trackingList = (info.tracking_list as Array<Record<string, unknown>>) ?? [];
+    const modelId = Number(externalVariantId);
+    const itemId = externalProductId ? Number(externalProductId) : null;
+
+    if (!itemId) {
+      logger.warn('updateStock: externalProductId diperlukan untuk update stok Shopee', {
+        externalVariantId,
+        quantity,
+      });
+      return false;
+    }
+
+    try {
+      const stockList = [{ model_id: modelId, normal_stock: quantity }];
+      await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/product/update_stock',
+        {
+          method: 'POST',
+          body: { item_id: itemId, stock_list: stockList },
+        },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      logger.info('updateStock berhasil', { itemId, modelId, quantity, shopId: creds.shopId });
+      return true;
+    } catch (err) {
+      logger.error('updateStock gagal', { error: (err as Error).message, externalVariantId, quantity });
+      return false;
+    }
+  }
+
+  // ── Returns ───────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch return list from Shopee via HTTP GET.
+   * Uses: /api/v2/returns/get_return_list.
+   */
+  async getReturns(creds: ShopCredentials): Promise<MarketplaceReturn[]> {
+    const cfg = this.cfg();
+    const all: MarketplaceReturn[] = [];
+    let pageNo = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const res = await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/returns/get_return_list',
+        {
+          method: 'GET',
+          params: { page_no: pageNo, page_size: 50 },
+        },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      const list = (res?.return as Array<Record<string, unknown>>) ?? [];
+      for (const r of list) {
+        const mapped = this.mapReturn(r);
+        if (mapped) all.push(mapped);
+      }
+      hasMore = (res?.more as boolean) === true;
+      pageNo++;
+      if (!hasMore || list.length === 0) break;
+    }
+    return all;
+  }
+
+  private mapReturn(r: Record<string, unknown>): MarketplaceReturn | null {
+    const returnSn = typeof r.return_sn === 'string' ? r.return_sn : null;
+    const orderSn = typeof r.order_sn === 'string' ? r.order_sn : null;
+    if (!returnSn || !orderSn) return null;
+
+    const itemsRaw = (r.item as Array<Record<string, unknown>>) ?? [];
     return {
-      awb: String(info.tracking_number ?? info.tracking_no ?? orderSn),
-      carrier: String(info.logistics_channel_name ?? info.shipping_carrier ?? ''),
-      status: String(info.logistics_status ?? ''),
-      events: trackingList.map((e, idx) => ({
-        externalEventId: String(e.logistics_event_id ?? `${orderSn}-${idx}`),
-        status: String(e.status ?? ''),
-        description: String(e.description ?? ''),
-        occurredAt: toDate(e.event_time) ?? new Date(),
+      externalReturnId: returnSn,
+      externalOrderId: orderSn,
+      status: String(r.status ?? ''),
+      reason: String(r.reason ?? ''),
+      items: itemsRaw.map((it) => ({
+        externalItemId: String(it.item_id ?? ''),
+        externalVariantId: String(it.model_id ?? it.item_id ?? ''),
+        sku: String(it.item_sku ?? ''),
+        name: String(it.item_name ?? ''),
+        quantity: Number(it.amount ?? 1),
       })),
+      createdAt: toDate(r.create_time) ?? new Date(),
     };
   }
 
+  // ── Tracking ──────────────────────────────────────────────────────────────
+
+  /** Fetch the AWB (nomor resi) for an order via /api/v2/logistics/get_tracking_number. */
+  async getTrackingNumber(creds: ShopCredentials, orderSn: string): Promise<string | null> {
+    const cfg = this.cfg();
+    try {
+      const res = await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/logistics/get_tracking_number',
+        { method: 'GET', params: { order_sn: orderSn } },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      const tn = res?.tracking_number as string | undefined;
+      return tn || null;
+    } catch (err) {
+      logger.warn(`getTrackingNumber gagal untuk order ${orderSn}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch tracking info via /api/v2/logistics/get_tracking_info.
+   * Real Shopee v2 API returns:
+   *   response.logistics_status — overall logistics status
+   *   response.tracking_info   — array of tracking events
+   *     each: { update_time, description, logistics_status, return_code }
+   * AWB is obtained separately via get_tracking_number.
+   */
+  async getTrackingInfo(creds: ShopCredentials, orderSn: string): Promise<TrackingInfo | null> {
+    const cfg = this.cfg();
+    try {
+      const res = await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/logistics/get_tracking_info',
+        { method: 'GET', params: { order_sn: orderSn } },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      if (!res) return null;
+
+      // Fetch AWB: check if already in response, or call get_tracking_number
+      const awb = (res.tracking_number as string) ?? (await this.getTrackingNumber(creds, orderSn));
+
+      // Real Shopee v2 returns `tracking_info`; fallback to `tracking_list`
+      const trackingEvents =
+        (res.tracking_info as Array<Record<string, unknown>>) ??
+        (res.tracking_list as Array<Record<string, unknown>>) ??
+        [];
+      const overallStatus = String(res.logistics_status ?? '');
+      const carrier = String(res.logistics_channel_name ?? res.shipping_carrier ?? '');
+
+      return {
+        awb: awb ?? orderSn, // fallback to orderSn if AWB not yet assigned
+        carrier,
+        status: overallStatus,
+        events: trackingEvents.map((e, idx) => {
+          const timestamp = typeof e.update_time === 'number' ? e.update_time : typeof e.event_time === 'number' ? e.event_time : null;
+          return {
+            externalEventId: String(e.logistics_event_id ?? e.update_time ?? idx),
+            status: String(e.logistics_status ?? e.status ?? ''),
+            description: String(e.description ?? ''),
+            occurredAt: timestamp !== null ? new Date(timestamp * 1000) : new Date(),
+          };
+        }),
+      };
+    } catch (err) {
+      logger.warn(`getTrackingInfo gagal untuk order ${orderSn}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  // ── Arrange Shipment ────────────────────────────────────────────────────────
+
+  /**
+   * Mengatur pengiriman ("Atur Pengiriman" / init shipment) untuk pesanan Shopee.
+   * Endpoint: POST /api/v2/logistics/init
+   *
+   * Flow Shopee Sandbox:
+   * 1. Seller creates order → status: READY_TO_SHIP (order detail has package_list)
+   * 2. Seller calls logistics/init (this method) → Shopee assigns AWB / tracking_number
+   * 3. Call get_tracking_number to retrieve AWB
+   *
+   * For Sandbox, dropoff is the default (no pickup_time_id needed).
+   * For Production, branchId from get_branch_list may be required for dropoff.
+   */
+  async arrangeShipment(creds: ShopCredentials, input: ArrangeShipmentInput): Promise<ArrangeShipmentResult> {
+    const cfg = this.cfg();
+    try {
+      const body: Record<string, unknown> = {
+        order_sn: input.orderSn,
+      };
+      if (input.packageNumber) body.package_number = input.packageNumber;
+
+      // Build pickup or dropoff object
+      if (input.pickupTimeId) {
+        body.pickup = { pickup_time_id: input.pickupTimeId };
+      } else {
+        // Default: dropoff (no courier pickup required)
+        body.dropoff = {};
+        if (input.branchId) (body.dropoff as Record<string, unknown>).branch_id = input.branchId;
+      }
+
+      await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/logistics/init',
+        { method: 'POST', body },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+
+      // After init succeeds, fetch AWB
+      const trackingNumber = await this.getTrackingNumber(creds, input.orderSn);
+      logger.info(`arrangeShipment berhasil: order ${input.orderSn}, AWB ${trackingNumber}`, { shopId: creds.shopId });
+
+      return { success: true, trackingNumber };
+    } catch (err) {
+      const msg = (err as Error).message;
+      logger.error(`arrangeShipment gagal untuk order ${input.orderSn}: ${msg}`, { shopId: creds.shopId });
+      return { success: false, trackingNumber: null, message: msg };
+    }
+  }
+
+  /**
+   * Cetak label pengiriman / generate shipping document URL.
+   * Endpoint: POST /api/v2/logistics/download_shipping_document
+   *
+   * Returns a URL to the PDF shipping label that can be opened/printed in browser.
+   * Shopee Sandbox may return a mock URL.
+   */
+  async printShippingLabel(creds: ShopCredentials, orderSn: string, packageNumber?: string): Promise<string | null> {
+    const cfg = this.cfg();
+    try {
+      const packageList: Array<Record<string, unknown>> = [
+        { order_sn: orderSn, ...(packageNumber ? { package_number: packageNumber } : {}) },
+      ];
+      const res = await callShopee<Record<string, unknown>>(
+        cfg,
+        '/api/v2/logistics/download_shipping_document',
+        {
+          method: 'POST',
+          body: {
+            order_list: packageList,
+            shipping_document_type: 'THERMAL_AIR_WAYBILL',
+          },
+        },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      const fileUrl = res?.result_list;
+      if (Array.isArray(fileUrl) && fileUrl.length > 0) {
+        const first = fileUrl[0] as Record<string, unknown>;
+        return (first?.file_url as string) ?? null;
+      }
+      return null;
+    } catch (err) {
+      logger.warn(`printShippingLabel gagal untuk order ${orderSn}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  // ── Webhook ───────────────────────────────────────────────────────────────
+
+  /**
+   * Verify a Shopee webhook push signature.
+   * Algorithm (verified from official docs §2.2):
+   *   HMAC-SHA256(url + "|" + raw_body, partner_key) → lowercase hex
+   *   Value is in HTTP header "Authorization".
+   */
   verifyWebhookSignature(url: string, rawBody: string, signature: string, partnerKey: string): boolean {
-    // Verified: HMAC-SHA256(url + "|" + raw_body, partner_key) → lowercase HEX, in `Authorization` header.
-    const expected = crypto.createHmac('sha256', partnerKey).update(`${url}|${rawBody}`).digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature.toLowerCase()));
+    const expected = crypto
+      .createHmac('sha256', partnerKey)
+      .update(`${url}|${rawBody}`)
+      .digest('hex');
+    // Use timing-safe comparison to prevent timing attacks
+    try {
+      return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature.toLowerCase()));
+    } catch {
+      // Buffers of different length throw — means signature is wrong
+      return false;
+    }
   }
 }

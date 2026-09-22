@@ -1,12 +1,12 @@
 import { type NextRequest } from 'next/server';
-import { triggerOrderSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
+import { triggerReturnSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 
 /**
- * GET  /api/v1/integrations/shopee/sync?shopId=...&operation=... — daftar sync run pesanan
- * POST /api/v1/integrations/shopee/sync — trigger sinkronisasi pesanan
+ * GET  /api/v1/integrations/shopee/sync-returns — daftar sync run return
+ * POST /api/v1/integrations/shopee/sync-returns — trigger sinkronisasi return
  */
 
 export async function GET(request: NextRequest) {
@@ -14,8 +14,7 @@ export async function GET(request: NextRequest) {
   try {
     const ctx = getAuthContext(request);
     const shopId = getQueryParam(request, 'shopId');
-    const operation = getQueryParam(request, 'operation') ?? 'import_orders';
-    const runs = await listSyncRuns(ctx.tenantId, shopId, operation);
+    const runs = await listSyncRuns(ctx.tenantId, shopId, 'sync_returns');
     return successResponse(runs, { requestId });
   } catch (error) {
     return handleRouteError(error, requestId, request);
@@ -28,9 +27,9 @@ export async function POST(request: NextRequest) {
     const ctx = getAuthContext(request);
     const body = (await request.json()) as { shopId?: string };
     if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
-    const result = await triggerOrderSync(ctx.tenantId, body.shopId, ctx.userId);
+    const result = await triggerReturnSync(ctx.tenantId, body.shopId, ctx.userId);
     return successResponse(
-      { message: 'Sinkronisasi pesanan selesai.', syncRun: result },
+      { message: 'Sinkronisasi return selesai.', syncRun: result },
       { requestId },
     );
   } catch (error) {

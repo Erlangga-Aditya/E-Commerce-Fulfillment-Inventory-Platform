@@ -16,6 +16,7 @@ import {
   Settings,
   LogOut,
   PackageCheck,
+  Package,
   Menu,
   X,
   PanelLeftClose,
@@ -27,6 +28,7 @@ import { api } from '@/lib/api';
 const NAV_ITEMS = [
   { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { href: '/dashboard/pesanan', icon: ShoppingCart, label: 'Pesanan' },
+  { href: '/dashboard/produk', icon: Package, label: 'Produk' },
   { href: '/dashboard/inventori', icon: Boxes, label: 'Inventori' },
   { href: '/dashboard/fulfillment', icon: Workflow, label: 'Fulfillment' },
   { href: '/dashboard/scanner', icon: ScanLine, label: 'Scanner' },

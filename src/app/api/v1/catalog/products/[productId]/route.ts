@@ -1,5 +1,5 @@
 import { type NextRequest } from 'next/server';
-import { getProductById, updateProduct, UpdateProductSchema } from '@/modules/catalog/application/catalog.usecase';
+import { getProductById, updateProduct, UpdateProductSchema, deleteProduct } from '@/modules/catalog/application/catalog.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
 
@@ -22,5 +22,15 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
     const body: unknown = await request.json();
     const validated = UpdateProductSchema.parse(body);
     return successResponse(await updateProduct(ctx.tenantId, productId, validated, ctx.userId), { requestId });
+  } catch (error) { return handleRouteError(error, requestId, request); }
+}
+
+export async function DELETE(request: NextRequest, { params }: Ctx) {
+  const requestId = getRequestId(request);
+  try {
+    const ctx = getAuthContext(request);
+    const { productId } = await params;
+    await deleteProduct(ctx.tenantId, productId, ctx.userId);
+    return successResponse({ deleted: true, productId }, { requestId });
   } catch (error) { return handleRouteError(error, requestId, request); }
 }

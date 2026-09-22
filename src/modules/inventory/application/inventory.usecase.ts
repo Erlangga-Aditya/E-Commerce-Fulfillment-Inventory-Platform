@@ -36,6 +36,19 @@ export type AdjustStockInput = z.infer<typeof AdjustStockSchema>;
 export type ReceiveStockInput = z.infer<typeof ReceiveStockSchema>;
 
 // ────────────────────────────────────────────────────────────
+// Helper: Resolve actorId for inventory movement foreign key
+// ────────────────────────────────────────────────────────────
+
+async function resolveValidActorId(
+  tx: { user: { findUnique: (args: { where: { id: string }; select: { id: true } }) => Promise<{ id: string } | null> } },
+  actorId?: string | null,
+): Promise<string | null> {
+  if (!actorId) return null;
+  const user = await tx.user.findUnique({ where: { id: actorId }, select: { id: true } });
+  return user ? user.id : null;
+}
+
+// ────────────────────────────────────────────────────────────
 // Use Cases
 // ────────────────────────────────────────────────────────────
 
@@ -197,6 +210,7 @@ export async function receiveStock(
       },
     });
 
+    const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
       data: {
         tenantId,
@@ -206,7 +220,7 @@ export async function receiveStock(
         quantityDelta: quantity,
         referenceType: 'manual',
         reason: notes ?? 'Penerimaan stok',
-        actorId,
+        actorId: validActorId,
       },
     });
   });
@@ -285,6 +299,7 @@ export async function adjustStock(
       },
     });
 
+    const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
       data: {
         tenantId,
@@ -294,7 +309,7 @@ export async function adjustStock(
         quantityDelta,
         referenceType: 'adjustment',
         reason: `${reason}${notes ? `: ${notes}` : ''}`,
-        actorId,
+        actorId: validActorId,
       },
     });
   });
@@ -362,6 +377,7 @@ export async function reserveStock(
       },
     });
 
+    const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
       data: {
         tenantId,
@@ -371,7 +387,7 @@ export async function reserveStock(
         quantityDelta: -quantity, // reservation reduces available
         referenceType: 'order_item',
         referenceId: orderItemId,
-        actorId,
+        actorId: validActorId,
       },
     });
 
@@ -431,6 +447,7 @@ export async function releaseReservation(
       },
     });
 
+    const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
       data: {
         tenantId,
@@ -441,7 +458,7 @@ export async function releaseReservation(
         referenceType: 'reservation',
         referenceId: reservationId,
         reason: reason ?? 'Reservasi dilepas',
-        actorId,
+        actorId: validActorId,
       },
     });
   });

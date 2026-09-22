@@ -39,7 +39,7 @@ export const UpdateVariantSchema = z.object({
 });
 
 // ────────────────────────────────────────────────────────────
-// Use Cases
+// Product Use Cases
 // ────────────────────────────────────────────────────────────
 
 export async function createProduct(
@@ -112,7 +112,7 @@ export async function listProducts(
 
   const where = {
     tenantId,
-    ...(status ? { status } : {}),
+    status: status ? status : { not: 'ARCHIVED' as const },
     ...(category ? { category } : {}),
     ...(search
       ? {
@@ -248,4 +248,151 @@ export async function updateProduct(
   });
 
   return updated;
+}
+
+/**
+ * Archive (soft-delete) a product and all its variants.
+ * We never hard-delete products because they may be referenced by historical OrderItems.
+ * ARCHIVED products are hidden from catalog listings but preserved for audit integrity.
+ */
+export async function deleteProduct(tenantId: string, productId: string, actorId: string) {
+  const existing = await prisma.product.findFirst({
+    where: { id: productId, tenantId },
+    include: { variants: { select: { id: true } } },
+  });
+
+  if (!existing) throw new NotFoundError('Produk', productId);
+
+  await prisma.$transaction(async (tx) => {
+    // Archive all variants
+    await tx.productVariant.updateMany({
+      where: { productId },
+      data: { status: 'ARCHIVED' },
+    });
+    // Archive the product itself
+    await tx.product.update({
+      where: { id: productId },
+      data: { status: 'ARCHIVED' },
+    });
+  });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'product_archive',
+    entityType: 'Product',
+    entityId: productId,
+    metadata: { name: existing.name, variantCount: existing.variants.length },
+  });
+}
+
+// ────────────────────────────────────────────────────────────
+// Variant Use Cases
+// ────────────────────────────────────────────────────────────
+
+export async function addVariant(
+  tenantId: string,
+  productId: string,
+  input: z.infer<typeof CreateVariantSchema>,
+  actorId: string,
+) {
+  const product = await prisma.product.findFirst({
+    where: { id: productId, tenantId },
+  });
+  if (!product) throw new NotFoundError('Produk', productId);
+
+  if (!validateSku(input.sku)) {
+    throw new ValidationError(`Format SKU tidak valid: ${input.sku}`);
+  }
+
+  const existing = await prisma.productVariant.findFirst({
+    where: {
+      product: { tenantId },
+      sku: input.sku,
+    },
+  });
+  if (existing) {
+    throw new ConflictError(`SKU '${input.sku}' sudah digunakan.`);
+  }
+
+  const variant = await prisma.productVariant.create({
+    data: {
+      productId,
+      sku: input.sku,
+      barcode: input.barcode ?? null,
+      name: input.name,
+      weight: input.weight ?? null,
+      imageUrl: input.imageUrl || null,
+    },
+  });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'variant_create',
+    entityType: 'ProductVariant',
+    entityId: variant.id,
+    metadata: { productId, sku: variant.sku, name: variant.name },
+  });
+
+  return variant;
+}
+
+export async function updateVariant(
+  tenantId: string,
+  variantId: string,
+  input: z.infer<typeof UpdateVariantSchema>,
+  actorId: string,
+) {
+  const variant = await prisma.productVariant.findFirst({
+    where: { id: variantId, product: { tenantId } },
+  });
+  if (!variant) throw new NotFoundError('Varian Produk', variantId);
+
+  const updated = await prisma.productVariant.update({
+    where: { id: variantId },
+    data: {
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.barcode !== undefined ? { barcode: input.barcode } : {}),
+      ...(input.weight !== undefined ? { weight: input.weight } : {}),
+      ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl || null } : {}),
+      ...(input.status ? { status: input.status } : {}),
+    },
+  });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'variant_update',
+    entityType: 'ProductVariant',
+    entityId: variantId,
+    metadata: input,
+  });
+
+  return updated;
+}
+
+export async function deleteVariant(
+  tenantId: string,
+  variantId: string,
+  actorId: string,
+) {
+  const variant = await prisma.productVariant.findFirst({
+    where: { id: variantId, product: { tenantId } },
+  });
+  if (!variant) throw new NotFoundError('Varian Produk', variantId);
+
+  await prisma.productVariant.update({
+    where: { id: variantId },
+    data: { status: 'ARCHIVED' },
+  });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'variant_archive',
+    entityType: 'ProductVariant',
+    entityId: variantId,
+    metadata: { sku: variant.sku, name: variant.name },
+  });
 }

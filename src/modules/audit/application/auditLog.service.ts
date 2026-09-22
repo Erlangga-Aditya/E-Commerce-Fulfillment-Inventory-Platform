@@ -23,10 +23,16 @@ interface AuditLogInput {
  */
 export async function auditLog(input: AuditLogInput): Promise<void> {
   try {
+    let validActorId = input.actorId;
+    if (validActorId) {
+      const user = await prisma.user.findUnique({ where: { id: validActorId }, select: { id: true } });
+      if (!user) validActorId = undefined;
+    }
+
     await prisma.auditLog.create({
       data: {
         tenantId: input.tenantId,
-        actorId: input.actorId,
+        actorId: validActorId,
         action: input.action,
         entityType: input.entityType,
         entityId: input.entityId,

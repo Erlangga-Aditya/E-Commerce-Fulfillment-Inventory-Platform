@@ -1,12 +1,11 @@
 import { type NextRequest } from 'next/server';
-import { triggerOrderSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
+import { triggerProductSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
-import { ValidationError } from '@/shared/errors/AppError';
 
 /**
- * GET  /api/v1/integrations/shopee/sync?shopId=...&operation=... — daftar sync run pesanan
- * POST /api/v1/integrations/shopee/sync — trigger sinkronisasi pesanan
+ * GET  /api/v1/integrations/shopee/sync-products — daftar sync run produk
+ * POST /api/v1/integrations/shopee/sync-products — trigger sinkronisasi produk
  */
 
 export async function GET(request: NextRequest) {
@@ -14,8 +13,7 @@ export async function GET(request: NextRequest) {
   try {
     const ctx = getAuthContext(request);
     const shopId = getQueryParam(request, 'shopId');
-    const operation = getQueryParam(request, 'operation') ?? 'import_orders';
-    const runs = await listSyncRuns(ctx.tenantId, shopId, operation);
+    const runs = await listSyncRuns(ctx.tenantId, shopId, 'sync_products');
     return successResponse(runs, { requestId });
   } catch (error) {
     return handleRouteError(error, requestId, request);
@@ -27,10 +25,16 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = getAuthContext(request);
     const body = (await request.json()) as { shopId?: string };
-    if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
-    const result = await triggerOrderSync(ctx.tenantId, body.shopId, ctx.userId);
+    if (!body.shopId) {
+      const { ValidationError } = await import('@/shared/errors/AppError');
+      throw new ValidationError('shopId wajib diisi.');
+    }
+    const result = await triggerProductSync(ctx.tenantId, body.shopId, ctx.userId);
     return successResponse(
-      { message: 'Sinkronisasi pesanan selesai.', syncRun: result },
+      {
+        message: 'Sinkronisasi produk selesai.',
+        syncRun: result,
+      },
       { requestId },
     );
   } catch (error) {

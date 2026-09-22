@@ -1,8 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState, useMemo } from 'react';
-import { PackageCheck, ClipboardCheck, Search, RefreshCw, Undo2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import {
+  PackageCheck,
+  ClipboardCheck,
+  Search,
+  RefreshCw,
+  Undo2,
+  Cable,
+  ChevronDown,
+  ChevronUp,
+  AlertCircle,
+  Package,
+} from 'lucide-react';
+import { api, formatDate } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
 
 interface RetItem {
@@ -20,21 +31,35 @@ interface Ret {
   reason: string | null;
   order: { externalOrderId: string; shopName: string };
   items: RetItem[];
+  createdAt: string;
 }
 
 const RESULTS = [
-  { key: 'SELLABLE', label: 'Layak Jual (Restok Kembali)' },
-  { key: 'DAMAGED', label: 'Rusak / Cacat (Stok Rusak)' },
+  { key: 'SELLABLE', label: 'Layak Jual (Restok Kembali ke Saldo Tersedia)' },
+  { key: 'DAMAGED', label: 'Rusak / Cacat (Catat ke Saldo Rusak)' },
   { key: 'PARTIAL', label: 'Sebagian Layak' },
   { key: 'REJECTED', label: 'Ditolak (Tidak Direstok)' },
+] as const;
+
+const STATUS_FILTERS = [
+  { label: 'Semua Retur', value: 'ALL' },
+  { label: 'Diajukan / Di Jalan', value: 'REQUESTED' },
+  { label: 'Diterima di Gudang', value: 'RECEIVED' },
+  { label: 'Proses Inspeksi QC', value: 'INSPECTION' },
+  { label: 'Selesai Direstok', value: 'RESTOCKED' },
+  { label: 'Barang Rusak', value: 'DAMAGED' },
 ] as const;
 
 export default function PengembalianPage() {
   const [returns, setReturns] = useState<Ret[]>([]);
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
+  const [syncingReturns, setSyncingReturns] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
+
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [qcModal, setQcModal] = useState<Ret | null>(null);
   const [qc, setQc] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -49,15 +74,37 @@ export default function PengembalianPage() {
   useEffect(load, [load]);
 
   const filteredReturns = useMemo(() => {
-    if (!search.trim()) return returns;
-    const q = search.toLowerCase();
-    return returns.filter(
-      (r) =>
+    return returns.filter((r) => {
+      if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;
+      if (!search.trim()) return true;
+      const q = search.toLowerCase();
+      return (
         (r.externalReturnId && r.externalReturnId.toLowerCase().includes(q)) ||
         r.order.externalOrderId.toLowerCase().includes(q) ||
-        (r.reason && r.reason.toLowerCase().includes(q)),
-    );
-  }, [returns, search]);
+        (r.reason && r.reason.toLowerCase().includes(q)) ||
+        r.items.some((i) => i.sku.toLowerCase().includes(q) || i.variantName.toLowerCase().includes(q))
+      );
+    });
+  }, [returns, search, statusFilter]);
+
+  async function handleSyncReturns() {
+    setSyncingReturns(true);
+    setNotice(null);
+    try {
+      const res = await api<{ count: number }>('/api/v1/integrations/shopee/sync-returns', {
+        method: 'POST',
+      });
+      setNotice({
+        tone: 'success',
+        text: `Sinkronisasi retur selesai. ${res.count ?? 0} data retur Shopee diperbarui.`,
+      });
+      load();
+    } catch (e) {
+      setNotice({ tone: 'danger', text: `Gagal sinkronkan retur: ${(e as Error).message}` });
+    } finally {
+      setSyncingReturns(false);
+    }
+  }
 
   async function receive(id: string) {
     setNotice(null);
@@ -98,40 +145,67 @@ export default function PengembalianPage() {
     <div>
       <PageHeader
         title="Pengembalian Barang (Retur)"
-        subtitle="Inspeksi QC paket retur pembeli dan pemulihan stok otomatis ke inventori"
+        subtitle="Inspeksi Quality Control (QC) paket retur pembeli, kelayakan fisik barang, dan pemulihan saldo stok otomatis"
         actions={
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => {
-              setLoading(true);
-              setError('');
-              load();
-            }}
-          >
-            <RefreshCw size={14} aria-hidden />
-            <span>Muat Ulang</span>
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                setLoading(true);
+                setError('');
+                load();
+              }}
+            >
+              <RefreshCw size={14} aria-hidden />
+              <span>Muat Ulang</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={syncingReturns}
+              onClick={handleSyncReturns}
+            >
+              <Cable size={14} aria-hidden />
+              <span>{syncingReturns ? 'Menyinkronkan...' : 'Sinkronkan Retur Shopee'}</span>
+            </button>
+          </div>
         }
       />
 
-      {notice ? (
+      {notice && (
         <div className="mb16">
           <Alert tone={notice.tone}>{notice.text}</Alert>
         </div>
-      ) : null}
+      )}
 
       {/* Filter & Search */}
-      <div className="filter-bar">
-        <div className="search-input-wrapper">
-          <Search size={16} aria-hidden />
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Cari No. Retur, No. Pesanan, Alasan retur..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+      <div className="card mb20" style={{ padding: 16 }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+          <div className="search-input-wrapper" style={{ flex: 1, minWidth: 260 }}>
+            <Search size={16} aria-hidden />
+            <input
+              type="text"
+              className="search-input"
+              placeholder="Cari No. Retur, No. Pesanan, SKU produk, atau alasan..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {STATUS_FILTERS.map((f) => (
+            <button
+              key={f.value}
+              type="button"
+              className={`btn btn-sm ${statusFilter === f.value ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ borderRadius: 20, fontSize: 12, padding: '4px 12px' }}
+              onClick={() => setStatusFilter(f.value)}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -148,11 +222,11 @@ export default function PengembalianPage() {
         />
       ) : filteredReturns.length === 0 ? (
         <EmptyState
-          title={search ? 'Data retur tidak ditemukan' : 'Belum ada pengembalian aktif'}
+          title={search || statusFilter !== 'ALL' ? 'Data retur tidak ditemukan' : 'Belum ada pengembalian aktif'}
           description={
-            search
-              ? `Tidak ada data retur yang cocok dengan pencarian "${search}".`
-              : 'Data pengembalian barang masuk otomatis dari Shopee via webhook sinkronisasi retur.'
+            search || statusFilter !== 'ALL'
+              ? 'Tidak ada data retur yang cocok dengan kata kunci atau status filter yang dipilih.'
+              : 'Data pengembalian barang masuk otomatis dari Shopee via fitur auto-sync atau klik "Sinkronkan Retur Shopee".'
           }
         />
       ) : (
@@ -160,8 +234,9 @@ export default function PengembalianPage() {
           <table className="table">
             <thead>
               <tr>
+                <th style={{ width: 36 }}></th>
                 <th>No. Retur</th>
-                <th>No. Pesanan</th>
+                <th>No. Pesanan & Toko</th>
                 <th>Status Retur</th>
                 <th>Alasan Pengembalian</th>
                 <th className="num">Jml Item</th>
@@ -169,61 +244,130 @@ export default function PengembalianPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredReturns.map((r) => (
-                <tr key={r.id}>
-                  <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <Undo2 size={15} style={{ color: 'var(--primary)', flexShrink: 0 }} aria-hidden />
-                      <span className="mono" style={{ fontWeight: 700 }}>
-                        {r.externalReturnId ?? 'Menunggu ID Retur'}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="mono">{r.order.externalOrderId}</td>
-                  <td>
-                    <StatusBadge status={r.status} />
-                  </td>
-                  <td>
-                    <div style={{ maxWidth: 280, fontSize: 13 }} className="muted">
-                      {r.reason ?? 'Tidak ada alasan terlampir'}
-                    </div>
-                  </td>
-                  <td className="num">
-                    <span style={{ fontWeight: 600 }}>{r.items.length}</span>
-                  </td>
-                  <td style={{ textAlign: 'center' }}>
-                    {(r.status === 'REQUESTED' || r.status === 'IN_TRANSIT') && (
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-sm"
-                        onClick={() => receive(r.id)}
-                      >
-                        <PackageCheck size={13} aria-hidden />
-                        <span>Terima Fisik</span>
-                      </button>
+              {filteredReturns.map((r) => {
+                const isExpanded = expandedId === r.id;
+
+                return (
+                  <>
+                    <tr key={r.id} style={{ background: isExpanded ? 'var(--subtle)' : undefined }}>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-icon btn-sm"
+                          title="Lihat Detail Item Retur"
+                          onClick={() => setExpandedId(isExpanded ? null : r.id)}
+                          style={{ padding: 4 }}
+                        >
+                          {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                        </button>
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Undo2 size={15} style={{ color: 'var(--primary)', flexShrink: 0 }} aria-hidden />
+                          <span className="mono" style={{ fontWeight: 700, fontSize: 13 }}>
+                            {r.externalReturnId ?? 'Menunggu ID Retur'}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="mono" style={{ fontSize: 12 }}>
+                          {r.order.externalOrderId}
+                        </div>
+                        <div className="small muted">{r.order.shopName}</div>
+                      </td>
+                      <td>
+                        <StatusBadge status={r.status} />
+                      </td>
+                      <td>
+                        <div style={{ maxWidth: 280, fontSize: 13 }} className="muted">
+                          {r.reason ?? 'Tidak ada alasan terlampir'}
+                        </div>
+                      </td>
+                      <td className="num">
+                        <span style={{ fontWeight: 600 }}>{r.items.length} item</span>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {(r.status === 'REQUESTED' || r.status === 'IN_TRANSIT') && (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={() => receive(r.id)}
+                          >
+                            <PackageCheck size={13} aria-hidden />
+                            <span>Terima Fisik</span>
+                          </button>
+                        )}
+                        {(r.status === 'RECEIVED' || r.status === 'INSPECTION') && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              setQcModal(r);
+                              setQc({});
+                            }}
+                          >
+                            <ClipboardCheck size={13} aria-hidden />
+                            <span>Inspeksi QC</span>
+                          </button>
+                        )}
+                        {r.status === 'RESTOCKED' && (
+                          <span className="badge badge-success">Selesai Restok</span>
+                        )}
+                        {r.status === 'DAMAGED' && (
+                          <span className="badge badge-danger">Barang Rusak</span>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Expandable item details */}
+                    {isExpanded && (
+                      <tr key={`${r.id}-detail`} style={{ background: 'var(--subtle)' }}>
+                        <td colSpan={7} style={{ padding: '12px 24px' }}>
+                          <div
+                            style={{
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 8,
+                              padding: 14,
+                            }}
+                          >
+                            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <Package size={14} style={{ color: 'var(--primary)' }} />
+                              Daftar Barang yang Dikembalikan:
+                            </div>
+                            <table className="table" style={{ margin: 0, fontSize: 12 }}>
+                              <thead>
+                                <tr>
+                                  <th>SKU</th>
+                                  <th>Nama Varian</th>
+                                  <th className="num">Kuantitas</th>
+                                  <th>Hasil Inspeksi QC</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {r.items.map((item) => (
+                                  <tr key={item.id}>
+                                    <td className="mono">{item.sku}</td>
+                                    <td>{item.variantName}</td>
+                                    <td className="num">{item.quantity} pcs</td>
+                                    <td>
+                                      {item.inspectionResult ? (
+                                        <span className="badge badge-neutral">{item.inspectionResult}</span>
+                                      ) : (
+                                        <span className="small muted">Menunggu QC</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>
                     )}
-                    {(r.status === 'RECEIVED' || r.status === 'INSPECTION') && (
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => {
-                          setQcModal(r);
-                          setQc({});
-                        }}
-                      >
-                        <ClipboardCheck size={13} aria-hidden />
-                        <span>Inspeksi QC</span>
-                      </button>
-                    )}
-                    {r.status === 'RESTOCKED' && (
-                      <span className="badge badge-success">Selesai Restok</span>
-                    )}
-                    {r.status === 'DAMAGED' && (
-                      <span className="badge badge-danger">Barang Rusak</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                  </>
+                );
+              })}
             </tbody>
           </table>
         </div>
