@@ -40,6 +40,9 @@ coverage/
 scratch_*.ts
 scratch_*.js
 scratch_*.mjs
+tmp-*.ts
+tmp-*.js
+tmp-*.cjs
 *.jfif
 # Artefak uji lokal: cookie jar, duplikat bukti, skrip probe, screenshot QA
 lt.txt
