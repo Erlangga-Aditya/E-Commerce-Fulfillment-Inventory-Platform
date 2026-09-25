@@ -139,19 +139,28 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
   let E2E_BASE_URL_HAS_RUN = false;
 
   /**
-   * Alur resmi: nomor resi harus terbit dulu sebelum barang boleh "siap kirim".
-   * Helper ini meniru operator menekan "Atur Pengiriman (Ambil Resi)".
+   * Nomor resi untuk fixture uji.
+   *
+   * PENTING: resi TIDAK boleh dikarang oleh aplikasi. Test E2E memakai fixture
+   * eksplisit yang ditulis langsung ke DB (bukan hasil panggilan Shopee),
+   * karena order `E2E-*` memang tidak ada di Shopee sama sekali. Dengan begitu
+   * gerbang AWB, FIFO, dan handover tetap diuji dengan data nyata di DB,
+   * sementara jalur "Shopee menolak → dilaporkan jujur" diuji terpisah di test 7.
    */
-  async function ambilNomorResi(orderId: string): Promise<string> {
-    await call(`/api/v1/orders/${orderId}/prepare-shipment`, { method: 'POST', body: {} });
-    const shipment = await prisma.shipment.findFirstOrThrow({
-      where: { orderId },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!shipment.awb) {
-      throw new Error('Shopee belum menerbitkan nomor resi untuk pesanan ini.');
+  async function ambilNomorResi(orderId: string, label: string): Promise<string> {
+    const awb = `E2E-AWB-${label}-${Date.now()}`;
+    const shipment = await prisma.shipment.findFirst({ where: { orderId } });
+    if (shipment) {
+      await prisma.shipment.update({
+        where: { id: shipment.id },
+        data: { awb, carrier: 'E2E Express', status: 'READY_TO_SHIP' },
+      });
+    } else {
+      await prisma.shipment.create({
+        data: { orderId, awb, carrier: 'E2E Express', status: 'READY_TO_SHIP' },
+      });
     }
-    return shipment.awb;
+    return awb;
   }
 
   it('1. daftar produk tambah-stok hanya berisi produk Shopee ASLI (hasil sinkronisasi)', async () => {
@@ -220,9 +229,9 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
       body: { warehouseId: WAREHOUSE_ID },
     });
 
-    // Resi wajib terbit dulu (gerbang baru) — inilah yang dilakukan operator lewat
-    // tombol "Atur Pengiriman (Ambil Resi)".
-    const awb3 = await ambilNomorResi(imported.orderId);
+    // Resi harus sudah ada di paket sebelum packing boleh terjadi (gerbang AWB).
+    // Fixture ditulis langsung ke DB karena order E2E tidak ada di Shopee.
+    const awb3 = await ambilNomorResi(imported.orderId, 'FIFO');
 
     const lotsBefore = await prisma.stockLot.findMany({
       where: { warehouseId: WAREHOUSE_ID, variantId: VARIANT_ID, remaining: { gt: 0 } },
@@ -287,7 +296,7 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
       method: 'POST',
       body: { warehouseId: WAREHOUSE_ID },
     });
-    const awb4 = await ambilNomorResi(imported.orderId);
+    const awb4 = await ambilNomorResi(imported.orderId, 'KURANG');
 
     const movementsBefore = await prisma.inventoryMovement.count({
       where: { warehouseId: WAREHOUSE_ID, variantId: VARIANT_ID, movementType: 'DEDUCTION' },
@@ -340,7 +349,7 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
       body: { warehouseId: WAREHOUSE_ID },
     });
 
-    const awb5 = await ambilNomorResi(imported.orderId);
+    const awb5 = await ambilNomorResi(imported.orderId, 'HANDOVER');
     const scan = await call<{ code: string }>('/api/v1/fulfillment/scan-awb', {
       method: 'POST',
       body: { scannedCode: awb5, confirmPicking: true },
@@ -352,10 +361,15 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
       where: { warehouseId: WAREHOUSE_ID, variantId: VARIANT_ID, movementType: 'DEDUCTION' },
     });
 
-    await call(`/api/v1/fulfillment/orders/${fo.id}/ready-to-ship`, { method: 'POST', body: {} });
+    // UI satu halaman menampilkan PACKED sebagai "Siap Kirim" dan operator
+    // boleh langsung menekan "Serahkan ke Kurir". Backend harus aman, meskipun
+    // operator tidak memanggil route ready-to-ship secara terpisah.
+    const shipment = await prisma.shipment.findFirstOrThrow({ where: { orderId: imported.orderId } });
+    // Fixture E2E memakai status `READY_TO_SHIP` (paket belum diserahkan kurir).
+    expect(['READY_TO_SHIP', 'PICKED_UP']).toContain(shipment.status);
     await call(`/api/v1/fulfillment/orders/${fo.id}/handover`, {
       method: 'POST',
-      body: { carrier: 'SPX Express', awb: `SPXE2E${Date.now()}` },
+      body: { carrier: shipment.carrier ?? 'SPX Express', awb: awb5 },
     });
 
     const deductionAfterHandover = await prisma.inventoryMovement.count({
@@ -375,9 +389,10 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
     });
 
     const shipment = await prisma.shipment.findFirstOrThrow({ where: { orderId: order.id } });
+    expect(shipment.awb).toBeTruthy();
     const scan = await call<{ code: string; stockDeducted: boolean }>('/api/v1/fulfillment/scan-awb', {
       method: 'POST',
-      body: { scannedCode: shipment.awb ?? order.externalOrderId },
+      body: { scannedCode: shipment.awb! },
     });
     expect(['ALREADY_HANDED_OVER', 'ALREADY_PACKED']).toContain(scan.code);
 
@@ -386,7 +401,8 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
     });
     expect(movementsAfter).toBe(movementsBefore);
   }, 60_000);
-  it('6b. GERBANG RESI: pesanan tanpa nomor resi tidak boleh dinyatakan siap kirim', async () => {
+
+  it('6b. GERBANG RESI: nomor pesanan tidak boleh dipakai untuk menyelesaikan packing', async () => {
     const orderSn = `E2E-${Date.now()}-TANPARESI`;
     const imported = await importOrder(tenantId, {
       shopId,
@@ -415,20 +431,23 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
       { method: 'POST', body: { scannedCode: orderSn, confirmPicking: true } },
     );
 
-    expect(scan.code, 'harus ditolak karena nomor resi belum ada').toBe('NEEDS_SHIPMENT');
+    // Nomor pesanan boleh DITEMUKAN (lookup konteks) tapi TIDAK boleh menyelesaikan
+    // packing: pesanan ini belum punya nomor resi, jadi jawabannya NEEDS_SHIPMENT
+    // dan stok tidak boleh tersentuh.
+    expect(scan.code, 'nomor pesanan bukan hasil scan resi yang sah').toBe('NEEDS_SHIPMENT');
     expect(scan.stockDeducted).toBe(false);
-    expect(scan.message.toLowerCase()).toContain('resi');
+    expect(scan.message.toLowerCase()).toContain('belum punya pengiriman');
 
     const movementsAfter = await prisma.inventoryMovement.count({
       where: { warehouseId: WAREHOUSE_ID, variantId: VARIANT_ID, movementType: 'DEDUCTION' },
     });
-    expect(movementsAfter, 'stok tidak boleh dipotong saat resi belum ada').toBe(movementsBefore);
+    expect(movementsAfter, 'stok tidak boleh dipotong tanpa scan resi').toBe(movementsBefore);
 
     const fo = await prisma.fulfillmentOrder.findFirstOrThrow({ where: { orderId: imported.orderId } });
     expect(fo.status).not.toBe('PACKED');
   }, 60_000);
 
-  it('7. "Ambil Resi dari Shopee" (satu klik): pesanan masuk antrian + resi dibuat', async () => {
+  it('7. "Ambil Resi dari Shopee" (satu klik): pesanan masuk antrian, dan kegagalan resi dilaporkan jujur', async () => {
     const orderSn = `E2E-${Date.now()}-RESI`;
     const imported = await importOrder(tenantId, {
       shopId,
@@ -455,16 +474,15 @@ describe.skipIf(!BASE)('E2E Operasi Harian — stok FIFO dengan produk Shopee as
     const fo = await prisma.fulfillmentOrder.findFirst({ where: { orderId: imported.orderId } });
     expect(fo, 'pesanan harus punya antrian kerja setelah Ambil Resi').not.toBeNull();
 
-    // Resi: dibuat, atau gagal dengan alasan yang jelas (tidak boleh diam-diam).
-    expect(typeof res.message).toBe('string');
+    // Order E2E tidak ada di Shopee, jadi wajib gagal — dan wajib JUJUR:
+    // tidak boleh ada nomor resi karangan yang tersimpan di database.
+    expect(res.success, 'order E2E tidak mungkin mendapat resi asli dari Shopee').toBe(false);
+    expect(res.simulated, 'resi simulasi sudah dihapus dari aplikasi').toBe(false);
     expect(res.message.length).toBeGreaterThan(5);
-    if (res.success) {
-      expect(res.trackingNumber).toBeTruthy();
-      const shipment = await prisma.shipment.findFirst({ where: { orderId: imported.orderId } });
-      expect(shipment?.awb).toBe(res.trackingNumber);
-    } else {
-      expect(res.message.toLowerCase()).toContain('resi');
-    }
+    expect(res.message.toLowerCase()).toContain('resi');
+
+    const shipment = await prisma.shipment.findFirst({ where: { orderId: imported.orderId } });
+    expect(shipment?.awb ?? null, 'tidak boleh ada nomor resi karangan tersimpan').toBeNull();
   }, 60_000);
 
   it('8. daftar kerja mengembalikan tahapan & urutan yang bisa dipilih', async () => {

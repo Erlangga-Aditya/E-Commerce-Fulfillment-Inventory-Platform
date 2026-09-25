@@ -556,6 +556,20 @@ export async function completePacking(
   }> = [];
 
   await prisma.$transaction(async (tx) => {
+    // 0. KUNCI-LAHAN: claim status di awal transaksi dengan update bersyarat.
+    // Tanpa ini dua scan paralel (kamera + USB scanner, atau dua operator) sama-sama
+    // membaca status lama, lalu masing-masing memotong stok → stok berkurang dobel.
+    const claimed = await tx.fulfillmentOrder.updateMany({
+      where: { id: fulfillmentOrderId, status: fo.status },
+      data: { status: 'PACKING' },
+    });
+    if (claimed.count === 0) {
+      throw new BusinessRuleViolationError(
+        'Paket sedang atau sudah dikemas oleh operator lain. Muat ulang daftar untuk melihat status terbaru.',
+        { fulfillmentOrderId, expectedStatus: fo.status },
+      );
+    }
+
     // 1. Kurangi stok fisik + konsumsi reservasi + ledger
     for (const item of fo.order.items) {
       const remaining = item.quantity - item.fulfilledQuantity;
@@ -614,7 +628,7 @@ export async function completePacking(
       });
     }
 
-    // 2. Status PACKED + catat task packing
+    // 2. Selesaikan dikemas. Handover nanti menjalankan rantai transisi yang sah.
     await tx.fulfillmentOrder.update({ where: { id: fulfillmentOrderId }, data: { status: 'PACKED' } });
     await tx.packingTask.create({
       data: { fulfillmentOrderId, status: 'COMPLETED', packedById: actorId, packedAt: new Date(), notes },
@@ -681,7 +695,22 @@ export async function handOverToCarrier(
     },
   });
   if (!fo) throw new NotFoundError('Fulfillment order', fulfillmentOrderId);
-  assertTransition(fo.status, 'HANDED_OVER');
+  // UI satu halaman menganggap PACKED sebagai "Siap Kirim" agar operator dapat
+  // langsung menyerahkan paket. Backend tetap menghormati state machine: PACKED
+  // harus melewati READY_TO_SHIP lebih dulu, lalu baru HANDED_OVER.
+  // UI "Siap Kirim" juga mencakup PACKED. Backend tetap menyelesaikan rantai
+  // PACKED → READY_TO_SHIP → HANDED_OVER dalam SATU transaksi tanpa potongan stok kedua.
+  const enteringFromPacked = fo.status === 'PACKED';
+  if (enteringFromPacked) {
+    assertTransition(fo.status, 'READY_TO_SHIP');
+  } else if (fo.status === 'READY_TO_SHIP') {
+    assertTransition(fo.status, 'HANDED_OVER');
+  } else {
+    throw new BusinessRuleViolationError(
+      `Pesanan belum siap diserahkan ke kurir. Status saat ini: ${fo.status}.`,
+      { status: fo.status },
+    );
+  }
 
   // Guard fail-fast: jangan pernah menyerahkan paket yang stoknya belum terpotong.
   const notDeducted = fo.order.items.filter((i) => i.fulfilledQuantity < i.quantity);
@@ -693,27 +722,40 @@ export async function handOverToCarrier(
   }
 
   const shipment = await prisma.$transaction(async (tx) => {
-    const activeShipment = fo.order.shipments.find(
-      (s) => s.status === 'READY_TO_SHIP' || s.status === 'PENDING',
-    );
-    const created =
-      activeShipment ??
-      (await tx.shipment.create({
-        data: { orderId: fo.orderId, awb: awb ?? null, carrier: carrier ?? null, status: 'READY_TO_SHIP' },
-      }));
+    if (enteringFromPacked) {
+      await tx.fulfillmentOrder.update({
+        where: { id: fulfillmentOrderId },
+        data: { status: 'READY_TO_SHIP' },
+      });
+    }
 
-    // Lengkapi AWB/kurir kalau shipment-nya sudah ada tapi datanya belum terisi.
+    // `PICKED_UP` berarti Shopee sudah menerima permintaan pengiriman, tetapi
+    // paket belum diserahkan ke kurir. Simpan sebagai `READY_TO_SHIP` sampai
+    // operator menyelesaikan scan + handover.
+    const activeShipment = fo.order.shipments.find(
+      (s) => s.status === 'READY_TO_SHIP' || s.status === 'PENDING' || s.status === 'PICKED_UP',
+    );
+    if (!activeShipment) {
+      throw new BusinessRuleViolationError('Data pengiriman belum tersedia. Selesaikan pengaturan pengiriman terlebih dahulu.');
+    }
+    const storedAwb = activeShipment.awb?.trim() || null;
+    if (!storedAwb) {
+      throw new BusinessRuleViolationError('Nomor resi belum tersedia. Selesaikan pengaturan pengiriman sebelum menyerahkan paket.');
+    }
+    if (awb && awb !== storedAwb) {
+      throw new BusinessRuleViolationError('Nomor resi pada paket tidak cocok dengan data pengiriman yang tersimpan.');
+    }
+    if (carrier && activeShipment.carrier && carrier !== activeShipment.carrier) {
+      throw new BusinessRuleViolationError('Kurir pada paket tidak cocok dengan data pengiriman yang tersimpan.');
+    }
+
     const shipment =
-      activeShipment && ((!activeShipment.awb && awb) || (!activeShipment.carrier && carrier))
+      (!activeShipment.carrier || activeShipment.carrier !== carrier) && carrier
         ? await tx.shipment.update({
             where: { id: activeShipment.id },
-            data: {
-              awb: activeShipment.awb ?? awb ?? null,
-              carrier: activeShipment.carrier ?? carrier ?? null,
-              status: 'READY_TO_SHIP',
-            },
+            data: { carrier, status: 'READY_TO_SHIP' },
           })
-        : created;
+        : activeShipment;
 
     await tx.fulfillmentOrder.update({
       where: { id: fulfillmentOrderId },

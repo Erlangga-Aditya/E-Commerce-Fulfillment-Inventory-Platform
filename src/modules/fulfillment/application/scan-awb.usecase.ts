@@ -50,7 +50,8 @@ export interface AwbScanOrderSummary {
   fulfillmentStatus: string | null;
   awb: string | null;
   carrier: string | null;
-  labelUrl: string;
+  /** Label resmi hanya bisa dicetak kalau nomor resi dari Shopee sudah ada. */
+  canPrintOfficialLabel: boolean;
   items: AwbScanOrderItem[];
 }
 
@@ -128,7 +129,7 @@ async function buildOrderSummary(orderId: string): Promise<AwbScanOrderSummary |
     fulfillmentStatus: fo?.status ?? null,
     awb: shipment?.awb ?? null,
     carrier: shipment?.carrier ?? null,
-    labelUrl: `/api/v1/orders/${order.id}/shipping-label?autoprint=1`,
+    canPrintOfficialLabel: Boolean(shipment?.awb?.trim()),
     items: order.items.map((i) => ({
       id: i.id,
       sku: i.variant.sku,
@@ -141,14 +142,19 @@ async function buildOrderSummary(orderId: string): Promise<AwbScanOrderSummary |
   };
 }
 
-/** Cari pesanan dari kode yang discan: nomor resi (AWB), No. Pesanan Shopee, atau ID internal. */
+/**
+ * Cari pesanan dari AWB lebih dulu (itu satu-satunya gerbang packing).
+ * Nomor pesanan hanya lookup konteks supaya operator melihat pesanan yang salah;
+ * nanti `scanAwbForPacking` tetap menolak karena `shipment.awb !== code`.
+ * Penting: kedua query harus di-`await` satu per satu — memakai `??` pada
+ * hasil `Promise` membuat cabang kedua tidak pernah dieksekusi.
+ */
 async function findOrderByCode(tenantId: string, code: string) {
   const byAwb = await prisma.order.findFirst({
     where: { tenantId, shipments: { some: { awb: code } } },
     select: { id: true },
   });
   if (byAwb) return byAwb;
-
   return prisma.order.findFirst({
     where: { tenantId, OR: [{ externalOrderId: code }, { id: code }] },
     select: { id: true },
@@ -175,7 +181,7 @@ export async function scanAwbForPacking(
   if (!found) {
     return emptyOutcome(
       'NOT_FOUND',
-      `Kode "${code}" tidak ditemukan. Pastikan itu nomor resi (AWB) atau No. Pesanan Shopee dari toko yang terhubung.`,
+      `Kode "${code}" tidak ditemukan sebagai nomor resi pada toko yang terhubung. Pastikan barcode yang dipindai adalah resi (AWB), bukan nomor pesanan.`,
     );
   }
 
@@ -205,19 +211,21 @@ export async function scanAwbForPacking(
     );
   }
 
-  // Sudah selesai / sudah dipacking sebelumnya → idempotent, jangan potong stok dua kali.
+  // Sudah selesai / sudah dipacking sebelumnya → idempotent. Penting: stok TIDAK
+  // dipotong pada pemanggilan ini, jadi `stockDeducted` harus `false` supaya UI
+  // dan SSE tidak pernah mengklaim pengurangan yang tidak terjadi.
   if (fo.status === 'HANDED_OVER') {
     return emptyOutcome(
       'ALREADY_HANDED_OVER',
       `Pesanan ${order.externalOrderId} sudah diserahkan ke kurir. Stok sudah dikurangi sebelumnya.`,
-      { stockDeducted: true, order: summary },
+      { order: summary },
     );
   }
   if (fo.status === 'PACKED' || fo.status === 'READY_TO_SHIP') {
     return emptyOutcome(
       'ALREADY_PACKED',
       `Pesanan ${order.externalOrderId} sudah pernah dipacking — stok tidak dikurangi ulang.`,
-      { stockDeducted: true, order: summary },
+      { order: summary },
     );
   }
   if (fo.status === 'EXCEPTION') {
@@ -228,23 +236,21 @@ export async function scanAwbForPacking(
     );
   }
 
-  // ── GERBANG WAJIB ─────────────────────────────────────────────────────────
-  // Barang tidak boleh dinyatakan "siap kirim" kalau nomor resinya belum ada.
-  // Urutan yang benar (sesuai alur Shopee): atur pengiriman → resi terbit → baru dipacking.
-  const shipmentForGate = order.shipments[0] ?? null;
-  const scannedCodeIsTheAwb = Boolean(shipmentForGate?.awb) && shipmentForGate?.awb === code;
-  if (!shipmentForGate?.awb) {
+  const shipment = order.shipments[0] ?? null;
+
+  if (!shipment) {
     return emptyOutcome(
       'NEEDS_SHIPMENT',
-      `Pesanan ${order.externalOrderId} belum punya nomor resi, jadi belum bisa dinyatakan siap kirim. Klik "Ambil Resi dari Shopee" pada pesanan ini supaya nomor resinya terbit, lalu scan resinya.`,
+      `Pesanan ${order.externalOrderId} belum punya pengiriman. Klik "Ambil Resi dari Shopee" terlebih dahulu.`,
       { order: summary },
     );
   }
-  if (!scannedCodeIsTheAwb) {
-    // Kode yang discan bukan resi pesanan ini (mis. nomor pesanan).
+
+  const isAwbScan = shipment.awb !== null && shipment.awb === code;
+  if (!isAwbScan) {
     return emptyOutcome(
       'EXCEPTION',
-      `Kode "${code}" bukan nomor resi pesanan ${order.externalOrderId}. Nomor resi pesanan ini: ${shipmentForGate.awb}.`,
+      `Kode "${code}" bukan nomor resi pesanan ${order.externalOrderId}. Pilih barcode resi yang tercetak pada paket.`,
       { order: summary },
     );
   }

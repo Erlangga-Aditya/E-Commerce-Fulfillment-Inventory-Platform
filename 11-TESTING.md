@@ -30,19 +30,18 @@ Target:
 - webhook idempotency
 
 ## 4. E2E tests
-Critical paths:
-1. Connect shop (or mocked connection flow).
-2. Import order.
-3. Validate stock.
-4. Reserve stock.
-5. Prioritize.
-6. Create picking task.
-7. Scan correct item.
-8. Reject wrong item.
-9. Complete packing.
-10. Mark ready-to-ship.
-11. Receive return.
-12. Restock sellable return.
+Critical paths (sesuai alur operator tunggal di `/dashboard/pesanan`):
+1. Sinkronisasi pesanan dari Shopee (berjalan tiap 60 detik di server).
+2. Ambil resi dari Shopee — **gagal harus dilaporkan jujur, tanpa nomor karangan**.
+3. Gerbang resi: pemindai **harus** nomor resi; nomor pesanan tidak boleh menyelesaikan packing.
+4. Scan resi → potong stok FIFO dari lot terlama.
+5. Stok kurang → `WAITING_STOCK`, stok tidak berubah, perlu keputusan operator.
+6. Scan ulang pesanan yang sudah dikemas → idempoten, stok tidak dipotong dua kali.
+7. Serahkan ke kurir → `PACKED → READY_TO_SHIP → HANDED_OVER` dalam satu transaksi, tanpa deduction kedua.
+8. Scan **dua operator bersamaan** → hanya satu yang berhasil memotong stok.
+9. Terima pengembalian & stok kembali.
+
+> Bukti eksekusi ada di `docs/riwayat-pengujian.md`. Skipped bukan lulus.
 
 ## 5. Acceptance criteria example
 

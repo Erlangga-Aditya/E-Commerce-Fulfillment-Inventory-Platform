@@ -13,10 +13,18 @@ const nextConfig: NextConfig = {
     return [
       {
         // Semua yang BUKAN aset statis Next.js: jangan disimpan peramban.
-        source: "/:path((?!_next/static|_next/image|favicon.ico).*)",
+        source: "/:path((?!_next/static|_next/image|favicon.ico|sw.js).*)",
         headers: [
           { key: "Cache-Control", value: "no-store, must-revalidate" },
           { key: "Pragma", value: "no-cache" },
+        ],
+      },
+      {
+        source: '/sw.js',
+        headers: [
+          { key: 'Content-Type', value: 'application/javascript; charset=utf-8' },
+          { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'" },
         ],
       },
     ];

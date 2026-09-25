@@ -130,9 +130,174 @@ a:hover {
   border-radius: var(--r-xs);
 }
 
-/* ============================================================
-   RESPONSIVE LAYOUT & CONTAINER
-   ============================================================ */
+/* Scanner kamera: shell rasio tetap agar preview dan overlay selalu sama. */
+.barcode-scanner {
+  min-width: 0;
+}
+
+.barcode-scanner .scanner-camera-shell {
+  min-width: 0;
+}
+
+.scanner-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.scanner-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scanner-input-wrap {
+  position: relative;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.scanner-input {
+  width: 100%;
+  min-width: 0;
+  padding-left: 32px;
+}
+
+.scanner-input-icon {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  z-index: 1;
+  color: var(--on-surface-variant, #64748b);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.scanner-hint,
+.scanner-warning,
+.scanner-error {
+  margin: 8px 0 0;
+}
+
+.scanner-warning {
+  color: var(--warning, #b45309);
+}
+
+.scanner-error {
+  color: var(--danger, #dc2626);
+}
+
+.scanner-camera-shell {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #0f172a;
+  visibility: hidden;
+}
+
+.scanner-camera-shell.is-ready {
+  visibility: visible;
+}
+
+.scanner-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.scanner-reticle {
+  position: absolute;
+  top: 22%;
+  right: 10%;
+  bottom: 22%;
+  left: 10%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
+  box-shadow: 0 0 0 999px rgba(15, 23, 42, 0.24);
+  pointer-events: none;
+}
+
+.scanner-camera-status,
+.scanner-camera-tip {
+  position: absolute;
+  right: 12px;
+  left: 12px;
+  color: #fff;
+  text-align: center;
+  pointer-events: none;
+}
+
+.scanner-camera-status {
+  top: 50%;
+  font-size: 13px;
+  transform: translateY(-50%);
+}
+
+.scanner-camera-tip {
+  bottom: 12px;
+  font-size: 12px;
+}
+
+/* Banner PWA berdiri sendiri, bukan anak flex `.dashboard-root` — kalau tidak,
+   banner ikut jadi flex item dan mendorong/memperkecil `.main-content`. */
+.pwa-install-banner {
+  position: sticky;
+  top: 0;
+  z-index: 120;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  color: #ffffff;
+  background: var(--on-surface, #0f172a);
+  box-shadow: var(--e-sm, 0 4px 10px rgba(15, 23, 42, 0.18));
+}
+
+.pwa-install-banner p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  opacity: 0.86;
+}
+
+.pwa-install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .pwa-install-banner {
+    align-items: flex-start;
+    padding: 10px 12px;
+  }
+
+  .pwa-install-actions {
+    align-self: center;
+  }
+}
+
+@media (max-width: 640px) {
+  .scanner-camera-shell {
+    aspect-ratio: 3 / 4;
+  }
+
+  .scanner-reticle {
+    top: 25%;
+    right: 8%;
+    bottom: 25%;
+    left: 8%;
+  }
+}
+
 
 .dashboard-root {
   display: flex;

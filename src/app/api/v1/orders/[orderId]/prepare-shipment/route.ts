@@ -70,9 +70,7 @@ export async function POST(request: NextRequest, { params }: Ctx) {
         fulfillmentOrderId: fulfillment.fulfillmentOrderId,
         stockReady: fulfillment.success,
         message: shipment.success
-          ? `${shipment.simulated ? 'Resi dibuat (mode uji / simulasi)' : 'Resi berhasil dibuat'}: ${
-              shipment.trackingNumber ?? 'menunggu dari Shopee'
-            }.${stockNote}`
+          ? `Resi berhasil dibuat: ${shipment.trackingNumber ?? 'menunggu dari Shopee'}.${stockNote}`
           : `Pesanan sudah masuk antrian kerja, tapi resi belum berhasil dibuat: ${
               shipment.message || 'coba lagi beberapa saat lagi'
             }.${stockNote}`,

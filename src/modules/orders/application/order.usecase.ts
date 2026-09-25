@@ -389,7 +389,7 @@ export async function listOrders(
           awb: shipment?.awb ?? null,
           carrier: shipment?.carrier ?? null,
           shipmentStatus: shipment?.status ?? null,
-          labelUrl: `/api/v1/orders/${o.id}/shipping-label`,
+          canPrintOfficialLabel: Boolean(o.shipments?.[0]?.awb?.trim()),
           items: o.items.map((it) => ({
             id: it.id,
             quantity: it.quantity,
@@ -525,7 +525,7 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
     awb: mainShipment?.awb ?? null,
     carrier: mainShipment?.carrier ?? null,
     shipmentStatus: mainShipment?.status ?? null,
-    labelUrl: `/api/v1/orders/${order.id}/shipping-label`,
+    canPrintOfficialLabel: Boolean(order.shipments?.[0]?.awb?.trim()),
     priority: {
       score: order.priorityScore,
       level: order.priorityLevel,

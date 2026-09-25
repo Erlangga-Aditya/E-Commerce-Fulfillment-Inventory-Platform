@@ -1,4 +1,28 @@
-# 🏭 E-Fulfill Hub — Rencana Perbaikan Menyeluruh (System Overhaul)
+# 📋 E-Fulfill Hub — Rencana Perbaikan Menyeluruh (System Overhaul)
+
+> **STATUS: SUPERSEDED (2026-09-25) — jangan dipakai sebagai acuan implementasi.**
+>
+> Dokumen ini adalah rencana awal (analisis 7 masalah kritis + 6 masalah UX) yang
+> **sudah dieksekusi**. Sebagian isinya sudah tidak sesuai kode sekarang, jadi
+> dibaca sebagai catatan proses, bukan spesifikasi.
+>
+> Yang sudah berubah dan tidak lagi sesuai dokumen ini:
+>
+> | Topik | Kondisi lama (dokumen ini) | Kondisi sekarang |
+> |---|---|---|
+> | Halaman kerja | banyak halaman (scanner, fulfillment, picking) | **satu halaman** `/dashboard/pesanan`; halaman lama = redirect |
+> | Scan | scan produk/SKU untuk picking | **hanya scan resi (AWB)**; tidak ada scan produk |
+> | Pengurangan stok | di `handOverToCarrier()` | **satu pintu**: `completePacking()`; handover tidak pernah potong stok |
+> | Kredensial Shopee | mustahil edit `.env` | diisi dari **UI** (menu "Hubungkan Shopee"), disimpan terenkripsi |
+> | Nomor resi | (−) | aplikasi **tidak pernah membuat nomor resi**; gagal dilaporkan jujur |
+> | Label | (−) | memakai **file resmi Shopee** (549→547→561→548), tidak digambar ulang |
+>
+> Dokumentasi yang lebih当前 dan harus jadi acuan:
+> - `docs/riwayat-pengujian.md` — hasil pengujian yang benar-benar dijalankan
+> - `11-TESTING.md` — strategi pengujian
+> - `09-FULFILLMENT-RULES.md` — aturan stok & serah terima
+>
+> Teks di bawah dipertahankan sebagai arsip proses.
 
 Dokumen ini adalah analisis penuh sistem dari sudut pandang **user flows** (dari pesanan masuk hingga paket dikirim kurir), beserta semua masalah yang ditemukan dan rencana perbaikannya.
 

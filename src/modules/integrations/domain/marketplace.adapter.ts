@@ -1,3 +1,5 @@
+import type { DownloadedLabel, LabelTarget, ShippingDocumentType } from './shipping-document';
+
 /**
  * Marketplace Adapter Interface (Port) — ADR-006.
  * The domain/application layer depends on this interface, never on a provider SDK.
@@ -117,6 +119,12 @@ export interface SyncOptions {
   pageSize?: number;
 }
 
+/** Hasil label resmi: file dari Shopee + format yang dipakainya. */
+export interface OfficialLabelResult {
+  label: DownloadedLabel;
+  documentType: ShippingDocumentType;
+}
+
 export interface ShopCredentials {
   /** Provider shop id (Shopee numeric shop_id). */
   shopId: string;
@@ -162,8 +170,11 @@ export interface MarketplaceAdapter {
   getTrackingInfo(credentials: ShopCredentials, orderSn: string): Promise<TrackingInfo | null>;
   /** Trigger "Atur Pengiriman" for an incoming order (required before AWB is issued). */
   arrangeShipment(credentials: ShopCredentials, input: ArrangeShipmentInput): Promise<ArrangeShipmentResult>;
-  /** Generate / download shipping label URL for printing. */
-  printShippingLabel(credentials: ShopCredentials, orderSn: string, packageNumber?: string): Promise<string | null>;
+  /**
+   * Ambil label resmi Shopee untuk satu paket: parameter → create → result → download.
+   * Mengembalikan file label apa adanya; tidak pernah mengarang resi maupun URL.
+   */
+  fetchOfficialShippingLabel(credentials: ShopCredentials, target: LabelTarget): Promise<OfficialLabelResult>;
   /** Verify a webhook/push signature (provider-specific). */
   verifyWebhookSignature(url: string, rawBody: string, signature: string, partnerKey: string): boolean;
 }

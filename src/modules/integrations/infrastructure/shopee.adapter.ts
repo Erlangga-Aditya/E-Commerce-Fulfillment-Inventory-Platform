@@ -11,6 +11,24 @@ import type {
   ArrangeShipmentResult,
 } from '../domain/marketplace.adapter';
 import type { MarketplaceReturn } from '../domain/marketplace.adapter';
+import {
+  type DocumentParameter,
+  type DocumentTask,
+  type DownloadedLabel,
+  type LabelTarget,
+  type ShippingDocumentType,
+  type ShopeeConfig,
+  assertHasTrackingNumber,
+  describeLabelFailure,
+  pollUntilReady,
+} from '../domain/shipping-document';
+import {
+  createDocument,
+  downloadDocument,
+  getDocumentParameters,
+  getDocumentResult,
+} from './shopee-shipping-document.client';
+import { ExternalIntegrationError } from '@/shared/errors/AppError';
 import { logger } from '@/shared/observability/logger';
 
 /**
@@ -47,12 +65,6 @@ export interface ShopeeTokenResponse {
 
 import { getShopeeAppConfig } from '../application/appConfig.service';
 
-interface ShopeeConfig {
-  partnerId: string;
-  partnerKey: string;
-  apiHost: string;
-}
-
 /**
  * Kredensial partner diambil dari konfigurasi aplikasi (UI/DB) dengan fallback .env.
  * Wajib terisi sebelum integrasi Shopee bisa dipakai.
@@ -60,7 +72,8 @@ interface ShopeeConfig {
 async function configFromStore(): Promise<ShopeeConfig> {
   const cfg = await getShopeeAppConfig();
   if (!cfg.partnerId || !cfg.partnerKey) {
-    throw new Error(
+    throw new ExternalIntegrationError(
+      'shopee',
       'Kredensial partner Shopee belum dikonfigurasi. Isi Partner ID & Partner Key di halaman Integrasi.',
     );
   }
@@ -184,7 +197,10 @@ async function callShopee<T>(
     }
     res = await fetch(url.toString(), fetchInit);
   } catch (err) {
-    throw new Error(`Tidak dapat terhubung ke Shopee API (${apiPath}): ${(err as Error).message}`);
+    throw new ExternalIntegrationError(
+      'shopee',
+      `Tidak dapat terhubung ke Shopee API (${apiPath}): ${(err as Error).message}`,
+    );
   }
 
   // ── Safe JSON parsing ──────────────────────────────────────────────────────
@@ -192,7 +208,10 @@ async function callShopee<T>(
   try {
     rawText = await res.text();
   } catch (err) {
-    throw new Error(`Gagal membaca response dari Shopee API (${apiPath}): ${(err as Error).message}`);
+    throw new ExternalIntegrationError(
+      'shopee',
+      `Gagal membaca response dari Shopee API (${apiPath}): ${(err as Error).message}`,
+    );
   }
 
   let json: ShopeeRawResponse;
@@ -204,7 +223,8 @@ async function callShopee<T>(
       httpStatus: res.status,
       body: rawText.slice(0, 500),
     });
-    throw new Error(
+    throw new ExternalIntegrationError(
+      'shopee',
       `Shopee API mengembalikan response tidak valid (HTTP ${res.status}) di ${apiPath}. ` +
         `Respons: ${rawText.slice(0, 200)}`,
     );
@@ -214,7 +234,11 @@ async function callShopee<T>(
   if (json.error && json.error !== '') {
     const msg = `Shopee API error [${json.error}] pada ${apiPath}: ${json.message ?? '(no message)'}`;
     logger.error(msg, { apiPath, request_id: json.request_id, error: json.error });
-    throw new Error(msg);
+    throw new ExternalIntegrationError('shopee', msg, {
+      providerCode: json.error,
+      requestId: json.request_id,
+      apiPath,
+    });
   }
 
   return ((json.response as T) ?? (json as unknown as T));
@@ -998,10 +1022,18 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
 
-      // After ship_order succeeds, fetch AWB
+      // Setelah `ship_order` diterima, ambil nomor resi. Resi WAJIB ada sebelum
+      // dianggap berhasil — kalau Shopee belum menerbitkannya, kembalikan
+      // kegagalan apa adanya supaya operator tahu harus mencoba lagi.
       const trackingNumber = await this.getTrackingNumber(creds, input.orderSn);
-      logger.info(`arrangeShipment berhasil: order ${input.orderSn}, AWB ${trackingNumber}`, { shopId: creds.shopId });
+      if (!trackingNumber) {
+        const msg =
+          'Shopee sudah menerima permintaan pengiriman, tetapi nomor resi belum terbit. Coba lagi beberapa saat lagi.';
+        logger.warn(`arrangeShipment tanpa AWB untuk order ${input.orderSn}: ${msg}`);
+        return { success: false, trackingNumber: null, message: msg };
+      }
 
+      logger.info(`arrangeShipment berhasil: order ${input.orderSn}, AWB ${trackingNumber}`, { shopId: creds.shopId });
       return { success: true, trackingNumber };
     } catch (err) {
       const msg = (err as Error).message;
@@ -1010,34 +1042,111 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     }
   }
 
-  /**
-   * Cetak label pengiriman / generate shipping document.
-   * Calls /api/v2/logistics/create_shipping_document
-   */
-  async printShippingLabel(creds: ShopCredentials, orderSn: string, packageNumber?: string): Promise<string | null> {
-    const cfg = await this.cfg();
-    try {
-      const packageList: Array<Record<string, unknown>> = [
-        { order_sn: orderSn, ...(packageNumber ? { package_number: packageNumber } : {}) },
-      ];
-      await callShopee<Record<string, unknown>>(
-        cfg,
-        '/api/v2/logistics/create_shipping_document',
-        {
-          method: 'POST',
-          body: {
-            order_list: packageList,
-            shipping_document_type: 'THERMAL_AIR_WAYBILL',
-          },
-        },
-        { shopId: creds.shopId, accessToken: creds.accessToken },
-      ).catch(() => null);
+  // ── Shipping document / label (alur resmi Shopee, 4 langkah) ──────────────
+  // Dokumentasi: get_shipping_document_parameter → create_shipping_document
+  // → get_shipping_document_result → download_shipping_document.
+  // Format label SELALU diambil dari Shopee (tidak di-hardcode), dan file label
+  // yang ditampilkan adalah file yang Shopee terbitkan — tanpa modifikasi.
+  // Detail & sumber: domain/shipping-document.ts.
 
-      return null;
-    } catch (err) {
-      logger.warn(`printShippingLabel gagal untuk order ${orderSn}: ${(err as Error).message}`);
-      return null;
+  /** Langkah 1: format label yang valid untuk paket-paket ini. */
+  async getShippingDocumentParameters(
+    creds: ShopCredentials,
+    targets: LabelTarget[],
+  ): Promise<DocumentParameter[]> {
+    const cfg = await this.cfg();
+    return getDocumentParameters(cfg, creds, targets);
+  }
+
+  /** Langkah 2: buat task pembuatan label (butuh resi). */
+  async createShippingDocument(
+    creds: ShopCredentials,
+    target: LabelTarget,
+    documentType: ShippingDocumentType,
+  ): Promise<void> {
+    const cfg = await this.cfg();
+    await createDocument(cfg, creds, target, documentType);
+  }
+
+  /** Langkah 3: status task label; hanya READY yang boleh diunduh. */
+  async getShippingDocumentResult(
+    creds: ShopCredentials,
+    target: LabelTarget,
+    documentType: ShippingDocumentType,
+  ): Promise<DocumentTask> {
+    const cfg = await this.cfg();
+    return getDocumentResult(cfg, creds, target, documentType);
+  }
+
+  /** Langkah 4: unduh file label resmi dari Shopee. */
+  async downloadShippingDocument(
+    creds: ShopCredentials,
+    target: LabelTarget,
+    documentType: ShippingDocumentType,
+  ): Promise<DownloadedLabel> {
+    const cfg = await this.cfg();
+    return downloadDocument(cfg, creds, target, documentType);
+  }
+
+  /**
+   * Alur lengkap sekali jalan: pilih format dari Shopee → buat task → tunggu
+   * READY → unduh. Mengembalikan file label asli.
+   * Error Shopee diteruskan apa adanya (tidak ditelan, tidak dikarang).
+   */
+  async fetchOfficialShippingLabel(
+    creds: ShopCredentials,
+    target: LabelTarget,
+  ): Promise<{ label: DownloadedLabel; documentType: ShippingDocumentType }> {
+    const [param] = await this.getShippingDocumentParameters(creds, [target]);
+    if (!param) {
+      throw new ExternalIntegrationError(
+        'shopee',
+        `Shopee tidak mengembalikan informasi label untuk pesanan ${target.orderSn}.`,
+      );
     }
+    if (param.failError) {
+      throw new ExternalIntegrationError('shopee', describeLabelFailure(param, target), {
+        providerCode: param.failError,
+        target,
+      });
+    }
+    const documentType = param.suggestedType ?? param.selectableTypes[0] ?? null;
+    if (!documentType) {
+      throw new ExternalIntegrationError('shopee', describeLabelFailure(param, target));
+    }
+    // `THERMAL_UNPACKAGED_LABEL` memakai alur job khusus Shopee
+    // (create job → status job → download job), bukan rantai 549→547→561→548.
+    // Mengirimnya lewat rantai normal akan gagal diam-diam, jadi tolong dengan
+    // pesan yang bisa ditindaklanjuti, bukan diamkan.
+    if (documentType === 'THERMAL_UNPACKAGED_LABEL') {
+      throw new ExternalIntegrationError(
+        'shopee',
+        `Kanal untuk pesanan ${target.orderSn} memakai label tanpa kemasan (THERMAL_UNPACKAGED_LABEL), ` +
+          'yang membutuhkan alur job khusus Shopee dan belum didukung aplikasi ini. ' +
+          'Selesaikan Pencetakan dari Seller Centre atau hubungi Shopee.',
+        { target, documentType },
+      );
+    }
+    assertHasTrackingNumber(target);
+    await this.createShippingDocument(creds, target, documentType);
+    const task = await pollUntilReady(() => this.getShippingDocumentResult(creds, target, documentType));
+    if (task.failError || task.failMessage) {
+      throw new ExternalIntegrationError(
+        'shopee',
+        `Shopee belum bisa menyiapkan label untuk pesanan ${target.orderSn}: ${task.failMessage ?? task.failError}.`,
+        { providerCode: task.failError, target },
+      );
+    }
+    if (task.status !== 'READY') {
+      throw new ExternalIntegrationError(
+        'shopee',
+        `Label untuk pesanan ${target.orderSn} belum siap (status: ${task.status}).` +
+          ' Coba lagi beberapa saat lagi.',
+        { target, status: task.status },
+      );
+    }
+    const label = await this.downloadShippingDocument(creds, target, documentType);
+    return { label, documentType };
   }
 
   // ── Webhook ───────────────────────────────────────────────────────────────

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   Search,
   Truck,
-  Package,
   RefreshCw,
   Printer,
   ChevronDown,
@@ -14,9 +13,8 @@ import {
   Plus,
   Clock,
   
-  ExternalLink,
-} from 'lucide-react';
-import { api, formatDate } from '@/lib/api';
+  } from 'lucide-react';
+import { api, formatDate, openOfficialLabel } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
 
 interface TrackingEvent {
@@ -75,7 +73,6 @@ export default function PengirimanPage() {
 
   // Label printing state
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
-  const [labelResult, setLabelResult] = useState<{ url?: string; raw?: string; title: string } | null>(null);
 
   // Copied AWB indicator
   const [copiedAwb, setCopiedAwb] = useState<string | null>(null);
@@ -149,30 +146,13 @@ export default function PengirimanPage() {
     setPrintingOrderId(orderId);
     setNotice(null);
     try {
-      const res = await api<{
-        orderSn: string;
-        fileUrl?: string;
-        labelBase64?: string;
-        status: string;
-      }>(`/api/v1/orders/${orderId}/print-label`, {
-        method: 'POST',
-      });
-
-      if (res.fileUrl) {
-        setLabelResult({
-          title: `Label Pengiriman — Pesanan ${orderSn}`,
-          url: res.fileUrl,
-        });
-      } else {
-        setNotice({
-          tone: 'success',
-          text: `Dokumen pengiriman pesanan ${orderSn} berhasil digenerate oleh Shopee.`,
-        });
-      }
+      // Label RESMI Shopee: unduh file yang Shopee terbitkan, lalu buka di tab baru.
+      // Tidak ada label buatan di aplikasi ini.
+      await openOfficialLabel(orderId);
     } catch (err) {
       setNotice({
         tone: 'danger',
-        text: `Gagal cetak label: ${(err as Error).message}`,
+        text: `Label resmi pesanan ${orderSn} belum bisa dicetak: ${(err as Error).message}`,
       });
     } finally {
       setPrintingOrderId(null);
@@ -487,36 +467,6 @@ export default function PengirimanPage() {
         </div>
       )}
 
-      {/* Modal Cetak Label PDF */}
-      <Modal
-        isOpen={Boolean(labelResult)}
-        onClose={() => setLabelResult(null)}
-        title={labelResult?.title ?? 'Label Pengiriman'}
-      >
-        <div style={{ textAlign: 'center', padding: '16px 0' }}>
-          <Package size={48} style={{ color: 'var(--primary)', margin: '0 auto 16px' }} />
-          <p style={{ marginBottom: 20 }}>
-            Dokumen label pengiriman siap diunduh atau dicetak. Klik tombol di bawah untuk membuka file PDF:
-          </p>
-          {labelResult?.url && (
-            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-              <a
-                href={labelResult.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn btn-primary"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-              >
-                <ExternalLink size={14} />
-                <span>Buka Dokumen PDF</span>
-              </a>
-              <button type="button" className="btn btn-secondary" onClick={() => setLabelResult(null)}>
-                Tutup
-              </button>
-            </div>
-          )}
-        </div>
-      </Modal>
 
       {/* Modal Tambah Event Manual */}
       <Modal

@@ -1012,23 +1012,13 @@ export async function arrangeShipmentForOrder(
   let trackingNumber: string | null = null;
   let success = false;
   let message = '';
-  /** true = resi dibuat sistem (mode uji/sandbox), bukan nomor resi asli dari kurir. */
-  let simulated = false;
-
-  /** Boleh memakai resi simulasi? Hanya saat aplikasi belum Live (mode uji/sandbox). */
-  const bolehPakaiResiSimulasi = () =>
-    process.env.NODE_ENV !== 'production' || process.env.SHOPEE_SANDBOX === 'true';
-
   /**
-   * Resi simulasi dibuat sistem saat nomor resi asli belum bisa didapat (mode uji).
-   * Selalu diberi label "mode uji / simulasi" supaya tidak pernah disangka resi kurir asli.
+   * Deprecated: resi simulasi DILARANG. Nomor resi hanya boleh berasal dari Shopee.
+   * Field ini tetap ada supaya UI lama tidak rusak, tapi selalu `false`.
+   * Aturan ini menutup celah sebelumnya di mana aplikasi membuat nomor `SPXID…`
+   * sendiri sehingga paket bisa "lolos" tanpa nomor resi asli dari kurir.
    */
-  const pakaiResiSimulasi = (alasan: string) => {
-    trackingNumber = `SPXID${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 90 + 10)}`;
-    success = true;
-    simulated = true;
-    message = `Resi simulasi dibuat sistem (mode uji / sandbox). Catatan: ${alasan}`;
-  };
+  const simulated = false;
 
   try {
     const { conn, creds } = await loadConnection(tenantId, effectiveShopId);
@@ -1043,36 +1033,22 @@ export async function arrangeShipmentForOrder(
     trackingNumber = result.trackingNumber;
     message = result.message || '';
 
-    // Shopee MENJAWAB tetapi tidak berhasil membuat resi (mis. kanal logistik belum siap).
-    // Dulu kondisi ini membuat pengiriman tidak teratur tanpa resi sama sekali sehingga
-    // operator mentok. Sekarang: di mode uji pakai resi simulasi, di mode produksi
-    // dilaporkan gagal secara jujur (tidak boleh mengarang nomor resi asli).
-    if (!success && bolehPakaiResiSimulasi()) {
-      logger.warn(
-        `Atur pengiriman tidak berhasil dari Shopee: ${message || '(tanpa pesan)'} — memakai resi simulasi (mode uji).`,
-      );
-      pakaiResiSimulasi(message || 'Shopee belum menerbitkan nomor resi pada mode uji');
+    // Shopee bisa menjawab sukses HTTP tetapi tidak menerbitkan resi (mis. kanal
+    // logistik belum siap). Kasus itu dilaporkan apa adanya — TIDAK pernah
+    // digantikan nomor karangan, karena itu memalsukan data pengiriman.
+    if (!success && !trackingNumber && !message) {
+      message = 'Shopee belum menerbitkan nomor resi untuk pesanan ini. Coba lagi beberapa saat lagi.';
     }
   } catch (err) {
     const errMsg = (err as Error).message;
-    logger.warn(`arrangeShipment external call skipped or failed: ${errMsg}`);
-    if (
-      bolehPakaiResiSimulasi() ||
-      errMsg.includes('Koneksi marketplace') ||
-      errMsg.includes('not found') ||
-      errMsg.includes('Invalid access token')
-    ) {
-      pakaiResiSimulasi(errMsg);
-    } else {
-      return { success: false, simulated: false, trackingNumber: null, message: errMsg };
-    }
+    logger.warn(`arrangeShipment gagal untuk order ${order.externalOrderId}: ${errMsg}`);
+    message = `Gagal meminta nomor resi ke Shopee: ${errMsg}`;
   }
 
   if (success && trackingNumber) {
-    const carrierName = 'SPX Express';
-    await upsertShipment(tenantId, orderId, trackingNumber, carrierName, 'LOGISTICS_REQUEST_CREATED');
+    await upsertShipment(tenantId, orderId, trackingNumber, null, 'LOGISTICS_REQUEST_CREATED');
     logger.info(`Pengiriman diatur: order ${order.externalOrderId}, AWB ${trackingNumber}`);
-    broadcastSystemEvent('awb:updated', { orderId, awb: trackingNumber, carrier: carrierName });
+    broadcastSystemEvent('awb:updated', { orderId, awb: trackingNumber });
   }
 
   await auditLog({
@@ -1087,34 +1063,68 @@ export async function arrangeShipmentForOrder(
   return { success, trackingNumber, message, simulated };
 }
 
+/** Hasil label resmi: file dari Shopee + format yang dipakainya. */
+export interface OfficialLabelOutcome {
+ orderSn: string;
+ documentType: string;
+ fileName: string;
+ contentType: string;
+ bytes: Uint8Array;
+}
+
 /**
- * Generate/cetak label pengiriman untuk satu pesanan.
- * Mengembalikan URL PDF label yang bisa dibuka di browser atau dicetak.
+ * Ambil label resmi Shopee untuk satu pesanan.
+ *
+ * Mengikuti alur 4 langkah resmi (dokumentasi Shopee module 95, api_id
+ * 549/547/561/548): parameter → create → result (poll sampai READY) → download.
+ *
+ * Semua data diambil dari Shopee. Fungsi ini TIDAK PERNAH membuat label sendiri
+ * dan TIDAK PERNAH mengarang resi: kalau Shopee belum bisa mengeluarkan label,
+ * error-nya dikembalikan apa adanya supaya operator tahu harus menyelesaikan
+ * "Atur Pengiriman" lebih dulu.
  */
 export async function generateShippingLabel(
-  tenantId: string,
-  shopId: string,
-  orderId: string,
-  packageNumber?: string,
-) {
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, tenantId },
-  });
-  if (!order) throw new NotFoundError('Pesanan', orderId);
+ tenantId: string,
+ shopId: string,
+ orderId: string,
+ packageNumber?: string,
+): Promise<OfficialLabelOutcome> {
+ const order = await prisma.order.findFirst({
+  where: { id: orderId, tenantId },
+  include: {
+   shipments: { orderBy: { createdAt: 'desc' }, take: 1 },
+  },
+ });
+ if (!order) throw new NotFoundError('Pesanan', orderId);
 
-  // Trigger official Shopee document generation task if credentials exist
-  try {
-    const { conn, creds } = await loadConnection(tenantId, shopId || order.shopId);
-    const fresh = await ensureFreshToken(conn.id, creds);
-    const credentials = buildShopCredentials(fresh);
-    await shopee.printShippingLabel(credentials, order.externalOrderId, packageNumber);
-  } catch {
-    // Ignore external API failure; fallback ensures label is always printable
-  }
+ // Resi harus berasal dari Shopee. Kalau belum ada, berhenti di sini.
+ const shipment = order.shipments[0];
+ const trackingNumber = shipment?.awb?.trim() || null;
+ if (!trackingNumber) {
+  throw new ExternalIntegrationError(
+   'shopee',
+   `Pesanan ${order.externalOrderId} belum punya nomor resi dari Shopee, jadi label resmi belum bisa dibuat. ` +
+    'Selesaikan "Atur Pengiriman" dulu sampai nomor resi muncul.',
+  );
+ }
 
-  // Always return reliable, pixel-perfect thermal label URL
-  const labelUrl = `/api/v1/orders/${orderId}/shipping-label?autoprint=1`;
-  return { labelUrl, orderSn: order.externalOrderId };
+ const { conn, creds } = await loadConnection(tenantId, shopId || order.shopId);
+ const fresh = await ensureFreshToken(conn.id, creds);
+ const credentials = buildShopCredentials(fresh);
+
+ const { label, documentType } = await shopee.fetchOfficialShippingLabel(credentials, {
+  orderSn: order.externalOrderId,
+  packageNumber: packageNumber ?? null,
+  trackingNumber,
+ });
+
+ return {
+  orderSn: order.externalOrderId,
+  documentType,
+  fileName: label.fileName,
+  contentType: label.contentType,
+  bytes: label.bytes,
+ };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1410,6 +1420,10 @@ async function upsertShipment(
 export function mapLogisticsStatus(
   status: string,
 ): 'PENDING' | 'READY_TO_SHIP' | 'PICKED_UP' | 'IN_TRANSIT' | 'DELIVERED' | 'FAILED' | 'RETURNED' {
+  // `LOGISTICS_REQUEST_CREATED` = Shopee sudah membuat permintaan pengiriman,
+  // paket BELUM diambil kurir. Semuanya sebelum diambil kurir dipetakan ke
+  // `READY_TO_SHIP` supaya "Lacak Kiriman" tidak menampilkan status yang salah.
+  // Hanya `LOGISTICS_PICKUP_DONE` yang benar-benar berarti sudah diambil.
   switch (status.toUpperCase()) {
     case 'LOGISTICS_NOT_START':
     case 'LOGISTICS_PENDING_ARRANGE':
@@ -1420,8 +1434,9 @@ export function mapLogisticsStatus(
     case 'LOGISTICS_REQUEST_CREATED':
     case 'LOGISTICS_PICKUP_RETRY':
     case 'PROCESSED':
-      return 'PICKED_UP';
+      return 'READY_TO_SHIP';
     case 'LOGISTICS_PICKUP_DONE':
+      return 'PICKED_UP';
     case 'SHIPPED':
     case 'TO_CONFIRM_RECEIVE':
       return 'IN_TRANSIT';

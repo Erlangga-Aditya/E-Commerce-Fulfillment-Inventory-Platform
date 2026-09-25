@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { AutoSyncStatus } from '@/components/AutoSyncStatus';
+import { PwaInstallPrompt } from '@/components/pwa-install-prompt';
 
 /**
  * Menu dipertahankan sesedikit mungkin.
@@ -121,20 +122,21 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const currentPageTitle = currentItem ? currentItem.label : 'E-Fulfill Hub';
 
   return (
-    <div className="dashboard-root">
-      {/* Mobile Drawer Overlay Backdrop */}
-      <div
-        className={`sidebar-overlay ${isMobileNavOpen ? 'active' : ''}`}
-        onClick={() => setIsMobileNavOpen(false)}
-        aria-hidden="true"
-      />
+    <>
+      <PwaInstallPrompt />
+      <div className="dashboard-root">
+        <div
+          className={`sidebar-overlay ${isMobileNavOpen ? 'active' : ''}`}
+          onClick={() => setIsMobileNavOpen(false)}
+          aria-hidden="true"
+        />
 
-      {/* Sidebar Navigation */}
-      <aside
-        className={`sidebar ${isMobileNavOpen ? 'mobile-open' : ''} ${isDesktopCollapsed ? 'collapsed' : ''}`}
-        aria-label="Navigasi Utama"
-      >
-        <div className="sidebar-brand">
+        {/* Sidebar Navigation */}
+        <aside
+          className={`sidebar ${isMobileNavOpen ? 'mobile-open' : ''} ${isDesktopCollapsed ? 'collapsed' : ''}`}
+          aria-label="Navigasi Utama"
+        >
+          <div className="sidebar-brand">
           <Link href="/dashboard" className="sidebar-brand-content">
             <span className="sidebar-brand-logo">
               <PackageCheck size={20} aria-hidden />
@@ -149,9 +151,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           >
             <X size={20} aria-hidden />
           </button>
-        </div>
+          </div>
 
-        <nav className="sidebar-nav">
+          <nav className="sidebar-nav">
           {NAV_ITEMS.map((item) => {
             const active = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href + '/'));
             const Icon = item.icon;
@@ -269,5 +271,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         <main className="page-body">{children}</main>
       </div>
     </div>
+    </>
   );
 }

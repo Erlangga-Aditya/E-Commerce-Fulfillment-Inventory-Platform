@@ -21,7 +21,7 @@ vi.mock('@/shared/infrastructure/prisma', () => {
     stockLot: { findMany: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn() },
     stockReservation: { update: vi.fn() },
     orderItem: { update: vi.fn() },
-    fulfillmentOrder: { update: vi.fn() },
+    fulfillmentOrder: { update: vi.fn(), updateMany: vi.fn() },
     packingTask: { create: vi.fn() },
     pickingTask: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     pickingItem: { update: vi.fn(), updateMany: vi.fn() },
@@ -44,7 +44,12 @@ const tx = prisma as unknown as {
   stockLot: { findMany: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
   stockReservation: { update: ReturnType<typeof vi.fn> };
   orderItem: { update: ReturnType<typeof vi.fn> };
-  fulfillmentOrder: { update: ReturnType<typeof vi.fn>; findFirst: ReturnType<typeof vi.fn>; findUniqueOrThrow: ReturnType<typeof vi.fn> };
+  fulfillmentOrder: {
+    update: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+    findFirst: ReturnType<typeof vi.fn>;
+    findUniqueOrThrow: ReturnType<typeof vi.fn>;
+  };
   packingTask: { create: ReturnType<typeof vi.fn> };
   shipment: { create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
 };
@@ -88,6 +93,7 @@ beforeEach(() => {
     ...args.data,
   }));
   tx.fulfillmentOrder.update.mockResolvedValue({});
+  tx.fulfillmentOrder.updateMany.mockResolvedValue({ count: 1 });
   tx.packingTask.create.mockResolvedValue({});
 });
 
@@ -167,6 +173,32 @@ describe('completePacking — satu-satunya pintu pengurangan stok', () => {
     expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
   });
 
+  it('menolak dua operator yang memindai resi bersamaan: stok tidak boleh terpotong dua kali', async () => {
+    tx.fulfillmentOrder.findFirst.mockResolvedValue(mockFulfillmentOrder());
+    // Simulasi scan kedua yang tiba bersamaan: update bersyarat tidak cocok lagi.
+    tx.fulfillmentOrder.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(completePacking(tenantId, fulfillmentOrderId, actorId)).rejects.toThrow(
+      'operator lain',
+    );
+    expect(tx.inventoryBalance.upsert).not.toHaveBeenCalled();
+    expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
+  });
+
+  it('mengubah status ke PACKING sebelum memotong stok sebagai kunci pembuka', async () => {
+    tx.fulfillmentOrder.findFirst.mockResolvedValue(mockFulfillmentOrder({ status: 'PICKED' }));
+
+    await completePacking(tenantId, fulfillmentOrderId, actorId);
+
+    expect(tx.fulfillmentOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: fulfillmentOrderId, status: 'PICKED' },
+      data: { status: 'PACKING' },
+    });
+    const claimOrder = tx.fulfillmentOrder.updateMany.mock.invocationCallOrder[0]!;
+    const firstDeduction = tx.inventoryMovement.create.mock.invocationCallOrder[0]!;
+    expect(claimOrder).toBeLessThan(firstDeduction);
+  });
+
   it('menolak transisi tidak sah (WAITING_STOCK → PACKED) tanpa menyentuh stok', async () => {
     tx.fulfillmentOrder.findFirst.mockResolvedValue(
       mockFulfillmentOrder({ status: 'WAITING_STOCK', pickingTasks: [] }),
@@ -196,33 +228,93 @@ describe('handOverToCarrier — tidak boleh memotong stok lagi', () => {
     expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
   });
 
-  it('serah terima sukses TANPA menulis lagi movement DEDUCTION', async () => {
+  it('menerima pesanan PACKED saat operator langsung menyerahkan ke kurir', async () => {
+    tx.fulfillmentOrder.findFirst.mockResolvedValue(
+      mockFulfillmentOrder({
+        status: 'PACKED',
+        order: {
+          id: 'ord-1',
+          items: [{ id: 'item-1', quantity: 2, fulfilledQuantity: 2 }],
+          shipments: [{ id: 'shp-1', awb: 'SPXID123', carrier: 'SPX Express', status: 'READY_TO_SHIP' }],
+        },
+      }),
+    );
+
+    const result = await handOverToCarrier(tenantId, fulfillmentOrderId, actorId, 'SPX Express', 'SPXID123');
+
+    expect(result.shipmentId).toBe('shp-1');
+    expect(tx.fulfillmentOrder.update).toHaveBeenNthCalledWith(1, {
+      where: { id: fulfillmentOrderId },
+      data: { status: 'READY_TO_SHIP' },
+    });
+    expect(tx.fulfillmentOrder.update).toHaveBeenNthCalledWith(2, {
+      where: { id: fulfillmentOrderId },
+      data: { status: 'HANDED_OVER', completedAt: expect.any(Date) },
+    });
+    expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
+  });
+
+  it('menerima pesanan READY_TO_SHIP saat operator menyerahkan ke kurir tanpa potong stok lagi', async () => {
     tx.fulfillmentOrder.findFirst.mockResolvedValue(
       mockFulfillmentOrder({
         status: 'READY_TO_SHIP',
         order: {
           id: 'ord-1',
           items: [{ id: 'item-1', quantity: 2, fulfilledQuantity: 2 }],
-          shipments: [{ id: 'shp-1', awb: null, carrier: null, status: 'READY_TO_SHIP' }],
+          shipments: [{ id: 'shp-1', awb: 'SPXID123', carrier: 'SPX Express', status: 'READY_TO_SHIP' }],
         },
       }),
     );
-    tx.shipment.update.mockResolvedValue({ id: 'shp-1' });
+    tx.shipment.update.mockResolvedValue({ id: 'shp-1', awb: 'SPXID123', carrier: 'SPX Express' });
 
     const result = await handOverToCarrier(tenantId, fulfillmentOrderId, actorId, 'SPX Express', 'SPXID123');
 
     expect(result.shipmentId).toBe('shp-1');
     expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
     expect(tx.inventoryBalance.update).not.toHaveBeenCalled();
-    expect(tx.shipment.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'shp-1' },
-        data: expect.objectContaining({ awb: 'SPXID123', carrier: 'SPX Express' }),
-      }),
-    );
     expect(tx.fulfillmentOrder.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'HANDED_OVER' }) }),
     );
+  });
+
+  it('menerima shipment PICKED_UP dari Shopee saat operator menyerahkan paket', async () => {
+    tx.fulfillmentOrder.findFirst.mockResolvedValue(
+      mockFulfillmentOrder({
+        status: 'READY_TO_SHIP',
+        order: {
+          id: 'ord-1',
+          items: [{ id: 'item-1', quantity: 2, fulfilledQuantity: 2 }],
+          shipments: [{ id: 'shp-1', awb: 'SPXID123', carrier: 'SPX Express', status: 'PICKED_UP' }],
+        },
+      }),
+    );
+
+    const result = await handOverToCarrier(tenantId, fulfillmentOrderId, actorId, 'SPX Express', 'SPXID123');
+
+    expect(result.shipmentId).toBe('shp-1');
+    expect(tx.fulfillmentOrder.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'HANDED_OVER' }) }),
+    );
+    expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
+  });
+
+  it('menolak handover yang dimulai dari status selain PACKED atau READY_TO_SHIP', async () => {
+    tx.fulfillmentOrder.findFirst.mockResolvedValue(
+      mockFulfillmentOrder({
+        status: 'PICKED',
+        order: {
+          id: 'ord-1',
+          items: [{ id: 'item-1', quantity: 2, fulfilledQuantity: 2 }],
+          shipments: [{ id: 'shp-1', awb: 'SPXID123', carrier: 'SPX Express', status: 'READY_TO_SHIP' }],
+        },
+      }),
+    );
+
+    await expect(handOverToCarrier(tenantId, fulfillmentOrderId, actorId, 'SPX Express', 'SPXID123')).rejects.toThrow(
+      'belum siap diserahkan',
+    );
+    expect(tx.fulfillmentOrder.update).not.toHaveBeenCalled();
+    expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
   });
 });
 

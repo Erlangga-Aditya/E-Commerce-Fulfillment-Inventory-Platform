@@ -9,7 +9,7 @@ import { broadcastSystemEvent } from '@/lib/sse';
 export const dynamic = 'force-dynamic';
 
 const ScanAwbSchema = z.object({
-  scannedCode: z.string().min(1, 'Kode resi atau nomor pesanan tidak boleh kosong.'),
+  scannedCode: z.string().min(1, 'Nomor resi tidak boleh kosong.'),
   /** Mode cepat: konfirmasi seluruh item picking tanpa scan per item (tercatat di audit log). */
   confirmPicking: z.boolean().optional(),
   /** Tetap packing walau stok kurang (stok menjadi minus) — harus aksi sadar operator. */
@@ -19,14 +19,14 @@ const ScanAwbSchema = z.object({
 /**
  * POST /api/v1/fulfillment/scan-awb
  *
- * Scan resi (AWB) atau No. Pesanan Shopee untuk menyelesaikan packing.
+ * Scan resi (AWB) untuk menyelesaikan packing.
  * Respons selalu menyebutkan keadaan sebenarnya lewat `code` + `stockDeducted`:
  *  - PACKED             → stok benar-benar sudah dikurangi pada request ini
  *  - ALREADY_PACKED     → sudah pernah dipacking (stok tidak dipotong ulang)
  *  - NEEDS_PICKING      → butuh konfirmasi picking (mode cepat) — stok BELUM dikurangi
  *  - WAITING_STOCK      → stok kurang, sertakan detail shortfall — stok BELUM dikurangi
  *  - NOT_QUEUED         → pesanan belum masuk antrian fulfillment
- *  - NOT_FOUND          → kode tidak cocok dengan pesanan apa pun
+ *  - NOT_FOUND          → bukan nomor resi yang tersimpan pada toko
  */
 export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
@@ -46,8 +46,9 @@ export async function POST(request: NextRequest) {
       allowNegativeStock: parsed.data.allowNegativeStock,
     });
 
-    // Real-time push hanya saat benar-benar ada perubahan stok/status.
-    if (result.stockDeducted && result.order) {
+    // Real-time push hanya saat benar-benar ada perubahan stok/status pada
+    // request ini — `stockDeducted` sudah dijamin jujur oleh use case.
+    if (result.stockDeducted && result.deductedUnits > 0 && result.order) {
       broadcastSystemEvent('fulfillment:updated', {
         tenantId: ctx.tenantId,
         orderId: result.order.id,

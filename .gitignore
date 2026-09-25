@@ -38,7 +38,18 @@ coverage/
 
 # Temporary / Scratch
 scratch_*.ts
+scratch_*.js
+scratch_*.mjs
 *.jfif
+# Artefak uji lokal: cookie jar, duplikat bukti, skrip probe, screenshot QA
+lt.txt
+lab1.bin
+logo.jfif
+decode-test.mjs
+camera-fix-proof.mjs
+*_barcode-bukti.png
+docs/screenshots/
+.dogfood-output/
 
 # Python bytecode (hasil kompilasi skrip deploy)
 __pycache__/

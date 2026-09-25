@@ -1,10 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
-  LockKeyhole,
   ArrowDownWideNarrow,
   ArrowUpWideNarrow,
   Boxes,
@@ -13,18 +12,16 @@ import {
   ExternalLink,
   Handshake,
   Info,
-  
   Plus,
   PackageCheck,
-  
   Printer,
   RefreshCw,
   ScanLine,
-  
   Truck,
   XCircle,
 } from 'lucide-react';
-import { api, formatDate } from '@/lib/api';
+import { api, formatDate, openOfficialLabel } from '@/lib/api';
+import { deriveOperatorWorkflow } from '@/modules/fulfillment/domain/operator-workflow';
 import { Alert, EmptyState, ErrorState, LoadingState, PageHeader } from '@/components/ui';
 import { BarcodeScanner, playScanFeedback } from '@/components/barcode-scanner';
 import { StockPanel } from '@/components/stock-panel';
@@ -95,7 +92,7 @@ interface ScanOutcome {
   deductedUnits: number;
   needsConfirmation: 'PICKING' | 'NEGATIVE_STOCK' | null;
   shortfalls: Array<{ sku: string; productName: string; required: number; available: number; missing: number }>;
-  order: { id: string; externalOrderId: string; labelUrl: string } | null;
+  order: { id: string; externalOrderId: string; canPrintOfficialLabel: boolean } | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,12 +223,21 @@ export default function PesananPengirimanPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger' | 'info' | 'warning'; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [printingLabelId, setPrintingLabelId] = useState<string | null>(null);
   const [sort, setSort] = useState<'oldest' | 'newest'>('oldest');
   const [stageFilter, setStageFilter] = useState<'SEMUA' | Stage>('SEMUA');
   const [outcome, setOutcome] = useState<ScanOutcome | null>(null);
   const [stockOpen, setStockOpen] = useState(false);
   const [stockVariantId, setStockVariantId] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
+  const [scannerFocusRequest, setScannerFocusRequest] = useState(0);
+  /**
+   * Izin "stok minus" untuk SATU pemindaian berikutnya. Harus one-shot: begitu
+   * dipakai langsung dibuang, supaya tidak pernah ikut terpakai untuk barcode
+   * pesanan lain yang kebetulan dipindai setelahnya.
+   */
+  const [negativeStockApproved, setNegativeStockApproved] = useState(false);
+  const scannerRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async (sortMode: 'oldest' | 'newest' = sort) => {
     try {
@@ -271,6 +277,23 @@ export default function PesananPengirimanPage() {
     return stageFilter === 'SEMUA' ? list : list.filter((o) => o.stage === stageFilter);
   }, [data, stageFilter]);
 
+  // Cetak label RESMI Shopee: unduh file dari Shopee, lalu buka di tab baru.
+ // Tidak pernah memakai label buatan — kalau Shopee menolak, tampilkan pesan errornya.
+ async function handlePrintOfficialLabel(orderId: string, orderSn: string) {
+   setPrintingLabelId(orderId);
+   setNotice(null);
+   try {
+     await openOfficialLabel(orderId);
+   } catch (err) {
+     setNotice({
+       tone: 'danger',
+       text: `Label resmi pesanan ${orderSn} belum bisa dicetak: ${(err as Error).message}`,
+     });
+   } finally {
+     setPrintingLabelId(null);
+   }
+ }
+
   async function run(key: string, fn: () => Promise<unknown>, successMsg?: string) {
     setBusyKey(key);
     setNotice(null);
@@ -288,16 +311,22 @@ export default function PesananPengirimanPage() {
   }
 
   const scanResi = useCallback(
-    async (code: string, options?: { allowNegativeStock?: boolean }) => {
+    async (code: string) => {
       setBusyKey('scan');
       setNotice(null);
       try {
+        // Izin stok minus hanya berlaku untuk SATU pemindaian berikutnya (one-shot):
+        // langsung dibuang setelah dipakai supaya tidak pernah "bocor" ke barcode
+        // pesanan lain yang dipindai berikutnya.
+        const allowNegativeStock = negativeStockApproved;
+        if (negativeStockApproved) setNegativeStockApproved(false);
+
         const res = await api<ScanOutcome>('/api/v1/fulfillment/scan-awb', {
           method: 'POST',
           body: {
             scannedCode: code,
             confirmPicking: true,
-            allowNegativeStock: options?.allowNegativeStock ?? false,
+            allowNegativeStock,
           },
         });
         setOutcome(res);
@@ -311,7 +340,7 @@ export default function PesananPengirimanPage() {
         setBusyKey(null);
       }
     },
-    [load, sort],
+    [load, negativeStockApproved, sort],
   );
 
   async function ambilResi(orderId: string) {
@@ -339,6 +368,21 @@ export default function PesananPengirimanPage() {
       () => api(`/api/v1/orders/${order.orderId}/reserve`, { method: 'POST', body: { warehouseId: data.warehouse!.id } }),
       'Pesanan siap dikemas. Scan resinya untuk menyelesaikan.',
     );
+  }
+
+  function focusScanner() {
+    setScannerFocusRequest((value) => value + 1);
+    scannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function focusScannerForOrder(order: StationOrder) {
+    setStageFilter('SEMUA');
+    setScannerFocusRequest((value) => value + 1);
+    setNotice({
+      tone: 'info',
+      text: `Pindai barcode resi untuk pesanan ${order.externalOrderId}. Jangan ketik nomor pesanan sebagai pengganti resi.`,
+    });
+    scannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   function changeSort(next: 'oldest' | 'newest') {
@@ -404,25 +448,26 @@ export default function PesananPengirimanPage() {
         ))}
       </div>
 
-      {/* Scan resi */}
-      <div className="card mb20">
+      <div className="card mb20" ref={scannerRef}>
         <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
           <ScanLine size={18} aria-hidden />
           <span>Scan Resi</span>
         </h2>
         <p className="small muted" style={{ marginTop: 0, marginBottom: 12 }}>
-          Cukup scan nomor resi (atau nomor pesanan). Tidak perlu scan produk. Saat resi discan dan barangnya
-          lengkap, stok gudang otomatis berkurang dan paket berstatus <strong>Siap Kirim</strong>.
+          Scan hanya dipakai saat pesanan sudah berstatus <strong>Siap Dikemas</strong>. Pastikan nomor resi sudah muncul
+          dan stok gudang cukup. Setelah discan, stok berkurang dan pesanan otomatis berpindah ke <strong>Siap Kirim</strong>;
+          setelah itu baru tekan <strong>Serahkan ke Kurir</strong>.
         </p>
 
         <BarcodeScanner
           label=""
           submitLabel="Selesaikan"
-          placeholder="Scan barcode resi, atau ketik nomor pesanan Shopee"
+          placeholder="Scan barcode resi (bukan nomor pesanan)"
+          focusRequest={scannerFocusRequest}
           onScan={(code) => {
             void scanResi(code);
           }}
-          hint="Bisa memakai alat scan barcode USB maupun kamera HP."
+          hint="Pindai barcode resi dengan kamera atau alat scan USB. Nomor resi harus sama dengan yang tertera di paket."
         />
 
         {outcome && (
@@ -479,10 +524,24 @@ export default function PesananPengirimanPage() {
                 <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {outcome.order && (
                     <>
-                      <a className="btn btn-secondary btn-sm" href={outcome.order.labelUrl} target="_blank" rel="noreferrer">
-                        <Printer size={13} aria-hidden />
-                        <span>Cetak Resi</span>
-                      </a>
+                      {outcome.order.canPrintOfficialLabel ? (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          disabled={printingLabelId === outcome.order.id}
+                          onClick={() => void handlePrintOfficialLabel(outcome.order!.id, outcome.order!.externalOrderId)}
+                        >
+                          <Printer size={13} aria-hidden />
+                          <span>
+                            {printingLabelId === outcome.order.id ? 'Menyiapkan label…' : 'Cetak Label Resi'}
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <Printer size={13} aria-hidden />
+                          <span>Label resmi muncul setelah nomor resi dari Shopee ada</span>
+                        </span>
+                      )}
                       <Link className="btn btn-ghost btn-sm" href={`/dashboard/pesanan/${outcome.order.id}`}>
                         <ExternalLink size={13} aria-hidden />
                         <span>Lihat Detail Pesanan</span>
@@ -505,7 +564,12 @@ export default function PesananPengirimanPage() {
                       type="button"
                       className="btn btn-primary btn-sm"
                       disabled={busyKey === 'scan'}
-                      onClick={() => void scanResi(outcome.order!.externalOrderId, { allowNegativeStock: true })}
+                      onClick={() => {
+                        setOutcome(null);
+                        setNegativeStockApproved(true);
+                        setNotice({ tone: 'info', text: 'Pindai ulang barcode resi paket ini untuk melanjutkan dengan stok minus.' });
+                        focusScanner();
+                      }}
                     >
                       <PackageCheck size={13} aria-hidden />
                       <span>Tetap kirim (stok jadi minus)</span>
@@ -620,6 +684,11 @@ export default function PesananPengirimanPage() {
           {filtered.map((o) => {
             const hoursLeft = o.shipByAt && now ? Math.round((new Date(o.shipByAt).getTime() - now.getTime()) / 3600000) : null;
             const urgent = hoursLeft !== null && hoursLeft <= 24;
+            const workflow = deriveOperatorWorkflow({
+              stage: o.stage,
+              hasAwb: Boolean(o.awb?.trim()),
+              hasShortfall: o.shortfallUnits > 0,
+            });
             return (
               <div className="card" key={o.orderId} style={{ borderLeft: `3px solid ${STAGE_TONE[o.stage]}` }}>
                 <div
@@ -654,12 +723,12 @@ export default function PesananPengirimanPage() {
                   </div>
 
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {!o.awb && (
+                    {workflow.nextAction === 'ARRANGE_SHIPMENT' && (
                       <button
                         type="button"
                         className="btn btn-primary btn-sm"
                         disabled={busyKey === `resi-${o.orderId}`}
-                        title="Minta nomor resi ke Shopee supaya barang bisa dinyatakan siap kirim"
+                        title="Minta nomor resi ke Shopee supaya paket bisa lanjut ke tahap pemrosesan"
                         onClick={() => void ambilResi(o.orderId)}
                       >
                         <Truck size={13} aria-hidden />
@@ -667,7 +736,7 @@ export default function PesananPengirimanPage() {
                       </button>
                     )}
 
-                    {o.stage === 'BARU' && !o.canArrangeShipment && (
+                    {workflow.nextAction === 'PROCESS_ORDER' && (
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
@@ -675,49 +744,38 @@ export default function PesananPengirimanPage() {
                         onClick={() => void siapkanTanpaResi(o)}
                       >
                         <ClipboardList size={13} aria-hidden />
-                        <span>{busyKey === `siap-${o.orderId}` ? 'Memproses...' : 'Siapkan Barang'}</span>
+                        <span>{busyKey === `siap-${o.orderId}` ? 'Memproses...' : 'Mulai Proses Pesanan'}</span>
                       </button>
                     )}
 
-                    {(o.stage === 'SIAP_DIKEMAS' || o.stage === 'MENUNGGU_STOK') && (
-                      <>
-                        <button
-                          type="button"
-                          className="btn btn-primary btn-sm"
-                          disabled={!o.canPack || busyKey === `kemas-${o.orderId}`}
-                          title={
-                            o.canPack
-                              ? 'Tandai barang lengkap dan paket siap diserahkan ke kurir'
-                              : 'Terkunci: nomor resi belum ada. Klik "Atur Pengiriman (Ambil Resi)" dulu.'
-                          }
-                          onClick={() =>
-                            void run(
-                              `kemas-${o.orderId}`,
-                              () => scanResi(o.externalOrderId, { allowNegativeStock: o.stage === 'MENUNGGU_STOK' }),
-                              undefined,
-                            )
-                          }
-                        >
-                          {o.canPack ? <PackageCheck size={13} aria-hidden /> : <LockKeyhole size={13} aria-hidden />}
-                          <span>{busyKey === `kemas-${o.orderId}` ? 'Memproses...' : 'Barang Lengkap, Siap Kirim'}</span>
-                        </button>
-                        {o.stage === 'MENUNGGU_STOK' && (
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => {
-                              setStockVariantId(o.items.find((i) => i.shortfall > 0)?.variantId ?? null);
-                              setStockOpen(true);
-                            }}
-                          >
-                            <Boxes size={13} aria-hidden />
-                            <span>Isi Stok</span>
-                          </button>
-                        )}
-                      </>
+                    {workflow.nextAction === 'ADD_STOCK' && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => {
+                          setStockVariantId(o.items.find((i) => i.shortfall > 0)?.variantId ?? null);
+                          setStockOpen(true);
+                        }}
+                      >
+                        <Boxes size={13} aria-hidden />
+                        <span>Isi Stok dulu</span>
+                      </button>
                     )}
 
-                    {o.stage === 'SIAP_KIRIM' && o.fulfillmentId && (
+                    {workflow.nextAction === 'SCAN_AWB' && o.awb && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        disabled={busyKey === `kemas-${o.orderId}`}
+                        title="Kembalikan fokus ke pemindai; operator tetap harus memindai barcode resi"
+                        onClick={() => focusScannerForOrder(o)}
+                      >
+                        <ScanLine size={13} aria-hidden />
+                        <span>{busyKey === `kemas-${o.orderId}` ? 'Memproses...' : 'Scan Resi untuk Selesai'}</span>
+                      </button>
+                    )}
+
+                    {workflow.nextAction === 'HANDOVER' && o.fulfillmentId && (
                       <button
                         type="button"
                         className="btn btn-primary btn-sm"
@@ -739,16 +797,16 @@ export default function PesananPengirimanPage() {
                       </button>
                     )}
 
-                    {(o.stage === 'SIAP_DIKEMAS' || o.stage === 'SIAP_KIRIM' || o.stage === 'DIKIRIM') && (
-                      <a
+                    {(o.stage === 'SIAP_DIKEMAS' || o.stage === 'SIAP_KIRIM' || o.stage === 'DIKIRIM') && o.awb && (
+                      <button
+                        type="button"
                         className="btn btn-secondary btn-sm"
-                        href={`/api/v1/orders/${o.orderId}/shipping-label?autoprint=1`}
-                        target="_blank"
-                        rel="noreferrer"
+                        disabled={printingLabelId === o.orderId}
+                        onClick={() => void handlePrintOfficialLabel(o.orderId, o.externalOrderId)}
                       >
                         <Printer size={13} aria-hidden />
-                        <span>Cetak Resi</span>
-                      </a>
+                        <span>{printingLabelId === o.orderId ? 'Menyiapkan label…' : 'Cetak Label Resi'}</span>
+                      </button>
                     )}
 
                     <Link className="btn btn-ghost btn-sm" href={`/dashboard/pesanan/${o.orderId}`}>

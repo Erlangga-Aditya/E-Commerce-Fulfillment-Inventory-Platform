@@ -65,11 +65,18 @@ describe('Sync Service Status Mappings', () => {
       expect(mapLogisticsStatus('LOGISTICS_READY')).toBe('READY_TO_SHIP');
     });
 
-    it('maps pickup and in transit statuses', () => {
-      expect(mapLogisticsStatus('LOGISTICS_REQUEST_CREATED')).toBe('PICKED_UP');
-      expect(mapLogisticsStatus('PROCESSED')).toBe('PICKED_UP');
-      expect(mapLogisticsStatus('LOGISTICS_PICKUP_DONE')).toBe('IN_TRANSIT');
+    it('maps pre-pickup statuses to READY_TO_SHIP (belum diambil kurir)', () => {
+      // Penting: `LOGISTICS_REQUEST_CREATED` berarti permintaan dibuat, paket
+      // belum diambil oleh kurir — bukan "sudah diambil".
+      expect(mapLogisticsStatus('LOGISTICS_REQUEST_CREATED')).toBe('READY_TO_SHIP');
+      expect(mapLogisticsStatus('PROCESSED')).toBe('READY_TO_SHIP');
+      expect(mapLogisticsStatus('LOGISTICS_PICKUP_RETRY')).toBe('READY_TO_SHIP');
+      expect(mapLogisticsStatus('LOGISTICS_PICKUP_DONE')).toBe('PICKED_UP');
+    });
+
+    it('maps in-transit statuses', () => {
       expect(mapLogisticsStatus('SHIPPED')).toBe('IN_TRANSIT');
+      expect(mapLogisticsStatus('TO_CONFIRM_RECEIVE')).toBe('IN_TRANSIT');
     });
 
     it('maps terminal delivery statuses', () => {

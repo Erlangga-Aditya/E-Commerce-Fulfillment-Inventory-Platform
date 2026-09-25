@@ -20,7 +20,7 @@ import {
   Copy,
   Check,
 } from 'lucide-react';
-import { api, formatDate, formatRupiah } from '@/lib/api';
+import { api, formatDate, formatRupiah , openOfficialLabel } from '@/lib/api';
 import {  StatusBadge, LoadingState, ErrorState, Alert } from '@/components/ui';
 
 interface OrderDetail {
@@ -52,7 +52,7 @@ interface OrderDetail {
   awb: string | null;
   carrier: string | null;
   shipmentStatus: string | null;
-  labelUrl: string;
+  canPrintOfficialLabel: boolean;
   items: Array<{
     id: string;
     sku: string;
@@ -98,6 +98,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [arranging, setArranging] = useState(false);
+ const [printingLabel, setPrintingLabel] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
 
   const load = useCallback(() => {
@@ -120,6 +121,24 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+ // Cetak label RESMI Shopee. File diambil dari Shopee lalu dibuka di tab baru.
+ // Tidak ada label buatan: kalau Shopee belum bisa, tampilkan pesan aslinya.
+ async function handlePrintLabel() {
+  if (!order) return;
+  setPrintingLabel(true);
+  setActionNotice(null);
+  try {
+   await openOfficialLabel(order.id);
+  } catch (err) {
+   setActionNotice({
+    tone: 'danger',
+    text: `Label resmi belum bisa dicetak: ${(err as Error).message}`,
+   });
+  } finally {
+   setPrintingLabel(false);
+  }
+ }
+
 
   async function handleArrangeShipment() {
     if (!order) return;
@@ -220,17 +239,24 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
 
         {/* Top Action Buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/* Cetak Resi Button */}
-          <a
-            href={`/api/v1/orders/${order.id}/shipping-label?autoprint=1`}
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-primary"
-            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-          >
-            <Printer size={15} />
-            <span>Cetak Resi (Thermal)</span>
-          </a>
+          {/* Cetak Label RESMI Shopee (hanya kalau resi sudah ada) */}
+          {awb ? (
+            <button
+              type="button"
+              onClick={handlePrintLabel}
+              disabled={printingLabel}
+              className="btn btn-primary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Printer size={15} />
+              <span>{printingLabel ? 'Menyiapkan label dari Shopee…' : 'Cetak Label Resi'}</span>
+            </button>
+          ) : (
+            <span className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <Printer size={15} />
+              <span>Label resmi Shopee muncul setelah nomor resi terbit</span>
+            </span>
+          )}
 
           {/* Atur Pengiriman Button */}
           {!awb && (
@@ -312,18 +338,20 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
               )}
             </div>
             <div><strong>Batas Pengiriman:</strong> {formatDate(order.shipByAt)}</div>
-            <div style={{ marginTop: 12 }}>
-              <a
-                href={`/api/v1/orders/${order.id}/shipping-label`}
-                target="_blank"
-                rel="noreferrer"
-                className="btn btn-secondary btn-sm"
-                style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-              >
-                <ExternalLink size={13} />
-                <span>Lihat Preview Resi</span>
-              </a>
-            </div>
+            {awb && (
+              <div style={{ marginTop: 12 }}>
+                <button
+                  type="button"
+                  onClick={handlePrintLabel}
+                  disabled={printingLabel}
+                  className="btn btn-secondary btn-sm"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  <ExternalLink size={13} />
+                  <span>{printingLabel ? 'Menyiapkan label…' : 'Lihat / Cetak Label Resi'}</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
