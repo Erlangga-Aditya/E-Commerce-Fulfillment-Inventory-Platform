@@ -8,7 +8,7 @@ dengan perintah yang sama.
 
 ---
 
-## 1. Ringkasan status (per 2026-09-25)
+## 1. Ringkasan status (per 2026-09-25, setelah deploy produksi)
 
 | Lapisan | Perintah | Hasil |
 |---|---|---|
@@ -17,10 +17,11 @@ dengan perintah yang sama.
 | Unit + regresi | `npm test` | ✅ **120 lulus** |
 | Build produksi | `npm run build` | ✅ exit 0, 44 route |
 | E2E HTTP + MySQL | `E2E_BASE_URL=http://localhost:3000 npx vitest run src/e2e/fulfillment-flow.test.ts` | ✅ **11/11 lulus** |
-| Browser QA lokal | chromium via `browser_*` | ✅ login, semua halaman 200, scan, handover, label |
-| PWA lokal | curl + `browser_console` | ✅ manifest, sw.js, controller aktif, cache hanya `/offline.html` |
-| Kamera di perangkat nyata | — | ⛔ **belum diuji** (butuh HP + HTTPS produksi) |
-| Produksi VPS | — | ⛔ **belum di-deploy ulang** pada revisi ini |
+| Deploy VPS | `SSHPASS=… uv run --with paramiko python deploy/update-vps.py` | ✅ selesai, PM2 `online` |
+| Produksi HTTPS | `https://103-178-174-224.sslip.io` | ✅ 200 |
+| Browser QA produksi | chromium via `browser_*` | ✅ login, halaman utama, scan, label, PWA |
+| PWA produksi | curl + `browser_console` | ✅ manifest, `sw.js`, controller aktif, cache hanya `/offline.html` |
+| Kamera di perangkat nyata | — | ⛔ **belum diuji** (butuh HP; di produksi sudah HTTPS & `getUserMedia` tersedia) |
 
 ---
 
@@ -132,7 +133,38 @@ sudah dihapus. Sekarang:
 
 ---
 
-## 6. Yang BELUM terbukti (harus jujur)
+## 6. Verifikasi produksi (2026-09-25)
+
+Deploy memakai `deploy/update-vps.py` (bukan `remote_deploy.py`, yang akan membuat ulang
+`JWT_SECRET` dan `ENCRYPTION_KEY` sehingga sesi logout dan kredensial Shopee tidak bisa
+didekripsi lagi). `.env` produksi tidak ditimpa — tetap berkas 24 Sep 2026.
+
+| Yang diperiksa | Hasil |
+|---|---|
+| `/login`, `/manifest.webmanifest`, `/sw.js`, `/offline.html` | semua 200 |
+| `Cache-Control` pada `sw.js` | `no-cache, no-store, must-revalidate` |
+| `Content-Security-Policy` pada `sw.js` | `default-src 'self'; script-src 'self'` |
+| Halaman privat | `307` + `Cache-Control: no-store` (tidak di-cache) |
+| PM2 | `efulfill` status `online` |
+| Migrasi database | `Database schema is up to date!` (5 migrasi) |
+| Login browser | `owner@toko.id` → `/dashboard`, judul "Pusat Kendali Operasional" |
+| Service worker | controller `https://103-178-174-224.sslip.io/sw.js` |
+| Isi cache | hanya `/offline.html`; nol `/api/*` |
+| Scan marker `PROD-QA-MARKER-9X7K2` | ditolak, kode `NOT_FOUND`, pesan memuat marker itu sendiri |
+| Nomor pesanan (bukan resi) | ditolak, kode `ALREADY_PACKED`, `stockDeducted: false` |
+| Label resmi | HTTP 200, `application/pdf`, magic `%PDF`, 78.384 byte |
+
+### 6.1 Data lama yang dibersihkan
+
+Tiga pesanan masih memuat nomor resi karangan `SPXID…` yang dibuat oleh kode lama
+sebelum aplikasi menolak mengarang nomor resi. Semuanya dikosongkan
+(`awb = null`, status `PENDING`, antrian kembali ke `PICKED`) supaya operator
+meminta nomor resi asli ke Shopee. **Pesanan dan produk tidak dihapus.**
+Setelah dibersihkan: `sisa resi karang = 0`.
+
+---
+
+## 7. Yang BELUM terbukti (harus jujur)
 
 | Item | Alasan |
 |---|---|
@@ -146,7 +178,7 @@ sudah dihapus. Sekarang:
 
 ---
 
-## 7. Cara mengulang semuanya
+## 8. Cara mengulang semuanya
 
 ```bash
 # Gate lokal
@@ -160,7 +192,19 @@ npm run build
 # E2E (butuh server + MySQL)
 npm run start -- -p 3000
 E2E_BASE_URL=http://localhost:3000 npx vitest run src/e2e/fulfillment-flow.test.ts
+
+# Deploy ke produksi (JANGAN pakai remote_deploy.py)
+SSHPASS='<password root>' VPS_HOST=103.178.174.224 \
+  uv run --with paramiko python deploy/update-vps.py
+
+# Verifikasi produksi
+curl -sI https://103-178-174-224.sslip.io/sw.js
+curl -s  https://103-178-174-224.sslip.io/manifest.webmanifest
 ```
+
+> `remote_deploy.py` hanya untuk pemasangan dari nol. Setiap kali dipakai ia membuat
+> ulang `JWT_SECRET` dan `ENCRYPTION_KEY`, sehingga sesi logout dan kredensial Shopee
+> tersimpan di database tidak bisa didekripsi lagi.
 
 Server uji memakai gudang khusus `E2E-WH-01` supaya tidak berebut stok dengan
 pesanan asli yang sedang berjalan. Jangan `prisma migrate reset` — data klien hilang.
