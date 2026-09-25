@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Store, Warehouse, ShieldCheck, UserCheck, RefreshCw,
+  Store,  ShieldCheck, UserCheck, RefreshCw,
   Plus, Pencil, Trash2, X, Check, Users, Building2,
   Eye, EyeOff, ChevronRight,
 } from 'lucide-react';
@@ -82,7 +82,7 @@ function Tab({
 
 // ─── Warehouse Management Section ─────────────────────────────────────────────
 
-function WarehouseSection({ tenantId }: { tenantId: string }) {
+function WarehouseSection() {
   const [warehouses, setWarehouses] = useState<WarehouseData[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
@@ -104,7 +104,13 @@ function WarehouseSection({ tenantId }: { tenantId: string }) {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // Ditunda satu task: pemuatan data dipicu setelah render selesai, bukan di tengah effect.
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [load]);
 
   async function createWarehouse(e: React.FormEvent) {
     e.preventDefault();
@@ -304,7 +310,13 @@ function UserManagementSection({ currentUserId }: { currentUserId: string }) {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // Ditunda satu task: pemuatan data dipicu setelah render selesai, bukan di tengah effect.
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [load]);
 
   async function inviteUser(e: React.FormEvent) {
     e.preventDefault();
@@ -623,7 +635,7 @@ export default function PengaturanPage() {
       {/* ── Tab: Gudang ─────────────────────────────────────────────── */}
       {activeTab === 'gudang' && (
         <div className="card">
-          <WarehouseSection tenantId={me?.tenantId ?? ''} />
+          <WarehouseSection />
         </div>
       )}
 

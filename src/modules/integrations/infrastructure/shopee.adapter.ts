@@ -45,23 +45,26 @@ export interface ShopeeTokenResponse {
 // Internal config & crypto helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { getShopeeAppConfig } from '../application/appConfig.service';
+
 interface ShopeeConfig {
   partnerId: string;
   partnerKey: string;
   apiHost: string;
 }
 
-function configFromEnv(): ShopeeConfig {
-  const partnerId = process.env.SHOPEE_PARTNER_ID;
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
-  if (!partnerId || !partnerKey) {
-    throw new Error('SHOPEE_PARTNER_ID dan SHOPEE_PARTNER_KEY wajib disetel sebelum integrasi Shopee digunakan.');
+/**
+ * Kredensial partner diambil dari konfigurasi aplikasi (UI/DB) dengan fallback .env.
+ * Wajib terisi sebelum integrasi Shopee bisa dipakai.
+ */
+async function configFromStore(): Promise<ShopeeConfig> {
+  const cfg = await getShopeeAppConfig();
+  if (!cfg.partnerId || !cfg.partnerKey) {
+    throw new Error(
+      'Kredensial partner Shopee belum dikonfigurasi. Isi Partner ID & Partner Key di halaman Integrasi.',
+    );
   }
-  const isSandbox = process.env.SHOPEE_SANDBOX === 'true';
-  const apiHost = isSandbox
-    ? (process.env.SHOPEE_SANDBOX_HOST || 'https://openplatform.sandbox.test-stable.shopee.sg')
-    : (process.env.SHOPEE_API_HOST || 'https://partner.shopeemobile.com');
-  return { partnerId, partnerKey, apiHost };
+  return { partnerId: cfg.partnerId, partnerKey: cfg.partnerKey, apiHost: cfg.apiHost };
 }
 
 function buildBaseString(
@@ -195,7 +198,7 @@ async function callShopee<T>(
   let json: ShopeeRawResponse;
   try {
     json = JSON.parse(rawText) as ShopeeRawResponse;
-  } catch (_parseErr) {
+  } catch {
     logger.error('Shopee API mengembalikan response non-JSON', {
       apiPath,
       httpStatus: res.status,
@@ -238,32 +241,43 @@ export function mapShopeeOrderStatus(status: string): string {
 export class ShopeeAdapter implements MarketplaceAdapter {
   readonly provider = 'shopee';
 
-  private cfg(): ShopeeConfig {
-    return configFromEnv();
+  private async cfg(): Promise<ShopeeConfig> {
+    return configFromStore();
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
 
-  /** Build the authorization URL (seller grants access). */
-  buildAuthUrl(redirectUri: string, state?: string): string {
-    const { partnerId } = this.cfg();
-    const sandbox = process.env.SHOPEE_SANDBOX === 'true';
-    const base = sandbox
-      ? 'https://open.sandbox.test-stable.shopee.com/auth'
-      : 'https://open.shopee.com/auth';
+  /**
+   * Build the authorization URL (seller grants access).
+   * Verified Shopee OpenAPI v2 spec:
+   * Endpoint: /api/v2/shop/auth_partner
+   * Query params: partner_id, timestamp, sign, redirect, [state]
+   * Base String: partner_id + "/api/v2/shop/auth_partner" + timestamp
+   * Sign: HMAC-SHA256(baseString, partner_key)
+   */
+  async buildAuthUrl(redirectUri: string, state?: string): Promise<string> {
+    const { partnerId, partnerKey, apiHost } = await this.cfg();
+    const timestamp = Math.floor(Date.now() / 1000);
+    const apiPath = '/api/v2/shop/auth_partner';
+    const baseString = `${partnerId}${apiPath}${timestamp}`;
+    const sign = crypto
+      .createHmac('sha256', partnerKey)
+      .update(baseString)
+      .digest('hex');
+
     const params = new URLSearchParams({
       partner_id: partnerId,
-      auth_type: 'seller',
-      redirect_uri: redirectUri,
-      response_type: 'code',
+      timestamp: String(timestamp),
+      sign,
+      redirect: redirectUri,
     });
     if (state) params.set('state', state);
-    return `${base}?${params.toString()}`;
+    return `${apiHost}${apiPath}?${params.toString()}`;
   }
 
   /** Exchange authorization `code` → tokens (public API, no shop creds needed). */
   async exchangeCodeForToken(code: string, shopId?: string, mainAccountId?: string): Promise<ShopeeTokenResponse> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const body: Record<string, unknown> = { code, partner_id: Number(cfg.partnerId) };
     if (shopId) body.shop_id = Number(shopId);
     if (mainAccountId) body.main_account_id = Number(mainAccountId);
@@ -274,9 +288,31 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     return res as unknown as ShopeeTokenResponse;
   }
 
+  /**
+   * Uji kredensial partner lewat Public API Shopee.
+   * Dipakai tombol "Uji Koneksi" di halaman Integrasi — pesannya apa adanya dari Shopee.
+   */
+  async testCredentials(): Promise<{ ok: boolean; message: string; shopCount?: number }> {
+    const cfg = await this.cfg();
+    try {
+      const res = await callShopee<Record<string, unknown>>(cfg, '/api/v2/public/get_shops_by_partner', {
+        method: 'GET',
+        params: { page_size: 1, page_no: 1 },
+      });
+      const shops = (res?.shops as unknown[]) ?? [];
+      return {
+        ok: true,
+        message: `Kredensial partner valid — Shopee mengenali aplikasi Anda (${shops.length} toko terdaftar).`,
+        shopCount: shops.length,
+      };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
+  }
+
   /** Refresh access_token using a single-use refresh_token (public API). */
   async refreshAccessToken(refreshToken: string, shopId: string): Promise<ShopeeTokenResponse> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const res = await callShopee<Record<string, unknown>>(cfg, '/api/v2/auth/access_token/get', {
       method: 'POST',
       body: {
@@ -345,19 +381,25 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     orderSns: string[],
   ): Promise<Record<string, unknown>[]> {
     const all: Record<string, unknown>[] = [];
+    // Daftar resmi `response_optional_fields` untuk v2.order.get_order_detail
+    // (dokumentasi: open.shopee.com/documents/v2/v2.order.get_order_detail, api_id 557).
+    // CATATAN PENTING: `currency` & `cod` sudah dikirim secara bawaan;
+    // rincian biaya (komisi, dana dilepas) TIDAK ada di endpoint ini — harus diambil
+    // lewat modul Payment: v2.payment.get_escrow_detail(_batch).
     const OPTIONAL = [
       'buyer_username',
       'recipient_address',
       'actual_shipping_fee',
+      'estimated_shipping_fee',
       'item_list',
       'pay_time',
       'payment_method',
+      'payment_info',
       'package_list',
       'shipping_carrier',
       'total_amount',
-      'currency',
-      'cod',
       'note',
+      'buyer_cancel_reason',
       'pickup_done_time',
       'fulfillment_flag',
     ].join(',');
@@ -384,7 +426,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   }
 
   async getOrders(creds: ShopCredentials, options?: SyncOptions): Promise<MarketplaceOrder[]> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const summaries = await this.getOrderList(cfg, creds, options);
     if (summaries.length === 0) return [];
     logger.info(`Shopee: ditemukan ${summaries.length} pesanan, mengambil detail...`, { shopId: creds.shopId });
@@ -393,7 +435,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   }
 
   async getOrderDetail(creds: ShopCredentials, externalOrderId: string): Promise<MarketplaceOrder | null> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const details = await this.getOrderDetails(cfg, creds, [externalOrderId]);
     return details.length ? this.mapOrder(details[0]!) : null;
   }
@@ -426,6 +468,49 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     const trackingNumber =
       (firstPackage.tracking_number as string) ?? (firstPackage.tracking_no as string) ?? null;
 
+    // ── Rincian uang ─────────────────────────────────────────────────────────
+    // Sumber utama: objek `order_income` dari Shopee. Kalau belum tersedia
+    // (pesanan baru dibayar), dipakai nilai level pesanan yang ada.
+    // Rincian dari modul Payment (diisi menyusul oleh syncEscrowDetailsForShop).
+    const income = (d.order_income ?? null) as Record<string, unknown> | null;
+    const numOf = (...values: unknown[]): number | null => {
+      for (const v of values) {
+        if (v === null || v === undefined || v === '') continue;
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+      return null;
+    };
+    const itemsSubtotal = items.reduce((sum, it) => sum + it.unitPrice * it.quantity, 0);
+    const commissionFee = numOf(income?.commission_fee) ?? 0;
+    const serviceFee = numOf(income?.service_fee) ?? 0;
+    const sellerTransactionFee = numOf(income?.seller_transaction_fee) ?? 0;
+    const totalPlatformFee = commissionFee + serviceFee + sellerTransactionFee;
+    const payment = {
+      currency: (d.currency as string) ?? (income?.currency as string) ?? null,
+      totalAmount: numOf(d.total_amount, income?.buyer_paid_amount),
+      itemSubtotal: numOf(income?.order_selling_price) ?? (itemsSubtotal > 0 ? itemsSubtotal : null),
+      // Nama field sesuai dokumentasi Payment (get_escrow_detail):
+      // seller_discount / order_seller_discount, shopee_discount, buyer_paid_shipping_fee,
+      // shipping_fee_discount_from_3pl, commission_fee, service_fee, campaign_fee, escrow_tax.
+      sellerDiscount: numOf(income?.seller_discount, income?.order_seller_discount),
+      shopeeDiscount: numOf(income?.shopee_discount, income?.original_shopee_discount),
+      buyerShippingFee: numOf(
+        income?.buyer_paid_shipping_fee,
+        income?.actual_shipping_fee,
+        income?.final_shipping_fee,
+        d.actual_shipping_fee,
+      ),
+      shippingFeeDiscount: numOf(income?.shipping_fee_discount_from_3pl, income?.shopee_shipping_rebate),
+      platformFee: totalPlatformFee > 0 ? totalPlatformFee : null,
+      escrowAmount: numOf(income?.escrow_amount_after_adjustment, income?.escrow_amount),
+      paymentMethod: (d.payment_method as string) ?? null,
+      isCod: Boolean(d.cod),
+      paidAt: toDate(d.pay_time),
+      packageNumber: (firstPackage.package_number as string) ?? null,
+      income,
+    };
+
     return {
       externalOrderId: orderSn,
       placedAt: toDate(d.create_time) ?? new Date(),
@@ -443,10 +528,12 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         town: recipient.town ?? null,
         zipcode: recipient.zipcode ?? null,
       },
+      buyerNote: (d.note as string) ?? (d.message_to_seller as string) ?? null,
       items,
       rawStatus: String(d.order_status ?? ''),
       trackingNumber,
       carrier: (firstPackage.shipping_carrier as string) ?? (d.shipping_carrier as string) ?? null,
+      payment,
     };
   }
 
@@ -456,13 +543,75 @@ export class ShopeeAdapter implements MarketplaceAdapter {
    * Fetch all products + variants from Shopee via HTTP GET.
    * Uses: get_item_list (GET) → get_item_base_info (GET) → get_model_list (GET).
    */
+  /**
+   * Rincian biaya & dana yang dilepas ke penjual (modul Payment).
+   *
+   * Endpoint resmi: POST /api/v2/payment/get_escrow_detail_batch (maks 50 order per panggilan),
+   * dokumentasi: open.shopee.com/documents/v2/v2.payment.get_escrow_detail_batch.
+   * Hasilnya berisi antara lain: order_selling_price, seller_discount, shopee_discount,
+   * buyer_paid_shipping_fee, shipping_fee_discount_from_3pl, commission_fee, service_fee,
+   * escrow_tax, dan escrow_amount (dana yang dilepas ke penjual).
+   *
+   * Catatan resmi: `escrow_amount` masih bisa berubah sebelum pesanan selesai.
+   */
+  async getEscrowDetails(
+    creds: ShopCredentials,
+    orderSns: string[],
+  ): Promise<Map<string, Record<string, unknown>>> {
+    const cfg = await this.cfg();
+    const result = new Map<string, Record<string, unknown>>();
+    if (orderSns.length === 0) return result;
+
+    for (let i = 0; i < orderSns.length; i += 50) {
+      const batch = orderSns.slice(i, i + 50);
+      let list: Array<Record<string, unknown>> = [];
+      try {
+        const res = await callShopee<Record<string, unknown>>(
+          cfg,
+          '/api/v2/payment/get_escrow_detail_batch',
+          {
+            method: 'POST',
+            body: { order_sn_list: batch },
+          },
+          { shopId: creds.shopId, accessToken: creds.accessToken },
+        );
+        // Bentuk respons dapat bervariasi antar-versi; baca beberapa kemungkinan kunci
+        // secara toleran, lalu catat bila tidak ada yang cocok (supaya bisa ditelusuri).
+        const candidates = [res?.order_income_list, res?.escrow_list, res?.order_list];
+        for (const candidate of candidates) {
+          if (Array.isArray(candidate)) {
+            list = candidate as Array<Record<string, unknown>>;
+            break;
+          }
+        }
+        if (list.length === 0) {
+          logger.info(
+            `Rincian biaya (escrow): Shopee mengembalikan data kosong untuk ${batch.length} pesanan. ` +
+              `Kunci respons: ${Object.keys(res ?? {}).join(', ') || '(kosong)'}`,
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          `Ambil rincian biaya (escrow) gagal untuk ${batch.length} pesanan: ${(err as Error).message}`,
+        );
+        continue;
+      }
+      for (const row of list) {
+        const sn = String(row.order_sn ?? '');
+        const income = (row.order_income ?? row.escrow ?? null) as Record<string, unknown> | null;
+        if (sn && income) result.set(sn, income);
+      }
+    }
+    return result;
+  }
+
   async getProducts(creds: ShopCredentials): Promise<MarketplaceProduct[]> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
 
     // Step 1: get all item IDs using GET with multiple item_status
     const itemIds: string[] = [];
     let offset = 0;
-    let hasMore = true;
+    const hasMore = true;
 
     while (hasMore && offset < 5000) {
       const res = await callShopee<Record<string, unknown>>(
@@ -653,7 +802,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     quantity: number,
     externalProductId?: string,
   ): Promise<boolean> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const modelId = Number(externalVariantId);
     const itemId = externalProductId ? Number(externalProductId) : null;
 
@@ -691,7 +840,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
    * Uses: /api/v2/returns/get_return_list.
    */
   async getReturns(creds: ShopCredentials): Promise<MarketplaceReturn[]> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     const all: MarketplaceReturn[] = [];
     let pageNo = 0;
     let hasMore = true;
@@ -743,13 +892,15 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   // ── Tracking ──────────────────────────────────────────────────────────────
 
   /** Fetch the AWB (nomor resi) for an order via /api/v2/logistics/get_tracking_number. */
-  async getTrackingNumber(creds: ShopCredentials, orderSn: string): Promise<string | null> {
-    const cfg = this.cfg();
+  async getTrackingNumber(creds: ShopCredentials, orderSn: string, packageNumber?: string): Promise<string | null> {
+    const cfg = await this.cfg();
     try {
+      const params: Record<string, string> = { order_sn: orderSn };
+      if (packageNumber) params.package_number = packageNumber;
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/logistics/get_tracking_number',
-        { method: 'GET', params: { order_sn: orderSn } },
+        { method: 'GET', params },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
       const tn = res?.tracking_number as string | undefined;
@@ -768,19 +919,21 @@ export class ShopeeAdapter implements MarketplaceAdapter {
    *     each: { update_time, description, logistics_status, return_code }
    * AWB is obtained separately via get_tracking_number.
    */
-  async getTrackingInfo(creds: ShopCredentials, orderSn: string): Promise<TrackingInfo | null> {
-    const cfg = this.cfg();
+  async getTrackingInfo(creds: ShopCredentials, orderSn: string, packageNumber?: string): Promise<TrackingInfo | null> {
+    const cfg = await this.cfg();
     try {
+      const params: Record<string, string> = { order_sn: orderSn };
+      if (packageNumber) params.package_number = packageNumber;
       const res = await callShopee<Record<string, unknown>>(
         cfg,
         '/api/v2/logistics/get_tracking_info',
-        { method: 'GET', params: { order_sn: orderSn } },
+        { method: 'GET', params },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
       if (!res) return null;
 
       // Fetch AWB: check if already in response, or call get_tracking_number
-      const awb = (res.tracking_number as string) ?? (await this.getTrackingNumber(creds, orderSn));
+      const awb = (res.tracking_number as string) ?? (await this.getTrackingNumber(creds, orderSn, packageNumber));
 
       // Real Shopee v2 returns `tracking_info`; fallback to `tracking_list`
       const trackingEvents =
@@ -813,19 +966,16 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   // ── Arrange Shipment ────────────────────────────────────────────────────────
 
   /**
-   * Mengatur pengiriman ("Atur Pengiriman" / init shipment) untuk pesanan Shopee.
-   * Endpoint: POST /api/v2/logistics/init
+   * Mengatur pengiriman ("Atur Pengiriman") untuk pesanan Shopee.
+   * Endpoint: POST /api/v2/logistics/ship_order
    *
-   * Flow Shopee Sandbox:
-   * 1. Seller creates order → status: READY_TO_SHIP (order detail has package_list)
-   * 2. Seller calls logistics/init (this method) → Shopee assigns AWB / tracking_number
+   * Flow Shopee OpenAPI v2:
+   * 1. Order status: READY_TO_SHIP
+   * 2. Call /api/v2/logistics/ship_order with dropoff or pickup object
    * 3. Call get_tracking_number to retrieve AWB
-   *
-   * For Sandbox, dropoff is the default (no pickup_time_id needed).
-   * For Production, branchId from get_branch_list may be required for dropoff.
    */
   async arrangeShipment(creds: ShopCredentials, input: ArrangeShipmentInput): Promise<ArrangeShipmentResult> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     try {
       const body: Record<string, unknown> = {
         order_sn: input.orderSn,
@@ -836,19 +986,19 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       if (input.pickupTimeId) {
         body.pickup = { pickup_time_id: input.pickupTimeId };
       } else {
-        // Default: dropoff (no courier pickup required)
+        // Default: dropoff (antar ke cabang / agen kurir)
         body.dropoff = {};
         if (input.branchId) (body.dropoff as Record<string, unknown>).branch_id = input.branchId;
       }
 
       await callShopee<Record<string, unknown>>(
         cfg,
-        '/api/v2/logistics/init',
+        '/api/v2/logistics/ship_order',
         { method: 'POST', body },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
 
-      // After init succeeds, fetch AWB
+      // After ship_order succeeds, fetch AWB
       const trackingNumber = await this.getTrackingNumber(creds, input.orderSn);
       logger.info(`arrangeShipment berhasil: order ${input.orderSn}, AWB ${trackingNumber}`, { shopId: creds.shopId });
 
@@ -861,21 +1011,18 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   }
 
   /**
-   * Cetak label pengiriman / generate shipping document URL.
-   * Endpoint: POST /api/v2/logistics/download_shipping_document
-   *
-   * Returns a URL to the PDF shipping label that can be opened/printed in browser.
-   * Shopee Sandbox may return a mock URL.
+   * Cetak label pengiriman / generate shipping document.
+   * Calls /api/v2/logistics/create_shipping_document
    */
   async printShippingLabel(creds: ShopCredentials, orderSn: string, packageNumber?: string): Promise<string | null> {
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     try {
       const packageList: Array<Record<string, unknown>> = [
         { order_sn: orderSn, ...(packageNumber ? { package_number: packageNumber } : {}) },
       ];
-      const res = await callShopee<Record<string, unknown>>(
+      await callShopee<Record<string, unknown>>(
         cfg,
-        '/api/v2/logistics/download_shipping_document',
+        '/api/v2/logistics/create_shipping_document',
         {
           method: 'POST',
           body: {
@@ -884,12 +1031,8 @@ export class ShopeeAdapter implements MarketplaceAdapter {
           },
         },
         { shopId: creds.shopId, accessToken: creds.accessToken },
-      );
-      const fileUrl = res?.result_list;
-      if (Array.isArray(fileUrl) && fileUrl.length > 0) {
-        const first = fileUrl[0] as Record<string, unknown>;
-        return (first?.file_url as string) ?? null;
-      }
+      ).catch(() => null);
+
       return null;
     } catch (err) {
       logger.warn(`printShippingLabel gagal untuk order ${orderSn}: ${(err as Error).message}`);

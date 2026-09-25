@@ -3,7 +3,6 @@ import { prisma } from '@/shared/infrastructure/prisma';
 import {
   isValidFulfillmentTransition,
   type FulfillmentStatus as DomainFulfillmentStatus,
-  type ScanResult,
 } from '../domain/fulfillment.entity';
 import {
   NotFoundError,
@@ -11,9 +10,49 @@ import {
   BusinessRuleViolationError,
 } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
-import { reserveStock } from '@/modules/inventory/application/inventory.usecase';
+import {
+  reserveStock,
+  getAvailabilityMap,
+} from '@/modules/inventory/application/inventory.usecase';
+import { consumeStockLotsFifo } from '@/modules/inventory/application/stock-lot.service';
 import { recalculateOrderPriority } from '@/modules/orders/application/order.usecase';
 import { logger } from '@/shared/observability/logger';
+
+/** Item yang stoknya belum cukup untuk sebuah pesanan. */
+export interface StockShortfall {
+  variantId: string;
+  sku: string;
+  productName: string;
+  required: number;
+  available: number;
+  missing: number;
+}
+
+/** Item picking yang belum dikonfirmasi oleh operator. */
+export interface PendingPickingItem {
+  pickingItemId: string;
+  sku: string;
+  variantName: string;
+  expectedQuantity: number;
+  pickedQuantity: number;
+}
+
+/**
+ * Hasil penyiapan packing: apakah pesanan boleh lanjut ke packing, dan kalau
+ * BELUM boleh — apa persisnya yang kurang (dipakai UI supaya pesannya jujur).
+ */
+export interface PackingPreparation {
+  fulfillmentOrderId: string;
+  orderId: string;
+  warehouseId: string;
+  status: FulfillmentStatus;
+  readyForPacking: boolean;
+  pendingPicking: PendingPickingItem[];
+  shortfalls: StockShortfall[];
+  autoConfirmedPicking: boolean;
+  reservedNow: boolean;
+  usedNegativeStock: boolean;
+}
 
 function assertTransition(from: string, to: DomainFulfillmentStatus, entity = 'Fulfillment Order') {
   if (!isValidFulfillmentTransition(from as DomainFulfillmentStatus, to)) {
@@ -96,203 +135,404 @@ export async function processOrderForFulfillment(
   return { fulfillmentOrderId: fo.id, success: failedSkus.length === 0, failedSkus };
 }
 
-/** Queue of actionable fulfillment work (FR-FUL-002). */
-export async function getFulfillmentQueue(
-  tenantId: string,
-  options: { status?: DomainFulfillmentStatus; page?: number; pageSize?: number } = {},
+// ─────────────────────────────────────────────────────────────────────────────
+// Kesiapan packing (single source of truth untuk scan resi & tombol UI)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Rantai status yang sah menuju PICKED, dipakai untuk memajukan status tanpa melompati state machine. */
+const CHAIN_TO_PICKED: Record<string, DomainFulfillmentStatus[]> = {
+  WAITING_STOCK: ['READY_TO_PICK', 'PICKING', 'PICKED'],
+  READY_TO_PICK: ['PICKING', 'PICKED'],
+  PICKING: ['PICKED'],
+};
+
+/** Pastikan picking task + item-nya ada (WAITING_STOCK tidak dibuatkan task saat reservasi gagal). */
+async function ensurePickingTask(
+  tx: Prisma.TransactionClient,
+  fulfillmentOrderId: string,
+  items: Array<{ variantId: string; expectedQuantity: number }>,
 ) {
-  const { status, page = 1, pageSize = 50 } = options;
-  const skip = (page - 1) * pageSize;
-
-  const where: Prisma.FulfillmentOrderWhereInput = {
-    order: { tenantId },
-    ...(status ? { status: status as FulfillmentStatus } : { status: { notIn: ['HANDED_OVER', 'COMPLETED'] } }),
-  };
-
-  const [tasks, total] = await Promise.all([
-    prisma.fulfillmentOrder.findMany({
-      where,
-      include: {
-        order: {
-          select: {
-            id: true,
-            externalOrderId: true,
-            status: true,
-            shipByAt: true,
-            priorityScore: true,
-            priorityLevel: true,
-            buyerName: true,
-            shop: { select: { name: true, provider: true } },
-          },
-        },
-        warehouse: { select: { name: true, code: true } },
-        pickingTasks: {
-          include: { items: { include: { variant: { select: { sku: true, name: true, barcode: true } } } } },
-          orderBy: { createdAt: 'asc' },
-        },
-      },
-      skip,
-      take: pageSize,
-      orderBy: [{ order: { priorityScore: 'desc' } }, { order: { shipByAt: 'asc' } }],
-    }),
-    prisma.fulfillmentOrder.count({ where }),
-  ]);
-
-  return {
-    items: tasks.map((fo) => ({
-      id: fo.id,
-      status: fo.status,
-      warehouseName: fo.warehouse.name,
-      order: {
-        id: fo.order.id,
-        externalOrderId: fo.order.externalOrderId,
-        shopName: fo.order.shop.name,
-        provider: fo.order.shop.provider,
-        buyerName: fo.order.buyerName,
-        shipByAt: fo.order.shipByAt,
-        priorityScore: fo.order.priorityScore,
-        priorityLevel: fo.order.priorityLevel,
-      },
-      pickingTasks: fo.pickingTasks.map((t) => ({
-        id: t.id,
-        status: t.status,
-        items: t.items.map((i) => ({
-          id: i.id,
-          sku: i.variant.sku,
-          variantName: i.variant.name,
-          barcode: i.variant.barcode,
+  const existing = await tx.pickingTask.findFirst({ where: { fulfillmentOrderId } });
+  if (existing) return existing;
+  return tx.pickingTask.create({
+    data: {
+      fulfillmentOrderId,
+      status: 'PENDING',
+      items: {
+        create: items.map((i) => ({
+          variantId: i.variantId,
           expectedQuantity: i.expectedQuantity,
-          pickedQuantity: i.pickedQuantity,
-          isConfirmed: i.isConfirmed,
+          pickedQuantity: 0,
         })),
-      })),
-    })),
-    pagination: { total, page, pageSize, hasMore: skip + pageSize < total },
-  };
+      },
+    },
+  });
 }
 
-/** Start picking: READY_TO_PICK → PICKING. */
-export async function startPicking(
+/** Majukan fulfillment order sampai PICKED mengikuti transisi yang sah (tanpa bypass state machine). */
+async function advanceToPicked(tx: Prisma.TransactionClient, fulfillmentOrderId: string, from: string) {
+  const chain = CHAIN_TO_PICKED[from];
+  if (!chain) return;
+  let current = from;
+  for (const step of chain) {
+    assertTransition(current, step);
+    await tx.fulfillmentOrder.update({
+      where: { id: fulfillmentOrderId },
+      data: { status: step, ...(step === 'PICKING' ? { startedAt: new Date() } : {}) },
+    });
+    current = step;
+  }
+  await tx.pickingTask.updateMany({
+    where: { fulfillmentOrderId, status: { in: ['PENDING', 'IN_PROGRESS'] } },
+    data: { status: 'COMPLETED', completedAt: new Date() },
+  });
+}
+
+/**
+ * Konfirmasi seluruh item picking untuk sebuah fulfillment order.
+ * DIPANGGIL HANYA dari aksi eksplisit operator (mode cepat) — selalu tercatat di audit log
+ * supaya jejak "item dikonfirmasi tanpa scan" tidak pernah tersembunyi.
+ */
+export async function confirmAllPickingItems(
   tenantId: string,
   fulfillmentOrderId: string,
   actorId: string,
-): Promise<void> {
+  reason: string,
+): Promise<number> {
   const fo = await prisma.fulfillmentOrder.findFirst({
     where: { id: fulfillmentOrderId, order: { tenantId } },
-    include: { pickingTasks: true },
+    include: { pickingTasks: { include: { items: true } } },
   });
   if (!fo) throw new NotFoundError('Fulfillment order', fulfillmentOrderId);
-  assertTransition(fo.status, 'PICKING');
+
+  const pending = fo.pickingTasks.flatMap((t) => t.items).filter((i) => !i.isConfirmed);
+  if (pending.length === 0) return 0;
 
   await prisma.$transaction(async (tx) => {
-    await tx.fulfillmentOrder.update({
-      where: { id: fulfillmentOrderId },
-      data: { status: 'PICKING', startedAt: fo.startedAt ?? new Date() },
-    });
-    await tx.pickingTask.updateMany({
-      where: { fulfillmentOrderId, status: 'PENDING' },
-      data: { status: 'IN_PROGRESS', startedAt: new Date(), assignedToId: actorId },
-    });
+    for (const item of pending) {
+      await tx.pickingItem.update({
+        where: { id: item.id },
+        data: { isConfirmed: true, pickedQuantity: item.expectedQuantity, scannedAt: new Date() },
+      });
+    }
   });
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'picking_confirmed_without_scan',
+    entityType: 'FulfillmentOrder',
+    entityId: fulfillmentOrderId,
+    metadata: { reason, confirmedItems: pending.length },
+  });
+
+  return pending.length;
 }
 
-/** Scan an item (barcode/SKU). Validates + increments picked qty (FR-FUL-003/004). */
-export async function processScan(
+/**
+ * Hitung item mana yang stoknya kurang untuk sebuah pesanan (dipakai UI agar shortfall transparan).
+ */
+export async function getOrderShortfalls(
   tenantId: string,
-  taskId: string,
-  scannedCode: string,
-  quantity: number = 1,
-): Promise<ScanResult> {
-  const task = await prisma.pickingTask.findFirst({
-    where: { id: taskId, fulfillmentOrder: { order: { tenantId } } },
+  warehouseId: string,
+  orderItems: Array<{
+    variantId: string;
+    quantity: number;
+    fulfilledQuantity: number;
+    variant?: { sku: string; product?: { name: string } | null } | null;
+    /** Reservasi AKTIF milik item ini — stok yang sudah "dipesan" untuk pesanan ini sendiri. */
+    reservations?: Array<{ quantity: number }> | null;
+  }>,
+): Promise<StockShortfall[]> {
+  const needs = orderItems
+    .map((i) => ({ ...i, required: i.quantity - i.fulfilledQuantity }))
+    .filter((i) => i.required > 0);
+  if (needs.length === 0) return [];
+
+  const availability = await getAvailabilityMap([warehouseId], [...new Set(needs.map((i) => i.variantId))]);
+  const shortfalls: StockShortfall[] = [];
+  for (const item of needs) {
+    // PENTING: `available` sudah dikurangi reservasi milik pesanan ini sendiri.
+    // Karena itu reservasi sendiri harus ditambahkan kembali — kalau tidak, pesanan
+    // yang sudah teralokasi akan selalu terlihat "kurang stok".
+    const ownReservation = (item.reservations ?? []).reduce((sum, r) => sum + r.quantity, 0);
+    const available =
+      (availability.get(`${warehouseId}:${item.variantId}`)?.available ?? 0) + ownReservation;
+    if (available < item.required) {
+      shortfalls.push({
+        variantId: item.variantId,
+        sku: item.variant?.sku ?? item.variantId,
+        productName: item.variant?.product?.name ?? item.variant?.sku ?? 'Produk',
+        required: item.required,
+        available,
+        missing: item.required - available,
+      });
+    }
+  }
+  return shortfalls;
+}
+
+/**
+ * Siapkan sebuah fulfillment order agar boleh dipacking:
+ *  1. WAITING_STOCK → coba alokasikan stok ulang, supaya pesanan tidak macet selamanya.
+ *  2. Pastikan picking task ada; konfirmasi item hanya kalau operator memintanya (confirmPicking).
+ *  3. Majukan status ke PICKED lewat transisi yang sah.
+ *
+ * Mengembalikan alasan yang jelas kalau belum boleh dipacking — TIDAK PERNAH mengubah stok.
+ */
+export async function prepareFulfillmentForPacking(
+  tenantId: string,
+  fulfillmentOrderId: string,
+  actorId: string,
+  options: { confirmPicking?: boolean; allowNegativeStock?: boolean } = {},
+): Promise<PackingPreparation> {
+  const fo = await prisma.fulfillmentOrder.findFirst({
+    where: { id: fulfillmentOrderId, order: { tenantId } },
     include: {
-      items: { include: { variant: { select: { id: true, sku: true, name: true, barcode: true } } } },
-      fulfillmentOrder: true,
+      order: {
+        include: {
+          items: {
+            include: {
+              variant: { include: { product: { select: { name: true } } } },
+              reservations: { where: { status: 'ACTIVE' }, select: { quantity: true } },
+            },
+          },
+        },
+      },
+      pickingTasks: { include: { items: { include: { variant: true } } } },
     },
   });
-  if (!task) throw new NotFoundError('Picking task', taskId);
-
-  if (task.status === 'COMPLETED') {
-    return { success: false, error: { code: 'ALREADY_CONFIRMED', message: 'Picking task ini sudah selesai.' } };
+  if (!fo) throw new NotFoundError('Fulfillment order', fulfillmentOrderId);
+  if (fo.status === 'HANDED_OVER' || fo.status === 'COMPLETED') {
+    throw new BusinessRuleViolationError('Pesanan ini sudah diserahkan ke kurir / sudah selesai.');
   }
 
-  const matchedItem = task.items.find(
-    (item) => item.variant.sku === scannedCode || (item.variant.barcode && item.variant.barcode === scannedCode),
-  );
+  let status: string = fo.status;
+  let reservedNow = false;
+  let shortfalls = await getOrderShortfalls(tenantId, fo.warehouseId, fo.order.items);
 
-  if (!matchedItem) {
-    const isKnownSku = await prisma.productVariant.findFirst({
-      where: { OR: [{ sku: scannedCode }, { barcode: scannedCode }], product: { tenantId } },
-    });
+  // 1. WAITING_STOCK → coba alokasikan ulang sebelum menyerah.
+  if (status === 'WAITING_STOCK' && shortfalls.length > 0) {
+    const stillFailed: string[] = [];
+    for (const item of fo.order.items) {
+      const remaining = item.quantity - item.fulfilledQuantity;
+      if (remaining <= 0) continue;
+      try {
+        await reserveStock(tenantId, fo.warehouseId, item.variantId, item.id, remaining, actorId);
+      } catch {
+        stillFailed.push(item.variant.sku);
+      }
+    }
+    if (stillFailed.length === 0) {
+      await prisma.$transaction(async (tx) => {
+        await ensurePickingTask(
+          tx,
+          fo.id,
+          fo.order.items.map((i) => ({ variantId: i.variantId, expectedQuantity: i.quantity })),
+        );
+        assertTransition(status, 'READY_TO_PICK');
+        await tx.fulfillmentOrder.update({ where: { id: fo.id }, data: { status: 'READY_TO_PICK' } });
+      });
+      status = 'READY_TO_PICK';
+      reservedNow = true;
+      shortfalls = [];
+      await auditLog({
+        tenantId,
+        actorId,
+        action: 'stock_reserved_retry_success',
+        entityType: 'FulfillmentOrder',
+        entityId: fo.id,
+        metadata: { warehouseId: fo.warehouseId },
+      });
+    }
+  }
+
+  if (shortfalls.length > 0 && !options.allowNegativeStock) {
     return {
-      success: false,
-      error: isKnownSku
-        ? { code: 'SKU_MISMATCH', message: `SKU ${scannedCode} tidak termasuk dalam pesanan ini.`, expectedSku: task.items.map((i) => i.variant.sku).join(', ') }
-        : { code: 'SKU_NOT_FOUND', message: `Kode ${scannedCode} tidak ditemukan dalam sistem.` },
+      fulfillmentOrderId: fo.id,
+      orderId: fo.orderId,
+      warehouseId: fo.warehouseId,
+      status: status as FulfillmentStatus,
+      readyForPacking: false,
+      pendingPicking: [],
+      shortfalls,
+      autoConfirmedPicking: false,
+      reservedNow,
+      usedNegativeStock: false,
     };
   }
 
-  if (matchedItem.isConfirmed) {
-    return { success: false, error: { code: 'ALREADY_CONFIRMED', message: `Item ${matchedItem.variant.sku} sudah dikonfirmasi.` } };
-  }
-
-  const newPickedQuantity = matchedItem.pickedQuantity + quantity;
-  if (newPickedQuantity > matchedItem.expectedQuantity) {
-    return {
-      success: false,
-      error: {
-        code: 'QUANTITY_EXCEEDED',
-        message: `Jumlah melebihi kebutuhan. Diperlukan: ${matchedItem.expectedQuantity}, dipindai: ${newPickedQuantity}.`,
-        max: matchedItem.expectedQuantity,
-      },
-    };
-  }
-
-  const isNowConfirmed = newPickedQuantity >= matchedItem.expectedQuantity;
-  await prisma.pickingItem.update({
-    where: { id: matchedItem.id },
-    data: { pickedQuantity: newPickedQuantity, isConfirmed: isNowConfirmed, scannedAt: new Date() },
+  // 2. Pastikan picking task ada (mis. lanjut packing walau stok minus).
+  await prisma.$transaction(async (tx) => {
+    await ensurePickingTask(
+      tx,
+      fo.id,
+      fo.order.items.map((i) => ({ variantId: i.variantId, expectedQuantity: i.quantity })),
+    );
   });
 
-  const updatedItems = await prisma.pickingItem.findMany({ where: { pickingTaskId: taskId } });
-  const allConfirmed = updatedItems.every((i) => i.isConfirmed);
+  const refresh = async () =>
+    prisma.fulfillmentOrder.findUniqueOrThrow({
+      where: { id: fo.id },
+      include: { pickingTasks: { include: { items: { include: { variant: true } } } } },
+    });
 
-  if (allConfirmed) {
+  let current = await refresh();
+  let pending = current.pickingTasks.flatMap((t) => t.items).filter((i) => !i.isConfirmed);
+  let autoConfirmedPicking = false;
+
+  // 3. Konfirmasi picking hanya atas permintaan operator (mode cepat) — bukan diam-diam.
+  if (pending.length > 0 && options.confirmPicking) {
+    await confirmAllPickingItems(tenantId, fo.id, actorId, 'operator-fast-mode');
+    autoConfirmedPicking = true;
+    current = await refresh();
+    pending = current.pickingTasks.flatMap((t) => t.items).filter((i) => !i.isConfirmed);
+  }
+
+  if (pending.length > 0) {
+    return {
+      fulfillmentOrderId: fo.id,
+      orderId: fo.orderId,
+      warehouseId: fo.warehouseId,
+      status: current.status,
+      readyForPacking: false,
+      pendingPicking: pending.map((i) => ({
+        pickingItemId: i.id,
+        sku: i.variant.sku,
+        variantName: i.variant.name,
+        expectedQuantity: i.expectedQuantity,
+        pickedQuantity: i.pickedQuantity,
+      })),
+      shortfalls: [],
+      autoConfirmedPicking: false,
+      reservedNow,
+      usedNegativeStock: false,
+    };
+  }
+
+  // Semua item sudah dikonfirmasi → majukan ke PICKED.
+  if (current.status !== 'PICKED' && current.status !== 'PACKING') {
     await prisma.$transaction(async (tx) => {
-      await tx.pickingTask.update({
-        where: { id: taskId },
-        data: { status: 'COMPLETED', completedAt: new Date() },
-      });
-      if (task.fulfillmentOrder.status === 'PICKING') {
-        await tx.fulfillmentOrder.update({ where: { id: task.fulfillmentOrderId }, data: { status: 'PICKED' } });
-      }
+      await advanceToPicked(tx, fo.id, current.status);
     });
   }
 
   return {
-    success: true,
-    item: {
-      pickingItemId: matchedItem.id,
-      sku: matchedItem.variant.sku,
-      variantName: matchedItem.variant.name,
-      expectedQuantity: matchedItem.expectedQuantity,
-      pickedQuantity: newPickedQuantity,
-      isConfirmed: isNowConfirmed,
-    },
-    allConfirmed,
+    fulfillmentOrderId: fo.id,
+    orderId: fo.orderId,
+    warehouseId: fo.warehouseId,
+    status: 'PICKED',
+    readyForPacking: true,
+    pendingPicking: [],
+    shortfalls,
+    autoConfirmedPicking,
+    reservedNow,
+    usedNegativeStock: options.allowNegativeStock === true && shortfalls.length > 0,
   };
 }
 
-/** Complete packing: PICKED → PACKED (FR-FUL-005). */
+/**
+ * Coba alokasikan stok untuk semua pesanan WAITING_STOCK di sebuah gudang.
+ * Dipanggil otomatis setelah stok masuk/disesuaikan, dan bisa dipicu manual dari UI.
+ * Tanpa ini, pesanan yang gagal reservasi akan macet selamanya.
+ */
+export async function retryWaitingStockOrders(
+  tenantId: string,
+  warehouseId: string,
+  actorId: string,
+): Promise<{ advanced: string[]; stillWaiting: string[] }> {
+  const waiting = await prisma.fulfillmentOrder.findMany({
+    where: { order: { tenantId }, warehouseId, status: 'WAITING_STOCK' },
+    include: { order: { include: { items: true } } },
+    orderBy: { createdAt: 'asc' },
+    take: 100,
+  });
+
+  const advanced: string[] = [];
+  const stillWaiting: string[] = [];
+
+  for (const fo of waiting) {
+    let ok = true;
+    for (const item of fo.order.items) {
+      const remaining = item.quantity - item.fulfilledQuantity;
+      if (remaining <= 0) continue;
+      try {
+        await reserveStock(tenantId, warehouseId, item.variantId, item.id, remaining, actorId);
+      } catch {
+        ok = false;
+        break;
+      }
+    }
+
+    if (!ok) {
+      stillWaiting.push(fo.id);
+      continue;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await ensurePickingTask(
+        tx,
+        fo.id,
+        fo.order.items.map((i) => ({ variantId: i.variantId, expectedQuantity: i.quantity })),
+      );
+      assertTransition('WAITING_STOCK', 'READY_TO_PICK');
+      await tx.fulfillmentOrder.update({ where: { id: fo.id }, data: { status: 'READY_TO_PICK' } });
+    });
+    advanced.push(fo.id);
+  }
+
+  if (advanced.length > 0) {
+    await auditLog({
+      tenantId,
+      actorId,
+      action: 'waiting_stock_retry',
+      entityType: 'Warehouse',
+      entityId: warehouseId,
+      metadata: { advanced: advanced.length, stillWaiting: stillWaiting.length },
+    });
+    logger.info(
+      `Retry alokasi stok: ${advanced.length} pesanan siap dipick, ${stillWaiting.length} masih menunggu`,
+      { warehouseId },
+    );
+  }
+
+  return { advanced, stillWaiting };
+}
+
 export async function completePacking(
   tenantId: string,
   fulfillmentOrderId: string,
   actorId: string,
   notes?: string,
-): Promise<void> {
+  options: { allowNegativeStock?: boolean } = {},
+): Promise<{
+  deducted: Array<{
+    variantId: string;
+    sku: string;
+    quantity: number;
+    onHand: number;
+    /** Lot FIFO mana yang dipakai (terlama lebih dulu). */
+    lotId: string | null;
+    lotCount: number;
+  }>;
+  totalUnits: number;
+  negativeStock: boolean;
+}> {
   const fo = await prisma.fulfillmentOrder.findFirst({
     where: { id: fulfillmentOrderId, order: { tenantId } },
-    include: { pickingTasks: { include: { items: true } } },
+    include: {
+      pickingTasks: { include: { items: true } },
+      order: {
+        include: {
+          items: {
+            include: {
+              reservations: { where: { status: 'ACTIVE' } },
+              variant: { select: { sku: true } },
+            },
+          },
+        },
+      },
+    },
   });
   if (!fo) throw new NotFoundError('Fulfillment order', fulfillmentOrderId);
 
@@ -306,12 +546,82 @@ export async function completePacking(
   }
   assertTransition(fo.status, 'PACKED');
 
+  const deducted: Array<{
+    variantId: string;
+    sku: string;
+    quantity: number;
+    onHand: number;
+    lotId: string | null;
+    lotCount: number;
+  }> = [];
+
   await prisma.$transaction(async (tx) => {
+    // 1. Kurangi stok fisik + konsumsi reservasi + ledger
+    for (const item of fo.order.items) {
+      const remaining = item.quantity - item.fulfilledQuantity;
+      if (remaining > 0) {
+        const balance = await tx.inventoryBalance.upsert({
+          where: { warehouseId_variantId: { warehouseId: fo.warehouseId, variantId: item.variantId } },
+          update: { onHand: { decrement: remaining }, version: { increment: 1 } },
+          create: { warehouseId: fo.warehouseId, variantId: item.variantId, onHand: -remaining },
+        });
+        // FIFO: barang yang paling lama disimpan keluar lebih dulu.
+        const consumedLots = await consumeStockLotsFifo(tx, {
+          warehouseId: fo.warehouseId,
+          variantId: item.variantId,
+          quantity: remaining,
+          referenceId: fo.orderId,
+        });
+
+        deducted.push({
+          variantId: item.variantId,
+          sku: item.variant.sku,
+          quantity: remaining,
+          onHand: balance.onHand,
+          lotId: consumedLots[0]?.lotId ?? null,
+          lotCount: consumedLots.length,
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            tenantId,
+            warehouseId: fo.warehouseId,
+            variantId: item.variantId,
+            movementType: 'DEDUCTION',
+            quantityDelta: -remaining,
+            referenceType: 'order',
+            referenceId: fo.orderId,
+            stockLotId: consumedLots[0]?.lotId ?? null,
+            reason: options.allowNegativeStock
+              ? 'Packing selesai — stok dikurangi walau kurang (disetujui operator)'
+              : 'Packing selesai — stok fisik gudang dikurangkan',
+            actorId,
+          },
+        });
+      }
+
+      // Reservasi (kalau ada) ditutup di sini; reserved hanya berkurang sebesar yang direservasi.
+      for (const res of item.reservations) {
+        await tx.inventoryBalance.update({
+          where: { warehouseId_variantId: { warehouseId: res.warehouseId, variantId: item.variantId } },
+          data: { reserved: { decrement: res.quantity }, version: { increment: 1 } },
+        });
+        await tx.stockReservation.update({ where: { id: res.id }, data: { status: 'CONSUMED' } });
+      }
+
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: { fulfilledQuantity: item.quantity, status: 'FULFILLED' },
+      });
+    }
+
+    // 2. Status PACKED + catat task packing
     await tx.fulfillmentOrder.update({ where: { id: fulfillmentOrderId }, data: { status: 'PACKED' } });
     await tx.packingTask.create({
       data: { fulfillmentOrderId, status: 'COMPLETED', packedById: actorId, packedAt: new Date(), notes },
     });
   });
+
+  const negativeStock = deducted.some((d) => d.onHand < 0);
 
   await auditLog({
     tenantId,
@@ -319,8 +629,10 @@ export async function completePacking(
     action: 'packing_complete',
     entityType: 'FulfillmentOrder',
     entityId: fulfillmentOrderId,
-    metadata: { notes },
+    metadata: { notes, deductedUnits: deducted.reduce((s, d) => s + d.quantity, 0), negativeStock },
   });
+
+  return { deducted, totalUnits: deducted.reduce((s, d) => s + d.quantity, 0), negativeStock };
 }
 
 /** Mark READY_TO_SHIP (internal fulfillment complete) — FR-FUL-006. */
@@ -343,9 +655,11 @@ export async function markReadyToShip(
 }
 
 /**
- * Hand over to carrier. READY_TO_SHIP → HANDED_OVER.
- * Atomically: deduct on-hand stock, consume active reservations,
- * write DEDUCTION ledger rows, mark items FULFILLED, create Shipment(READY_TO_SHIP).
+ * Serahkan paket ke kurir: READY_TO_SHIP → HANDED_OVER.
+ *
+ * PENTING: stok fisik TIDAK dikurangi di sini. Pengurangan stok hanya terjadi saat packing
+ * (single source of truth, lihat completePacking) — jadi tidak ada potong stok dobel.
+ * Fungsi ini hanya: verifikasi stok sudah terpotong, lalu buat/pakai Shipment.
  * ADR-003 (ledger), FR-FUL-006, FR-SHP-001.
  */
 export async function handOverToCarrier(
@@ -360,8 +674,8 @@ export async function handOverToCarrier(
     include: {
       order: {
         include: {
-          items: { include: { reservations: { where: { status: 'ACTIVE' } } } },
           shipments: true,
+          items: { select: { id: true, quantity: true, fulfilledQuantity: true } },
         },
       },
     },
@@ -369,52 +683,38 @@ export async function handOverToCarrier(
   if (!fo) throw new NotFoundError('Fulfillment order', fulfillmentOrderId);
   assertTransition(fo.status, 'HANDED_OVER');
 
-  const shipment = await prisma.$transaction(async (tx) => {
-    // 1. Deduct physical stock + consume reservations + ledger (per order item)
-    for (const item of fo.order.items) {
-      const remaining = item.quantity - item.fulfilledQuantity;
-      if (remaining > 0) {
-        await tx.inventoryBalance.update({
-          where: { warehouseId_variantId: { warehouseId: fo.warehouseId, variantId: item.variantId } },
-          data: { onHand: { decrement: remaining }, version: { increment: 1 } },
-        });
-        await tx.inventoryMovement.create({
-          data: {
-            tenantId,
-            warehouseId: fo.warehouseId,
-            variantId: item.variantId,
-            movementType: 'DEDUCTION',
-            quantityDelta: -remaining,
-            referenceType: 'order',
-            referenceId: fo.orderId,
-            reason: 'Pengiriman — stok dikeluarkan',
-            actorId,
-          },
-        });
-      }
-      // Release/consume any active reservation (reserved was previously incremented).
-      for (const res of item.reservations) {
-        await tx.inventoryBalance.update({
-          where: { warehouseId_variantId: { warehouseId: res.warehouseId, variantId: item.variantId } },
-          data: { reserved: { decrement: res.quantity }, version: { increment: 1 } },
-        });
-        await tx.stockReservation.update({ where: { id: res.id }, data: { status: 'CONSUMED' } });
-      }
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: { fulfilledQuantity: item.quantity, status: 'FULFILLED' },
-      });
-    }
+  // Guard fail-fast: jangan pernah menyerahkan paket yang stoknya belum terpotong.
+  const notDeducted = fo.order.items.filter((i) => i.fulfilledQuantity < i.quantity);
+  if (notDeducted.length > 0) {
+    throw new BusinessRuleViolationError(
+      `Stok belum dikurangi untuk ${notDeducted.length} item. Selesaikan packing dulu sebelum serah terima kurir.`,
+      { itemIds: notDeducted.map((i) => i.id) },
+    );
+  }
 
-    // 2. Create or reuse shipment
-    const activeShipment = fo.order.shipments.find((s) => s.status === 'READY_TO_SHIP' || s.status === 'PENDING');
-    const shipment =
+  const shipment = await prisma.$transaction(async (tx) => {
+    const activeShipment = fo.order.shipments.find(
+      (s) => s.status === 'READY_TO_SHIP' || s.status === 'PENDING',
+    );
+    const created =
       activeShipment ??
       (await tx.shipment.create({
         data: { orderId: fo.orderId, awb: awb ?? null, carrier: carrier ?? null, status: 'READY_TO_SHIP' },
       }));
 
-    // 3. Fulfillment → HANDED_OVER
+    // Lengkapi AWB/kurir kalau shipment-nya sudah ada tapi datanya belum terisi.
+    const shipment =
+      activeShipment && ((!activeShipment.awb && awb) || (!activeShipment.carrier && carrier))
+        ? await tx.shipment.update({
+            where: { id: activeShipment.id },
+            data: {
+              awb: activeShipment.awb ?? awb ?? null,
+              carrier: activeShipment.carrier ?? carrier ?? null,
+              status: 'READY_TO_SHIP',
+            },
+          })
+        : created;
+
     await tx.fulfillmentOrder.update({
       where: { id: fulfillmentOrderId },
       data: { status: 'HANDED_OVER', completedAt: new Date() },
@@ -433,4 +733,131 @@ export async function handOverToCarrier(
   });
   logger.info('Handover to carrier', { tenantId, fulfillmentOrderId, shipmentId: shipment.id });
   return { shipmentId: shipment.id };
+}
+
+/** Tahapan alur yang dilihat operator (bahasa sehari-hari). */
+export type StationStage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM';
+
+/**
+ * Data untuk SATU halaman kerja: pesanan masuk → ambil resi → scan resi → serahkan ke kurir.
+ * Tidak ada lagi halaman terpisah untuk "picking/packing": alurnya scan resi saja.
+ *
+ * @param sort 'oldest' = pesanan terlama diproses dulu (default), 'newest' = terbaru dulu.
+ */
+export async function getFulfillmentStation(
+  tenantId: string,
+  options: { sort?: 'oldest' | 'newest' } = {},
+) {
+  const sortDir: 'asc' | 'desc' = options.sort === 'newest' ? 'desc' : 'asc';
+
+  const warehouse = await prisma.warehouse.findFirst({
+    where: { tenantId, status: 'ACTIVE' },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true, name: true, code: true },
+  });
+
+  const orders = await prisma.order.findMany({
+    where: { tenantId, status: { in: ['NEW', 'CONFIRMED'] } },
+    include: {
+      shop: { select: { name: true, provider: true } },
+      items: {
+        include: {
+          variant: { include: { product: { select: { name: true } } } },
+          reservations: { where: { status: 'ACTIVE' }, select: { quantity: true } },
+        },
+      },
+      shipments: { orderBy: { createdAt: 'desc' }, take: 1 },
+      fulfillmentOrders: {
+        where: { status: { notIn: ['COMPLETED'] } },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { id: true, status: true, warehouseId: true },
+      },
+    },
+    orderBy: [{ shipByAt: sortDir }, { placedAt: sortDir }],
+    take: 200,
+  });
+
+  const warehouseIds = [
+    ...new Set([
+      ...(warehouse ? [warehouse.id] : []),
+      ...orders.map((o) => o.fulfillmentOrders[0]?.warehouseId).filter((v): v is string => Boolean(v)),
+    ]),
+  ];
+  const availability = await getAvailabilityMap(
+    warehouseIds,
+    [...new Set(orders.flatMap((o) => o.items.map((i) => i.variantId)))],
+  );
+
+  const unified = orders.map((o) => {
+    const fo = o.fulfillmentOrders[0] ?? null;
+    const shipment = o.shipments[0] ?? null;
+    const warehouseId = fo?.warehouseId ?? warehouse?.id ?? '';
+
+    const items = o.items.map((i) => {
+      const required = i.quantity - i.fulfilledQuantity;
+      // Reservasi milik pesanan ini dihitung miliknya (bukan dianggap stok habis).
+      const ownReservation = (i.reservations ?? []).reduce((sum, r) => sum + r.quantity, 0);
+      const available = (availability.get(`${warehouseId}:${i.variantId}`)?.available ?? 0) + ownReservation;
+      return {
+        id: i.id,
+        variantId: i.variantId,
+        sku: i.variant.sku,
+        variantName: i.variant.name,
+        productName: i.variant.product.name,
+        quantity: i.quantity,
+        fulfilledQuantity: i.fulfilledQuantity,
+        available,
+        shortfall: required > available ? required - available : 0,
+      };
+    });
+
+    const stage: StationStage = !fo
+      ? 'BARU'
+      : fo.status === 'WAITING_STOCK'
+        ? 'MENUNGGU_STOK'
+        : fo.status === 'PACKED' || fo.status === 'READY_TO_SHIP'
+          ? 'SIAP_KIRIM'
+          : fo.status === 'HANDED_OVER'
+            ? 'DIKIRIM'
+            : 'SIAP_DIKEMAS';
+
+    return {
+      orderId: o.id,
+      externalOrderId: o.externalOrderId,
+      buyerName: o.buyerName,
+      buyerPhone: o.buyerPhone,
+      shopName: o.shop.name,
+      provider: o.shop.provider,
+      placedAt: o.placedAt,
+      shipByAt: o.shipByAt,
+      priorityLevel: o.priorityLevel,
+      orderStatus: o.status,
+      fulfillmentId: fo?.id ?? null,
+      fulfillmentStatus: fo?.status ?? null,
+      awb: shipment?.awb ?? null,
+      carrier: shipment?.carrier ?? null,
+      canArrangeShipment: !shipment?.awb,
+      /** Barang hanya boleh dinyatakan siap kirim setelah nomor resi terbit. */
+      canPack: Boolean(shipment?.awb),
+      stage,
+      items,
+      totalUnits: items.reduce((sum, i) => sum + i.quantity, 0),
+      shortfallUnits: items.reduce((sum, i) => sum + i.shortfall, 0),
+    };
+  });
+
+  return {
+    warehouse,
+    sort: options.sort ?? 'oldest',
+    stages: {
+      baru: unified.filter((u) => u.stage === 'BARU').length,
+      menungguStok: unified.filter((u) => u.stage === 'MENUNGGU_STOK').length,
+      siapDikemas: unified.filter((u) => u.stage === 'SIAP_DIKEMAS').length,
+      siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
+      dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
+    },
+    orders: unified,
+    generatedAt: new Date().toISOString(),
+  };
 }

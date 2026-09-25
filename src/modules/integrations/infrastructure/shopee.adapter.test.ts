@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import crypto from 'crypto';
 import { ShopeeAdapter, signShopee, mapShopeeOrderStatus } from './shopee.adapter';
+import { invalidateShopeeAppConfigCache } from '../application/appConfig.service';
 import type { ShopCredentials } from '../domain/marketplace.adapter';
+
+// Unit test harus hermetis: konfigurasi partner selalu diambil dari .env (bukan DB).
+vi.mock('@/shared/infrastructure/prisma', () => ({
+  prisma: {
+    marketplaceAppConfig: { findUnique: vi.fn().mockResolvedValue(null) },
+  },
+}));
 
 describe('ShopeeAdapter', () => {
   const originalEnv = { ...process.env };
@@ -18,10 +26,12 @@ describe('ShopeeAdapter', () => {
     process.env.SHOPEE_API_HOST = 'https://partner.shopeemobile.com';
     process.env.SHOPEE_SANDBOX = 'true';
     process.env.SHOPEE_SANDBOX_HOST = 'https://partner.test-stable.shopeemobile.com';
+    invalidateShopeeAppConfigCache();
   });
 
   afterEach(() => {
     process.env = { ...originalEnv };
+    invalidateShopeeAppConfigCache();
     vi.restoreAllMocks();
   });
 
@@ -77,23 +87,26 @@ describe('ShopeeAdapter', () => {
   });
 
   describe('buildAuthUrl', () => {
-    it('builds sandbox authorization URL when SHOPEE_SANDBOX is true', () => {
+    it('builds sandbox authorization URL when SHOPEE_SANDBOX is true', async () => {
       process.env.SHOPEE_SANDBOX = 'true';
       const redirectUri = 'http://localhost:3000/api/v1/integrations/shopee/oauth-callback';
-      const url = adapter.buildAuthUrl(redirectUri, 'shop-123');
+      const url = await adapter.buildAuthUrl(redirectUri, 'shop-123');
 
-      expect(url).toContain('https://open.sandbox.test-stable.shopee.com/auth');
+      expect(url).toContain('https://partner.test-stable.shopeemobile.com/api/v2/shop/auth_partner');
       expect(url).toContain(`partner_id=${partnerId}`);
       expect(url).toContain('state=shop-123');
-      expect(url).toContain('response_type=code');
+      expect(url).toContain('sign=');
+      expect(url).toContain('timestamp=');
     });
 
-    it('builds production authorization URL when SHOPEE_SANDBOX is false', () => {
+    it('builds production authorization URL when SHOPEE_SANDBOX is false', async () => {
       process.env.SHOPEE_SANDBOX = 'false';
       const redirectUri = 'https://myapp.com/callback';
-      const url = adapter.buildAuthUrl(redirectUri);
+      const url = await adapter.buildAuthUrl(redirectUri);
 
-      expect(url).toContain('https://open.shopee.com/auth');
+      expect(url).toContain('https://partner.shopeemobile.com/api/v2/shop/auth_partner');
+      expect(url).toContain(`partner_id=${partnerId}`);
+      expect(url).toContain('sign=');
     });
   });
 
@@ -300,6 +313,56 @@ describe('ShopeeAdapter', () => {
       expect(tracking?.status).toBe('LOGISTICS_PICKUP_DONE');
       expect(tracking?.events).toHaveLength(1);
       expect(tracking?.events[0]?.description).toBe('Paket telah diserahkan ke kurir');
+    });
+  });
+
+  describe('arrangeShipment', () => {
+    const creds: ShopCredentials = {
+      shopId,
+      accessToken,
+      partnerId,
+      partnerKey,
+    };
+
+    it('calls /api/v2/logistics/ship_order with POST and retrieves tracking number', async () => {
+      const fetchMock = vi
+        .fn()
+        // 1st call: ship_order
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
+        })
+        // 2nd call: get_tracking_number
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              error: '',
+              message: '',
+              response: { tracking_number: 'SPXID9988776655' },
+            }),
+        });
+
+      global.fetch = fetchMock;
+
+      const result = await adapter.arrangeShipment(creds, {
+        orderSn: '240921ORDER001',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.trackingNumber).toBe('SPXID9988776655');
+
+      const [firstUrl, firstInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(firstUrl).toContain('/api/v2/logistics/ship_order');
+      expect(firstInit.method).toBe('POST');
+      const body = JSON.parse(firstInit.body as string);
+      expect(body.order_sn).toBe('240921ORDER001');
+      expect(body.dropoff).toBeDefined();
+
+      const [secondUrl, secondInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+      expect(secondUrl).toContain('/api/v2/logistics/get_tracking_number');
+      expect(secondInit.method).toBe('GET');
+      expect(secondUrl).toContain('order_sn=240921ORDER001');
     });
   });
 

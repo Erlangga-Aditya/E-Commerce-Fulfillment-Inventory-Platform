@@ -12,12 +12,6 @@ const CreateWarehouseSchema = z.object({
   address: z.string().max(500).optional(),
 });
 
-const UpdateWarehouseSchema = z.object({
-  name: z.string().min(2).max(100).optional(),
-  address: z.string().max(500).optional(),
-  status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
-});
-
 /**
  * GET /api/v1/warehouses — list gudang dengan detail
  * POST /api/v1/warehouses — tambah gudang baru

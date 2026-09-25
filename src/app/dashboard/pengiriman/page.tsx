@@ -13,7 +13,7 @@ import {
   Check,
   Plus,
   Clock,
-  MapPin,
+  
   ExternalLink,
 } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';

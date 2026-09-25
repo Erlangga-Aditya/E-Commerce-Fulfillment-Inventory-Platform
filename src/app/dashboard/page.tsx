@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { RefreshCw, ArrowRight, AlertTriangle, CheckCircle2, Boxes, ShoppingCart, Workflow, Truck } from 'lucide-react';
+import { RefreshCw, ArrowRight,   Boxes, ShoppingCart, Workflow, Truck } from 'lucide-react';
 import { api } from '@/lib/api';
 import { StatCard, PageHeader, LoadingState, ErrorState, Alert, statusMeta } from '@/components/ui';
 

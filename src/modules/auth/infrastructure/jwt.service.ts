@@ -72,9 +72,14 @@ export async function verifyJwt(token: string): Promise<AuthContext> {
 
 /** httpOnly cookie options for the session JWT. */
 export function sessionCookieOptions() {
+  // Penanda "secure" HARUS mengikuti protokol alamat aplikasi, bukan sekadar mode
+  // produksi: kalau aplikasi produksi diakses lewat HTTP (mis. uji lokal),
+  // browser menolak cookie bertanda secure dan login seolah-olah gagal.
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? '';
+  const secure = appUrl ? appUrl.startsWith('https://') : process.env.NODE_ENV === 'production';
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure,
     sameSite: 'lax' as const,
     path: '/',
     maxAge: jwtExpiresInSeconds(),

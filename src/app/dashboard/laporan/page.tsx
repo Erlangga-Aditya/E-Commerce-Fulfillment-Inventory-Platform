@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, useMemo } from 'react';
 import { RefreshCw, Search, BookOpen, Layers } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';
-import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, statusMeta } from '@/components/ui';
+import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState } from '@/components/ui';
 
 interface Movement {
   id: string;

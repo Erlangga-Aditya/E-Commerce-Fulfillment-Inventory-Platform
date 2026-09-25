@@ -29,6 +29,23 @@ export const ImportOrderSchema = z.object({
   buyerPhone: z.string().max(30).nullable().optional(),
   shippingAddress: z.record(z.unknown()).optional(),
   status: z.enum(['NEW', 'CONFIRMED', 'CANCELLED', 'COMPLETED']).optional(),
+  // ── Rincian uang dari marketplace (opsional: tidak semua pesanan punya) ──
+  buyerNote: z.string().max(2000).nullable().optional(),
+  packageNumber: z.string().max(120).nullable().optional(),
+  currency: z.string().max(10).nullable().optional(),
+  totalAmount: z.number().nullable().optional(),
+  itemSubtotal: z.number().nullable().optional(),
+  sellerDiscount: z.number().nullable().optional(),
+  shopeeDiscount: z.number().nullable().optional(),
+  buyerShippingFee: z.number().nullable().optional(),
+  shippingFeeDiscount: z.number().nullable().optional(),
+  platformFee: z.number().nullable().optional(),
+  escrowAmount: z.number().nullable().optional(),
+  paymentMethod: z.string().max(60).nullable().optional(),
+  isCod: z.boolean().optional(),
+  paidAt: z.coerce.date().nullable().optional(),
+  /** Rincian mentah dari marketplace (cadangan bila ada field baru). */
+  incomeJson: z.record(z.unknown()).nullable().optional(),
   items: z
     .array(
       z.object({
@@ -62,7 +79,60 @@ export async function importOrder(
     });
   }
 
-  const { shopId, externalOrderId, items, ...orderData } = parsed.data;
+  const {
+    shopId,
+    externalOrderId,
+    items,
+    buyerNote,
+    packageNumber,
+    currency,
+    totalAmount,
+    itemSubtotal,
+    sellerDiscount,
+    shopeeDiscount,
+    buyerShippingFee,
+    shippingFeeDiscount,
+    platformFee,
+    escrowAmount,
+    paymentMethod,
+    isCod,
+    paidAt,
+    incomeJson,
+    ...orderData
+  } = parsed.data;
+
+  // Field uang & catatan: hanya ditulis kalau memang dikirim marketplace,
+  // supaya sinkronisasi ulang tidak menghapus data yang sudah ada.
+  const moneyFields: Record<string, unknown> = {};
+  const moneySource: Record<string, unknown> = {
+    buyerNote,
+    packageNumber,
+    currency,
+    totalAmount,
+    itemSubtotal,
+    sellerDiscount,
+    shopeeDiscount,
+    buyerShippingFee,
+    shippingFeeDiscount,
+    platformFee,
+    escrowAmount,
+    paymentMethod,
+    isCod,
+    paidAt,
+  };
+  for (const [key, value] of Object.entries(moneySource)) {
+    if (value !== undefined) moneyFields[key] = value;
+  }
+  if (incomeJson !== undefined && incomeJson !== null) {
+    moneyFields.incomeJson = incomeJson as Prisma.InputJsonValue;
+  }
+  const contactFields: Record<string, unknown> = {};
+  if (orderData.shippingAddress !== undefined) {
+    contactFields.shippingAddress = orderData.shippingAddress as Prisma.InputJsonValue;
+  }
+  if (orderData.buyerName !== undefined) contactFields.buyerName = orderData.buyerName;
+  if (orderData.buyerPhone !== undefined) contactFields.buyerPhone = orderData.buyerPhone;
+  if (orderData.shipByAt !== undefined) contactFields.shipByAt = orderData.shipByAt;
 
   const shop = await prisma.shop.findFirst({ where: { id: shopId, tenantId } });
   if (!shop) throw new NotFoundError('Toko', shopId);
@@ -72,35 +142,36 @@ export async function importOrder(
   });
 
   if (existing) {
-    // Reconcile status if provided and current is not terminal.
+    // Reconcile status bila diberikan dan status saat ini belum final.
     const incoming = (orderData.status as DomainOrderStatus) ?? 'NEW';
-    if (
-      orderData.status &&
+    const statusChanged =
+      Boolean(orderData.status) &&
       existing.status !== incoming &&
       existing.status !== 'CANCELLED' &&
-      existing.status !== 'COMPLETED'
-    ) {
+      existing.status !== 'COMPLETED';
+
+    const hasFieldUpdates = Object.keys(moneyFields).length > 0 || Object.keys(contactFields).length > 0;
+
+    if (statusChanged || hasFieldUpdates) {
       await prisma.$transaction(async (tx) => {
         await tx.order.update({
           where: { id: existing.id },
           data: {
-            status: incoming as OrderStatus,
-            shipByAt: orderData.shipByAt ?? existing.shipByAt,
-            buyerName: orderData.buyerName ?? existing.buyerName,
-            buyerPhone: orderData.buyerPhone ?? existing.buyerPhone,
-            shippingAddress: (orderData.shippingAddress ?? existing.shippingAddress) as
-              | Prisma.InputJsonValue
-              | undefined,
+            ...contactFields,
+            ...moneyFields,
+            ...(statusChanged ? { status: incoming as OrderStatus } : {}),
           },
         });
-        await tx.orderStatusHistory.create({
-          data: {
-            orderId: existing.id,
-            fromStatus: existing.status as OrderStatus,
-            toStatus: incoming as OrderStatus,
-            reason: 'Sinkronisasi dari marketplace',
-          },
-        });
+        if (statusChanged) {
+          await tx.orderStatusHistory.create({
+            data: {
+              orderId: existing.id,
+              fromStatus: existing.status as OrderStatus,
+              toStatus: incoming as OrderStatus,
+              reason: 'Sinkronisasi dari marketplace',
+            },
+          });
+        }
       });
     }
     return { orderId: existing.id, created: false };
@@ -129,6 +200,8 @@ export async function importOrder(
         buyerName: orderData.buyerName ?? null,
         buyerPhone: orderData.buyerPhone ?? null,
         shippingAddress: (orderData.shippingAddress ?? {}) as Prisma.InputJsonValue,
+        ...contactFields,
+        ...moneyFields,
         items: {
           create: items.map((item) => ({
             variantId: item.variantId,
@@ -267,9 +340,24 @@ export async function listOrders(
       prisma.order.findMany({
         where,
         include: {
-          shop: { select: { name: true, provider: true } },
-          items: { select: { id: true, quantity: true, status: true } },
+          shop: { select: { id: true, name: true, provider: true } },
+          items: {
+            include: {
+              variant: {
+                select: {
+                  sku: true,
+                  name: true,
+                  product: { select: { name: true } },
+                },
+              },
+            },
+          },
           fulfillmentOrders: { select: { status: true, id: true } },
+          shipments: {
+            select: { id: true, awb: true, carrier: true, status: true },
+            take: 1,
+            orderBy: { createdAt: 'desc' },
+          },
         },
         skip,
         take: pageSize,
@@ -279,21 +367,39 @@ export async function listOrders(
     ]);
 
     return {
-      items: orders.map((o) => ({
-        id: o.id,
-        externalOrderId: o.externalOrderId,
-        status: o.status,
-        fulfillmentStatus: o.fulfillmentOrders[0]?.status ?? null,
-        shopName: o.shop.name,
-        provider: o.shop.provider,
-        buyerName: o.buyerName,
-        placedAt: o.placedAt,
-        shipByAt: o.shipByAt,
-        priorityScore: o.priorityScore,
-        priorityLevel: o.priorityLevel,
-        priorityFactors: o.priorityFactors,
-        itemCount: o.items.length,
-      })),
+      items: orders.map((o) => {
+        const shipment = o.shipments[0];
+        return {
+          id: o.id,
+          externalOrderId: o.externalOrderId,
+          status: o.status,
+          fulfillmentStatus: o.fulfillmentOrders[0]?.status ?? null,
+          shopId: o.shopId,
+          shopName: o.shop.name,
+          provider: o.shop.provider,
+          buyerName: o.buyerName,
+          buyerPhone: o.buyerPhone,
+          shippingAddress: o.shippingAddress,
+          placedAt: o.placedAt,
+          shipByAt: o.shipByAt,
+          priorityScore: o.priorityScore,
+          priorityLevel: o.priorityLevel,
+          priorityFactors: o.priorityFactors,
+          itemCount: o.items.length,
+          awb: shipment?.awb ?? null,
+          carrier: shipment?.carrier ?? null,
+          shipmentStatus: shipment?.status ?? null,
+          labelUrl: `/api/v1/orders/${o.id}/shipping-label`,
+          items: o.items.map((it) => ({
+            id: it.id,
+            quantity: it.quantity,
+            status: it.status,
+            sku: it.variant.sku,
+            variantName: it.variant.name,
+            productName: it.variant.product.name,
+          })),
+        };
+      }),
       pagination: { total, page, pageSize, hasMore: skip + pageSize < total },
     };
   } catch {
@@ -372,7 +478,7 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, tenantId },
     include: {
-      shop: { select: { name: true, provider: true } },
+      shop: { select: { id: true, name: true, provider: true } },
       items: {
         include: {
           variant: { include: { product: { select: { name: true } } } },
@@ -381,6 +487,10 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
       },
       statusHistory: { orderBy: { createdAt: 'desc' }, take: 20 },
       fulfillmentOrders: { include: { warehouse: { select: { name: true, code: true } } } },
+      shipments: {
+        include: { events: { orderBy: { occurredAt: 'desc' } } },
+        orderBy: { createdAt: 'desc' },
+      },
     },
   });
   if (!order) throw new NotFoundError('Pesanan', orderId);
@@ -398,10 +508,13 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
         )
       : null;
 
+  const mainShipment = order.shipments[0];
+
   return {
     id: order.id,
     externalOrderId: order.externalOrderId,
     status: order.status,
+    shopId: order.shopId,
     shopName: order.shop.name,
     provider: order.shop.provider,
     buyerName: order.buyerName,
@@ -409,6 +522,10 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
     shippingAddress: order.shippingAddress,
     placedAt: order.placedAt,
     shipByAt: order.shipByAt,
+    awb: mainShipment?.awb ?? null,
+    carrier: mainShipment?.carrier ?? null,
+    shipmentStatus: mainShipment?.status ?? null,
+    labelUrl: `/api/v1/orders/${order.id}/shipping-label`,
     priority: {
       score: order.priorityScore,
       level: order.priorityLevel,
@@ -424,6 +541,7 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
       barcode: item.variant.barcode,
       quantity: item.quantity,
       fulfilledQuantity: item.fulfilledQuantity,
+      unitPrice: item.unitPrice,
       status: item.status,
       isReserved: item.reservations.length > 0,
     })),
@@ -437,6 +555,20 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
       id: fo.id,
       status: fo.status,
       warehouseName: fo.warehouse.name,
+    })),
+    shipments: order.shipments.map((s) => ({
+      id: s.id,
+      awb: s.awb,
+      carrier: s.carrier,
+      status: s.status,
+      shippedAt: s.shippedAt,
+      deliveredAt: s.deliveredAt,
+      events: s.events.map((e) => ({
+        id: e.id,
+        status: e.status,
+        description: e.description,
+        occurredAt: e.occurredAt,
+      })),
     })),
   };
 }

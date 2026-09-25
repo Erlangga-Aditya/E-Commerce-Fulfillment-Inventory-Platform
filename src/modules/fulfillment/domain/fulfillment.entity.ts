@@ -38,10 +38,6 @@ export function isValidFulfillmentTransition(
   return FULFILLMENT_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-export type ScanResult =
-  | { success: true; item: ScannedItem; allConfirmed: boolean }
-  | { success: false; error: ScanError };
-
 export interface ScannedItem {
   pickingItemId: string;
   sku: string;

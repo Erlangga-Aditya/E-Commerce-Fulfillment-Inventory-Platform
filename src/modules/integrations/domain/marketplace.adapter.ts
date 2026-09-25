@@ -14,17 +14,50 @@ export interface MarketplaceOrderItem {
   unitPrice: number;
 }
 
+/**
+ * Rincian uang sebuah pesanan.
+ * Semua opsional: Shopee hanya mengirim sebagian field tergantung status pesanan
+ * (mis. `escrowAmount` baru terisi setelah pesanan selesai).
+ */
+export interface MarketplaceOrderPayment {
+  currency: string | null;
+  /** Total dibayar pembeli (termasuk ongkir). */
+  totalAmount: number | null;
+  /** Harga barang sebelum diskon. */
+  itemSubtotal: number | null;
+  /** Diskon ditanggung penjual. */
+  sellerDiscount: number | null;
+  /** Diskon ditanggung Shopee. */
+  shopeeDiscount: number | null;
+  /** Ongkir yang dibayar pembeli. */
+  buyerShippingFee: number | null;
+  /** Subsidi/potongan ongkir. */
+  shippingFeeDiscount: number | null;
+  /** Total potongan Shopee (komisi + biaya layanan). */
+  platformFee: number | null;
+  /** Estimasi uang masuk ke penjual. */
+  escrowAmount: number | null;
+  paymentMethod: string | null;
+  isCod: boolean;
+  paidAt: Date | null;
+  packageNumber: string | null;
+  /** Rincian mentah dari Shopee (cadangan). */
+  income: Record<string, unknown> | null;
+}
+
 export interface MarketplaceOrder {
   externalOrderId: string;
   placedAt: Date;
   shipByAt: Date | null;
   buyerName: string | null;
   buyerPhone: string | null;
+  buyerNote: string | null;
   shippingAddress: Record<string, unknown>;
   items: MarketplaceOrderItem[];
   rawStatus: string;
   trackingNumber: string | null;
   carrier: string | null;
+  payment: MarketplaceOrderPayment | null;
 }
 
 export interface MarketplaceProductVariant {

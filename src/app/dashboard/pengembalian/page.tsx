@@ -10,10 +10,10 @@ import {
   Cable,
   ChevronDown,
   ChevronUp,
-  AlertCircle,
+  
   Package,
 } from 'lucide-react';
-import { api, formatDate } from '@/lib/api';
+import { api } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
 
 interface RetItem {

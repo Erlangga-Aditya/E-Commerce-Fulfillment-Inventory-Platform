@@ -25,7 +25,17 @@ export async function GET(request: NextRequest) {
     let actorId = 'system';
 
     async function resolveOrCreateDefaultShop(): Promise<{ tenantId: string; shopId: string }> {
-      const existing = await prisma.shop.findFirst({ where: { provider: 'shopee' } });
+      // Pilih toko Shopee milik tenant ini secara PASTI (bukan acak):
+      // dahulukan yang sudah punya external_shop_id, lalu yang paling awal dibuat.
+      const existing =
+        (await prisma.shop.findFirst({
+          where: { provider: 'shopee', externalShopId: { not: null } },
+          orderBy: { createdAt: 'asc' },
+        })) ??
+        (await prisma.shop.findFirst({
+          where: { provider: 'shopee' },
+          orderBy: { createdAt: 'asc' },
+        }));
       if (existing) return { tenantId: existing.tenantId, shopId: existing.id };
 
       let tenant = await prisma.tenant.findFirst();

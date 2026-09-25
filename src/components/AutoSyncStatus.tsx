@@ -1,190 +1,242 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  RefreshCw,
-  Radio,
+  AlertTriangle,
   CheckCircle2,
-  Clock,
   ChevronDown,
+  Clock,
+  Radio,
+  RefreshCw,
   ShieldCheck,
-  Sparkles,
+  Wifi,
   Zap,
 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { api, formatDate } from '@/lib/api';
 
-interface ShopeeStatusResponse {
+/**
+ * Panel status sinkronisasi di kanan atas.
+ *
+ * Tugasnya dua:
+ *  1. Menampilkan keadaan sebenarnya (toko mana, mode apa, kapan terakhir sinkron).
+ *  2. Menjadi SATU-SATUNYA koneksi pembaruan langsung (SSE) untuk seluruh aplikasi —
+ *     setiap event dari server diteruskan ke halaman lewat event browser
+ *     `shopee:synced` (data pesanan/Stok) dan `fulfillment:updated` (proses kirim).
+ */
+
+interface StatusResponse {
   connected: boolean;
-  shop?: {
-    id: string;
-    externalShopId: string;
-    name: string;
-    tokenExpiresAt: string | null;
+  status?: string;
+  sandbox?: boolean;
+  lastSyncAt?: string | null;
+  partnerConfigured?: boolean;
+  mode?: 'PRODUCTION' | 'SANDBOX';
+  tokenExpiresInMinutes?: number | null;
+  shop?: { id: string; name: string; externalShopId: string | null } | null;
+  /** Sinkronisasi otomatis yang berjalan di sisi server (bukan di peramban). */
+  autoSync?: {
+    enabled: boolean;
+    intervalMs: number;
+    lastRunAt: string | null;
+    lastImported: number | null;
+    lastError: string | null;
   };
 }
 
-export function AutoSyncStatus() {
-  const [connected, setConnected] = useState<boolean | null>(null);
-  const [shopId, setShopId] = useState<string | null>(null);
-  const [shopName, setShopName] = useState<string>('Shopee Store');
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
-  const [isOpen, setIsOpen] = useState(false);
-  const [secondsAgo, setSecondsAgo] = useState<number>(0);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  const isSyncingRef = useRef(false);
+const FALLBACK_POLL_MS = 60_000;
 
-  // Check connection status
-  const checkStatus = useCallback(async () => {
+export function AutoSyncStatus() {
+  const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [realtime, setRealtime] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [secondsAgo, setSecondsAgo] = useState(0);
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const syncingRef = useRef(false);
+
+  const loadStatus = useCallback(async () => {
     try {
-      const res = await api<ShopeeStatusResponse>('/api/v1/integrations/shopee/status');
-      if (res.connected && res.shop) {
-        setConnected(true);
-        setShopId(res.shop.id);
-        setShopName(res.shop.name || 'Shopee Official Store');
-        return res.shop.id;
-      } else {
-        setConnected(false);
-        setShopId(null);
-        return null;
+      const res = await api<StatusResponse>('/api/v1/integrations/shopee/status');
+      setStatus(res);
+      if (res.lastSyncAt) setLastSyncedAt(new Date(res.lastSyncAt));
+      return res;
+    } catch {
+      setStatus({ connected: false });
+      return null;
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  /** Sinkronisasi ringan (pesanan + resi) — cadangan kalau webhook/stream terputus. */
+  const runLightSync = useCallback(async (silent = true) => {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    if (!silent) setSyncing(true);
+    try {
+      const res = await api<{ synced: boolean }>('/api/v1/integrations/shopee/sync-light', {
+        method: 'POST',
+        body: {},
+      });
+      if (res.synced) {
+        const now = new Date();
+        setLastSyncedAt(now);
+        setSecondsAgo(0);
       }
     } catch {
-      setConnected(false);
-      return null;
-    }
-  }, []);
-
-  // Perform background sync
-  const performSync = useCallback(async (targetShopId: string, silent = true) => {
-    if (isSyncingRef.current) return;
-    isSyncingRef.current = true;
-    if (!silent) setIsSyncing(true);
-    else setIsSyncing(true);
-
-    try {
-      await api('/api/v1/integrations/shopee/sync-all', {
-        method: 'POST',
-        body: { shopId: targetShopId },
-      });
-      const now = new Date();
-      setLastSyncedAt(now);
-      setSecondsAgo(0);
-      // Dispatch global broadcast event so all active pages refresh their data
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('shopee:synced', { detail: { timestamp: now.getTime() } }));
-      }
-    } catch (err) {
-      console.warn('[AutoSync] Silent auto-sync warning:', err);
+      // Diamkan: kegagalan sinkronisasi latar belakang tidak boleh mengganggu operator.
     } finally {
-      isSyncingRef.current = false;
-      setIsSyncing(false);
+      syncingRef.current = false;
+      setSyncing(false);
     }
   }, []);
 
-  // Initialize and run auto-sync loop
+  // 1) Pembaruan langsung dari server (SSE) → teruskan ke halaman lewat event browser.
   useEffect(() => {
-    let intervalId: NodeJS.Timeout | null = null;
-    let mounted = true;
+    let source: EventSource | null = null;
+    let reconnect: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
 
-    async function init() {
-      const activeShopId = await checkStatus();
-      if (!mounted) return;
+    const connect = () => {
+      if (stopped) return;
+      try {
+        source = new EventSource('/api/v1/events/stream');
 
-      if (activeShopId) {
-        // Initial auto-sync after a brief 2-second delay to keep initial render instant
-        const timer = setTimeout(() => {
-          if (mounted) performSync(activeShopId, true);
-        }, 2000);
+        source.onopen = () => setRealtime(true);
 
-        // Continuous autonomous polling heartbeat: every 180 seconds (3 minutes)
-        intervalId = setInterval(() => {
-          if (mounted) performSync(activeShopId, true);
-        }, 180000);
+        source.onmessage = (event) => {
+          let payload: { type?: string } = {};
+          try {
+            payload = JSON.parse(event.data) as { type?: string };
+          } catch {
+            return;
+          }
+          const now = new Date();
+          setLastSyncedAt(now);
+          setSecondsAgo(0);
 
-        return () => clearTimeout(timer);
+          const type = payload.type ?? '';
+          const orderEvents = ['orders:synced', 'order:new', 'order:updated', 'awb:updated', 'sync:complete'];
+          const fulfillmentEvents = ['fulfillment:updated', 'inventory:updated'];
+
+          if (orderEvents.includes(type)) {
+            window.dispatchEvent(new CustomEvent('shopee:synced', { detail: { type, at: now.getTime() } }));
+          }
+          if (fulfillmentEvents.includes(type)) {
+            window.dispatchEvent(new CustomEvent('fulfillment:updated', { detail: { type, at: now.getTime() } }));
+          }
+          if (orderEvents.includes(type) || fulfillmentEvents.includes(type)) {
+            window.dispatchEvent(new CustomEvent('shopee:synced', { detail: { type, at: now.getTime() } }));
+          }
+        };
+
+        source.onerror = () => {
+          setRealtime(false);
+          source?.close();
+          reconnect = setTimeout(connect, 8000);
+        };
+      } catch {
+        setRealtime(false);
       }
-    }
+    };
 
-    init();
+    connect();
 
     return () => {
-      mounted = false;
-      if (intervalId) clearInterval(intervalId);
+      stopped = true;
+      source?.close();
+      if (reconnect) clearTimeout(reconnect);
     };
-  }, [checkStatus, performSync]);
+  }, []);
 
-  // Sync on tab visibility change if inactive > 3 mins
+  // 2) Cek status + sinkronisasi berkala (cadangan 60 detik).
   useEffect(() => {
-    function handleVisibility() {
-      if (document.visibilityState === 'visible' && shopId) {
-        if (!lastSyncedAt || Date.now() - lastSyncedAt.getTime() > 180000) {
-          performSync(shopId, true);
-        }
-      }
-    }
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [shopId, lastSyncedAt, performSync]);
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      const res = await loadStatus();
+      if (cancelled || !res?.connected) return;
+      await runLightSync(true);
+    })();
 
-  // Tick seconds ago timer
+    const poll = setInterval(() => void runLightSync(true), FALLBACK_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+    };
+  }, [loadStatus, runLightSync]);
+
+  // Sinkron ulang saat tab dibuka kembali (kalau sudah lewat 1 menit).
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && (!lastSyncedAt || Date.now() - lastSyncedAt.getTime() > FALLBACK_POLL_MS)) {
+        void runLightSync(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [lastSyncedAt, runLightSync]);
+
+  // Penghitung "berapa detik lalu".
   useEffect(() => {
     const timer = setInterval(() => {
-      if (lastSyncedAt) {
-        setSecondsAgo(Math.floor((Date.now() - lastSyncedAt.getTime()) / 1000));
-      }
+      setSecondsAgo((prev) => (lastSyncedAt ? Math.floor((Date.now() - lastSyncedAt.getTime()) / 1000) : prev));
     }, 1000);
     return () => clearInterval(timer);
   }, [lastSyncedAt]);
 
-  // Close dropdown on click outside
+  // Tutup panel kalau klik di luar.
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    const onClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setIsOpen(false);
+    };
+    if (isOpen) document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
   }, [isOpen]);
 
-  if (connected === false) {
-    return (
-      <span
-        className="badge badge-neutral"
-        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}
-        title="Shopee belum terhubung. Buka menu Integrasi untuk menghubungkan toko."
-      >
-        <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--muted)' }} />
-        Shopee Belum Terhubung
-      </span>
-    );
-  }
+  const timeAgoLabel = () => {
+    if (!lastSyncedAt) return 'Menunggu sinkronisasi';
+    if (secondsAgo < 10) return 'Baru saja';
+    if (secondsAgo < 60) return `${secondsAgo} detik lalu`;
+    const mins = Math.floor(secondsAgo / 60);
+    return `${mins} menit lalu`;
+  };
 
-  if (connected === null) {
+  if (checking) {
     return (
       <span className="badge badge-neutral" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-        <RefreshCw size={11} className="spin" />
+        <RefreshCw size={11} className="spin" aria-hidden />
         <span>Memeriksa Shopee...</span>
       </span>
     );
   }
 
-  const formatSecondsAgo = () => {
-    if (!lastSyncedAt) return 'Sedang sinkronisasi awal...';
-    if (secondsAgo < 10) return 'Baru saja';
-    if (secondsAgo < 60) return `${secondsAgo}d lalu`;
-    const mins = Math.floor(secondsAgo / 60);
-    return `${mins}m lalu`;
-  };
+  if (!status?.connected) {
+    return (
+      <a
+        href="/dashboard/integrasi"
+        className="badge badge-neutral"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, textDecoration: 'none' }}
+        title="Toko Shopee belum terhubung. Klik untuk menghubungkan."
+      >
+        <Wifi size={11} aria-hidden />
+        <span>Shopee belum terhubung</span>
+      </a>
+    );
+  }
+
+  const tokenMinutes = status.tokenExpiresInMinutes ?? null;
+  const tokenSoon = tokenMinutes !== null && tokenMinutes <= 30;
 
   return (
     <div style={{ position: 'relative' }} ref={dropdownRef}>
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className={`badge ${isSyncing ? 'badge-primary' : 'badge-success'}`}
+        onClick={() => setIsOpen((prev) => !prev)}
+        className="badge badge-success"
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -194,89 +246,37 @@ export function AutoSyncStatus() {
           padding: '4px 10px',
           fontWeight: 600,
           fontSize: 12,
-          transition: 'all 0.15s ease',
         }}
-        title="Klik untuk melihat detail status sinkronisasi realtime"
+        title="Klik untuk melihat status sinkronisasi"
       >
-        {isSyncing ? (
-          <RefreshCw size={12} className="spin" />
+        {syncing ? (
+          <RefreshCw size={12} className="spin" aria-hidden />
         ) : (
-          <span
-            style={{
-              position: 'relative',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: 8,
-              height: 8,
-            }}
-          >
-            <span
-              style={{
-                position: 'absolute',
-                width: '100%',
-                height: '100%',
-                borderRadius: '50%',
-                background: 'currentColor',
-                opacity: 0.75,
-                animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-              }}
-            />
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: 'currentColor',
-              }}
-            />
-          </span>
+          <Radio size={12} aria-hidden />
         )}
-        <span>
-          {isSyncing ? 'Menyinkronkan Realtime...' : `Auto-Sync Aktif · ${formatSecondsAgo()}`}
-        </span>
-        <ChevronDown size={11} style={{ opacity: 0.7 }} />
+        <span>{syncing ? 'Menyinkronkan...' : realtime ? `Tersambung (langsung) - ${timeAgoLabel()}` : `Tersambung - ${timeAgoLabel()}`}</span>
+        <ChevronDown size={11} style={{ opacity: 0.7 }} aria-hidden />
       </button>
 
-      {/* Popover Status Menu */}
       {isOpen && (
         <div
           style={{
             position: 'absolute',
             top: 'calc(100% + 8px)',
             right: 0,
-            width: 320,
+            width: 340,
             background: 'var(--surface-container, #ffffff)',
             border: '1px solid var(--outline-variant, #e5e7eb)',
             borderRadius: 12,
-            boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+            boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.12)',
             padding: 16,
             zIndex: 1000,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 8,
-                background: 'var(--success-container, #ecfdf5)',
-                color: 'var(--success, #059669)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Radio size={18} />
-            </div>
-            <div>
-              <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--on-surface)' }}>
-                Sinkronisasi Realtime Shopee
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                {shopName}
-              </div>
-            </div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Status Sinkronisasi</div>
+          <div className="small muted" style={{ marginBottom: 12 }}>
+            {status.shop?.name ?? 'Toko Shopee'}
+            {status.shop?.externalShopId ? ` (ID ${status.shop.externalShopId})` : ''}
           </div>
 
           <div
@@ -288,58 +288,118 @@ export function AutoSyncStatus() {
               padding: 10,
               borderRadius: 8,
               fontSize: 12,
-              marginBottom: 14,
+              marginBottom: 12,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <ShieldCheck size={13} color="var(--success, #10b981)" /> Webhook Push
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <ShieldCheck size={13} aria-hidden /> Kredensial aplikasi
               </span>
-              <span style={{ fontWeight: 600, color: 'var(--success, #10b981)' }}>
-                🟢 Real-time Aktif
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <Clock size={13} /> Auto-Sync Polling
-              </span>
-              <span style={{ fontWeight: 600, color: 'var(--on-surface)' }}>
-                Tiap 3 Menit (Tanpa Klik)
+              <span style={{ fontWeight: 600, color: status.partnerConfigured ? 'var(--success, #10b981)' : 'var(--danger, #ef4444)' }}>
+                {status.partnerConfigured ? 'Lengkap' : 'Belum lengkap'}
               </span>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <CheckCircle2 size={13} /> Terakhir Sinkron
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Radio size={13} aria-hidden /> Pembaruan langsung
               </span>
-              <span style={{ fontWeight: 600, color: 'var(--on-surface)' }}>
-                {lastSyncedAt ? lastSyncedAt.toLocaleTimeString('id-ID') : '—'}
+              <span style={{ fontWeight: 600, color: realtime ? 'var(--success, #10b981)' : 'var(--warning, #f59e0b)' }}>
+                {realtime ? 'Aktif' : 'Menyambung ulang'}
               </span>
             </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Clock size={13} aria-hidden /> Sinkron otomatis (server)
+              </span>
+              <span
+                style={{
+                  fontWeight: 600,
+                  color: status.autoSync?.enabled ? 'var(--success, #10b981)' : 'var(--muted)',
+                }}
+              >
+                {status.autoSync?.enabled
+                  ? `Aktif tiap ${Math.round((status.autoSync.intervalMs || 60000) / 1000)} detik`
+                  : 'Dimatikan'}
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Zap size={13} aria-hidden /> Sinkron server terakhir
+              </span>
+              <span style={{ fontWeight: 600 }}>
+                {status.autoSync?.lastRunAt ? formatDate(status.autoSync.lastRunAt) : 'Belum jalan'}
+                {status.autoSync?.lastImported ? ` (${status.autoSync.lastImported} data)` : ''}
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <CheckCircle2 size={13} aria-hidden /> Terakhir sinkron
+              </span>
+              <span style={{ fontWeight: 600 }}>{lastSyncedAt ? formatDate(lastSyncedAt) : 'Belum ada'}</span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Wifi size={13} aria-hidden /> Mode aplikasi
+              </span>
+              <span style={{ fontWeight: 600 }}>
+                {status.mode === 'SANDBOX' || status.sandbox ? 'Sandbox (uji)' : 'Produksi'}
+              </span>
+            </div>
+
+            {tokenMinutes !== null && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <AlertTriangle size={13} aria-hidden /> Masa berlaku token
+                </span>
+                <span style={{ fontWeight: 600, color: tokenSoon ? 'var(--danger, #ef4444)' : 'inherit' }}>
+                  {tokenMinutes <= 0 ? 'Sudah kedaluwarsa' : `${tokenMinutes} menit lagi`}
+                </span>
+              </div>
+            )}
           </div>
 
-          <p style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.4, margin: '0 0 12px 0' }}>
-            ✨ Sistem bekerja secara otomatis. Pesanan masuk, nomor resi, dan pengembalian barang disinkronkan tanpa perlu mengklik tombol sinkronisasi.
+          {status.autoSync?.lastError && (
+            <div
+              style={{
+                display: 'flex',
+                gap: 8,
+                alignItems: 'flex-start',
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.35)',
+                borderRadius: 8,
+                padding: 10,
+                fontSize: 12,
+                marginBottom: 12,
+              }}
+            >
+              <AlertTriangle size={14} aria-hidden style={{ color: 'var(--danger, #ef4444)', flexShrink: 0, marginTop: 1 }} />
+              <span>
+                Sinkronisasi otomatis terakhir gagal: {status.autoSync.lastError}. Sistem akan mencoba lagi
+                otomatis; Anda juga bisa menekan tombol di bawah.
+              </span>
+            </div>
+          )}
+
+          <p className="small muted" style={{ margin: '0 0 12px', lineHeight: 1.5 }}>
+            Pesanan dan resi baru dari Shopee <strong>masuk sendiri</strong> ke halaman
+            <strong> Pesanan &amp; Pengiriman</strong> setiap {Math.round((status.autoSync?.intervalMs || 60000) / 1000)} detik,
+            tanpa perlu menekan tombol apa pun. Tombol di bawah hanya untuk mempercepat pembaruan saat itu juga.
           </p>
 
           <button
             type="button"
-            className="btn btn-secondary"
-            disabled={isSyncing}
-            onClick={() => {
-              if (shopId) performSync(shopId, false);
-            }}
-            style={{
-              width: '100%',
-              justifyContent: 'center',
-              fontSize: 12,
-              padding: '6px 12px',
-              gap: 6,
-            }}
+            className="btn btn-secondary btn-sm"
+            disabled={syncing}
+            onClick={() => void runLightSync(false)}
+            style={{ width: '100%', justifyContent: 'center', gap: 6 }}
           >
-            <Zap size={13} />
-            <span>{isSyncing ? 'Sedang Memperbarui...' : 'Paksa Sinkron Sekarang (Opsional)'}</span>
+            <Zap size={13} aria-hidden />
+            <span>{syncing ? 'Sedang memperbarui...' : 'Sinkronkan Sekarang'}</span>
           </button>
         </div>
       )}

@@ -155,11 +155,15 @@ export function calculatePriority(
   const factors: PriorityFactor[] = [];
   let weightedSum = 0;
   let totalWeight = 0;
+  // Kompatibilitas aturan lama: sebagian rule menyimpan bobot di field `weights`.
+  const legacyRule = rule as
+    | { weights?: Record<string, unknown> }
+    | undefined;
   const rawCriteria = Array.isArray(rule?.criteria)
     ? rule.criteria
-    : (rule as any)?.weights && typeof (rule as any).weights === 'object'
-    ? Object.entries((rule as any).weights).map(([code, weight]) => ({ code, weight: Number(weight) }))
-    : DEFAULT_PRIORITY_RULE.criteria;
+    : legacyRule?.weights && typeof legacyRule.weights === 'object'
+      ? Object.entries(legacyRule.weights).map(([code, weight]) => ({ code, weight: Number(weight) }))
+      : DEFAULT_PRIORITY_RULE.criteria;
 
   for (const criterion of rawCriteria) {
     const calculator = FACTOR_CALCULATORS[criterion.code];

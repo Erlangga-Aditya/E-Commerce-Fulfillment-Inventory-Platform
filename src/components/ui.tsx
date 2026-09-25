@@ -12,9 +12,9 @@ import {
   Inbox,
   CircleAlert,
   X,
-  TrendingUp,
-  Clock,
-  Package,
+  
+  
+  
 } from 'lucide-react';
 
 export type Tone = 'primary' | 'secondary' | 'warning' | 'danger' | 'success' | 'neutral';
@@ -40,20 +40,20 @@ const TONE_ICON: Record<Tone, typeof Info> = {
 /** Indonesian labels + tone for every domain status (single source of truth). */
 const STATUS_LABELS: Record<string, { label: string; tone: Tone }> = {
   // Order
-  NEW: { label: 'Baru', tone: 'neutral' },
-  CONFIRMED: { label: 'Dikonfirmasi', tone: 'secondary' },
+  NEW: { label: 'Baru Masuk', tone: 'neutral' },
+  CONFIRMED: { label: 'Perlu Diproses', tone: 'warning' },
   CANCELLED: { label: 'Dibatalkan', tone: 'neutral' },
   COMPLETED: { label: 'Selesai', tone: 'success' },
   // Fulfillment
   WAITING_STOCK: { label: 'Menunggu Stok', tone: 'warning' },
-  READY_TO_PICK: { label: 'Siap Dipick', tone: 'secondary' },
-  PICKING: { label: 'Sedang Dipick', tone: 'primary' },
-  PICKED: { label: 'Terpick', tone: 'secondary' },
+  READY_TO_PICK: { label: 'Siap Dikemas', tone: 'secondary' },
+  PICKING: { label: 'Sedang Dikemas', tone: 'primary' },
+  PICKED: { label: 'Barang Lengkap', tone: 'secondary' },
   PACKING: { label: 'Dikemas', tone: 'primary' },
-  PACKED: { label: 'Terkemas', tone: 'secondary' },
+  PACKED: { label: 'Sudah Dikemas', tone: 'secondary' },
   READY_TO_SHIP: { label: 'Siap Kirim', tone: 'primary' },
-  HANDED_OVER: { label: 'Diserahkan', tone: 'success' },
-  EXCEPTION: { label: 'Pengecualian', tone: 'danger' },
+  HANDED_OVER: { label: 'Diserahkan ke Kurir', tone: 'success' },
+  EXCEPTION: { label: 'Perlu Diperiksa', tone: 'danger' },
   // Shipment
   PENDING: { label: 'Tertunda', tone: 'neutral' },
   PICKED_UP: { label: 'Diambil Kurir', tone: 'secondary' },

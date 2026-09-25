@@ -136,6 +136,7 @@ model Warehouse {
   inventoryMovements InventoryMovement[]
   stockReservations StockReservation[]
   fulfillmentOrders FulfillmentOrder[]
+  stockLots         StockLot[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
@@ -191,6 +192,7 @@ model ProductVariant {
   inventoryBalances    InventoryBalance[]
   inventoryMovements   InventoryMovement[]
   stockReservations    StockReservation[]
+  stockLots            StockLot[]
   orderItems           OrderItem[]
   pickingItems         PickingItem[]
   returnItems          ReturnItem[]
@@ -265,6 +267,8 @@ model InventoryMovement {
   referenceId   String?       @map("reference_id")
   reason        String?
   actorId       String?       @map("actor_id")
+  /// Lot FIFO yang dikonsumsi (diisi untuk movement keluar).
+  stockLotId    String?       @map("stock_lot_id")
   createdAt     DateTime      @default(now()) @map("created_at")
 
   tenant    Tenant         @relation(fields: [tenantId], references: [id])
@@ -334,6 +338,31 @@ model Order {
   buyerName           String?     @map("buyer_name")
   buyerPhone          String?     @map("buyer_phone")
   shippingAddress     Json?       @map("shipping_address")
+  buyerNote           String?     @map("buyer_note") @db.Text
+  // ── Rincian uang (diambil dari Shopee get_order_detail & order_income) ──
+  currency            String?     @map("currency")
+  /// Total yang dibayar pembeli (termasuk ongkir).
+  totalAmount         Float?      @map("total_amount")
+  /// Harga barang sebelum diskon.
+  itemSubtotal        Float?      @map("item_subtotal")
+  /// Diskon yang ditanggung PENJUAL.
+  sellerDiscount      Float?      @map("seller_discount")
+  /// Diskon yang ditanggung SHOPEE.
+  shopeeDiscount      Float?      @map("shopee_discount")
+  /// Ongkir yang dibayar pembeli.
+  buyerShippingFee    Float?      @map("buyer_shipping_fee")
+  /// Potongan ongkir (gratis ongkir / subsidi).
+  shippingFeeDiscount Float?      @map("shipping_fee_discount")
+  /// Total potongan Shopee (komisi + biaya layanan).
+  platformFee         Float?      @map("platform_fee")
+  /// Estimasi uang yang masuk ke penjual.
+  escrowAmount        Float?      @map("escrow_amount")
+  paymentMethod       String?     @map("payment_method")
+  isCod               Boolean     @default(false) @map("is_cod")
+  paidAt              DateTime?   @map("paid_at")
+  packageNumber       String?     @map("package_number")
+  /// Rincian mentah dari Shopee (cadangan bila ada field baru).
+  incomeJson          Json?       @map("income_json")
   // Priority fields
   priorityScore       Float?      @map("priority_score")
   priorityLevel       PriorityLevel? @map("priority_level")
@@ -670,6 +699,8 @@ model SyncRun {
   recordsWritten Int         @default(0) @map("records_written")
   errorCode      String?     @map("error_code")
   errorMessage   String?     @map("error_message")
+  /// Detail non-tabular, mis. daftar SKU yang belum ter-mapping.
+  metadataJson   Json?       @map("metadata_json")
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   shop   Shop   @relation(fields: [shopId], references: [id])
@@ -766,4 +797,46 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+/// Konfigurasi aplikasi partner marketplace yang DIKELOLA DARI UI (bukan edit .env).
+/// Satu baris per provider. Partner Key selalu disimpan terenkripsi AES-256-GCM.
+/// Kalau baris ini kosong, sistem jatuh ke kredensial .env (backward compatible).
+model MarketplaceAppConfig {
+  id                  String   @id @default(cuid())
+  provider            String   @unique // "shopee"
+  mode                String   @default("PRODUCTION") // PRODUCTION | SANDBOX
+  partnerId           String   @map("partner_id")
+  partnerKeyEncrypted String   @map("partner_key_encrypted") @db.Text
+  redirectUrl         String?  @map("redirect_url")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("marketplace_app_configs")
+}
+
+/// Lot/batch stok fisik gudang — dasar alokasi FIFO.
+/// Barang yang MASUK lebih dulu (receivedAt paling lama) dikonsumsi lebih dulu.
+/// Catatan penting: stok di Shopee TIDAK dipakai sebagai kebenaran, karena seller
+/// boleh mengisi angka stok apa pun di Seller Center. Kebenaran stok ada di sini.
+model StockLot {
+  id          String   @id @default(cuid())
+  warehouseId String   @map("warehouse_id")
+  variantId   String   @map("variant_id")
+  receivedAt  DateTime @default(now()) @map("received_at")
+  quantity    Int
+  remaining   Int
+  /// RECEIVE (barang masuk) | ADJUSTMENT | RETURN | OPENING (saldo awal sebelum lot aktif)
+  source      String   @default("RECEIVE")
+  referenceId String?  @map("reference_id")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  warehouse Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId, variantId, receivedAt])
+  @@index([remaining])
+  @@map("stock_lots")
 }

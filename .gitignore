@@ -39,3 +39,10 @@ coverage/
 # Temporary / Scratch
 scratch_*.ts
 *.jfif
+
+# Python bytecode (hasil kompilasi skrip deploy)
+__pycache__/
+*.py[cod]
+
+# Tangkapan layar verifikasi + catatan internal tidak untuk repo
+docs/screenshots/

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Pencil, Search, Warehouse, Boxes } from 'lucide-react';
 import { api } from '@/lib/api';
 import { PageHeader, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
+import { StockPanel } from '@/components/stock-panel';
 
 interface InvItem {
   id: string;
@@ -38,6 +39,7 @@ export default function InventoriPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
 
+  const [stockOpen, setStockOpen] = useState(false);
   const [modal, setModal] = useState<InvItem | null>(null);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<string>('STOCK_COUNT');
@@ -94,22 +96,39 @@ export default function InventoriPage() {
   return (
     <div>
       <PageHeader
-        title="Inventori & Stok Fisik"
-        subtitle="Saldo persediaan per gudang dengan pencatatan buku besar (ledger) mutasi stok otomatis"
+        title="Stok Gudang"
+        subtitle="Stok per gudang, pencatatan barang masuk/keluar, dan riwayat perubahan stok"
         actions={
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => {
-              setLoading(true);
-              setError('');
-              load();
-            }}
-          >
-            <RefreshCw size={14} aria-hidden />
-            <span>Muat Ulang</span>
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setStockOpen(true)}>
+              <Boxes size={14} aria-hidden />
+              <span>Barang Masuk / Kurangi</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                setLoading(true);
+                setError('');
+                load();
+              }}
+            >
+              <RefreshCw size={14} aria-hidden />
+              <span>Muat Ulang</span>
+            </button>
+          </div>
         }
+      />
+
+      <StockPanel
+        open={stockOpen}
+        onClose={() => setStockOpen(false)}
+        warehouseId={warehouseId || null}
+        prefillVariantId={null}
+        onDone={(message) => {
+          setNotice({ tone: 'success', text: message });
+          load();
+        }}
       />
 
       {notice ? (

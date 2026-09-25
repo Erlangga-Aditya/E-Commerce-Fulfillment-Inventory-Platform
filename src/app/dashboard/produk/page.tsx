@@ -9,14 +9,14 @@ import {
   Pencil,
   Trash2,
   Layers,
-  Check,
+  
   AlertCircle,
-  X,
-  ExternalLink,
+  
+  
   Image as ImageIcon,
-  DollarSign,
-  Maximize2,
-  Warehouse,
+  
+  
+  
 } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
@@ -754,7 +754,7 @@ export default function ProdukPage() {
             <select
               className="input"
               value={editForm.status}
-              onChange={(e) => setEditForm({ ...editForm, status: e.target.value as any })}
+              onChange={(e) => setEditForm({ ...editForm, status: e.target.value as 'ACTIVE' | 'INACTIVE' | 'ARCHIVED' })}
             >
               <option value="ACTIVE">ACTIVE (Aktif di Katalog)</option>
               <option value="INACTIVE">INACTIVE (Nonaktif)</option>

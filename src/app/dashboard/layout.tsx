@@ -1,14 +1,12 @@
 'use client';
 
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard,
   ShoppingCart,
   Boxes,
-  Workflow,
-  ScanLine,
   Truck,
   Undo2,
   ChartColumn,
@@ -22,23 +20,30 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   UserCheck,
+  Wallet,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { AutoSyncStatus } from '@/components/AutoSyncStatus';
 
+/**
+ * Menu dipertahankan sesedikit mungkin.
+ * Halaman "Operasi Harian", "Fulfillment", dan "Scanner" sudah DIGABUNG ke
+ * halaman "Pesanan" supaya operator hanya memakai satu alur kerja.
+ */
 const NAV_ITEMS = [
-  { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { href: '/dashboard/pesanan', icon: ShoppingCart, label: 'Pesanan' },
+  { href: '/dashboard', icon: LayoutDashboard, label: 'Ringkasan' },
+  { href: '/dashboard/pesanan', icon: ShoppingCart, label: 'Pesanan & Pengiriman' },
+  { href: '/dashboard/inventori', icon: Boxes, label: 'Stok Gudang' },
   { href: '/dashboard/produk', icon: Package, label: 'Produk' },
-  { href: '/dashboard/inventori', icon: Boxes, label: 'Inventori' },
-  { href: '/dashboard/fulfillment', icon: Workflow, label: 'Fulfillment' },
-  { href: '/dashboard/scanner', icon: ScanLine, label: 'Scanner' },
-  { href: '/dashboard/pengiriman', icon: Truck, label: 'Pengiriman' },
+  { href: '/dashboard/pengiriman', icon: Truck, label: 'Lacak Kiriman' },
   { href: '/dashboard/pengembalian', icon: Undo2, label: 'Pengembalian' },
   { href: '/dashboard/laporan', icon: ChartColumn, label: 'Laporan' },
-  { href: '/dashboard/integrasi', icon: Cable, label: 'Integrasi' },
+  { href: '/dashboard/laporan-keuangan', icon: Wallet, label: 'Laporan Keuangan' },
+  { href: '/dashboard/integrasi', icon: Cable, label: 'Hubungkan Shopee' },
   { href: '/dashboard/pengaturan', icon: Settings, label: 'Pengaturan' },
 ];
+
+const FRESH_ORDER_MS = 5 * 60 * 1000; // pesanan baru < 5 menit → badge berdenyut
 
 interface Me {
   user: { id: string; name: string; email: string } | null;
@@ -52,11 +57,40 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
+  const [orderBadge, setOrderBadge] = useState<{
+    count: number;
+    newestOrderAt: string | null;
+    isFresh: boolean;
+  }>({ count: 0, newestOrderAt: null, isFresh: false });
 
-  // Close mobile drawer on route change
+  const fetchBadge = useCallback(() => {
+    api<{ count: number; notQueued: number; newestOrderAt: string | null }>('/api/v1/orders/badge')
+      .then((res) =>
+        setOrderBadge({
+          count: res.count,
+          newestOrderAt: res.newestOrderAt,
+          // Dihitung di callback, bukan saat render.
+          isFresh: res.newestOrderAt
+            ? Date.now() - new Date(res.newestOrderAt).getTime() < FRESH_ORDER_MS
+            : false,
+        }),
+      )
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
-    setIsMobileNavOpen(false);
-  }, [pathname]);
+    fetchBadge();
+    const onSynced = () => fetchBadge();
+    window.addEventListener('shopee:synced', onSynced);
+    const interval = setInterval(fetchBadge, 30000);
+    return () => {
+      window.removeEventListener('shopee:synced', onSynced);
+      clearInterval(interval);
+    };
+  }, [fetchBadge]);
+
+  const badgeIsFresh = orderBadge.isFresh;
+
 
   // Prevent body scroll when mobile drawer is open
   useEffect(() => {
@@ -128,9 +162,35 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 className={`sidebar-link ${active ? 'active' : ''}`}
                 title={isDesktopCollapsed ? item.label : undefined}
                 onClick={() => setIsMobileNavOpen(false)}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
               >
-                <Icon size={19} strokeWidth={active ? 2.2 : 1.75} aria-hidden />
-                <span>{item.label}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <Icon size={19} strokeWidth={active ? 2.2 : 1.75} aria-hidden />
+                  <span>{item.label}</span>
+                </div>
+                {item.href === '/dashboard/pesanan' && orderBadge.count > 0 && (
+                  <span
+                    title={
+                      badgeIsFresh
+                        ? 'Ada pesanan baru masuk — segera proses'
+                        : `${orderBadge.count} pesanan menunggu diselesaikan`
+                    }
+                    style={{
+                      background: badgeIsFresh ? '#dc2626' : '#ef4444',
+                      color: '#ffffff',
+                      fontSize: 10.5,
+                      fontWeight: 800,
+                      padding: '2px 7px',
+                      borderRadius: 12,
+                      boxShadow: badgeIsFresh
+                        ? '0 0 0 0 rgba(239, 68, 68, 0.7)'
+                        : '0 0 8px rgba(239, 68, 68, 0.4)',
+                      animation: badgeIsFresh ? 'pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite' : undefined,
+                    }}
+                  >
+                    {orderBadge.count > 99 ? '99+' : orderBadge.count}
+                  </span>
+                )}
               </Link>
             );
           })}

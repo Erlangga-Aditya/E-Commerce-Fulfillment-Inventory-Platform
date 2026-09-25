@@ -2,7 +2,6 @@ import { type NextRequest } from 'next/server';
 import { generateShippingLabel } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
-import { ValidationError } from '@/shared/errors/AppError';
 
 type Ctx = { params: Promise<{ orderId: string }> };
 
@@ -17,13 +16,11 @@ export async function POST(request: NextRequest, { params }: Ctx) {
   try {
     const ctx = getAuthContext(request);
     const { orderId } = await params;
-    const body = (await request.json()) as { shopId?: string; packageNumber?: string };
-
-    if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
+    const body = (await request.json().catch(() => ({}))) as { shopId?: string; packageNumber?: string };
 
     const result = await generateShippingLabel(
       ctx.tenantId,
-      body.shopId,
+      body.shopId || '',
       orderId,
       body.packageNumber,
     );

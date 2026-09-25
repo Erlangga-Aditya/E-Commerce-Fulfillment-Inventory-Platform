@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
-import { calculateAvailable } from '../domain/inventory.entity';
+import { calculateAvailable, type StockAvailability } from '../domain/inventory.entity';
+import { createStockLot, consumeStockLotsFifo } from './stock-lot.service';
 import {
   NotFoundError,
   InsufficientStockError,
@@ -98,6 +99,36 @@ export async function getInventoryBalance(
 }
 
 /**
+ * Batch stock availability lookup for many (warehouse, variant) pairs in a single query.
+ * Avoids N+1 queries when rendering fulfillment queues or verifying shortfalls.
+ * Returns a map keyed by `${warehouseId}:${variantId}`.
+ */
+export async function getAvailabilityMap(
+  warehouseIds: string[],
+  variantIds: string[],
+): Promise<Map<string, StockAvailability>> {
+  const map = new Map<string, StockAvailability>();
+  if (warehouseIds.length === 0 || variantIds.length === 0) return map;
+
+  const balances = await prisma.inventoryBalance.findMany({
+    where: { warehouseId: { in: warehouseIds }, variantId: { in: variantIds } },
+    select: { warehouseId: true, variantId: true, onHand: true, reserved: true, blocked: true },
+  });
+
+  for (const b of balances) {
+    map.set(`${b.warehouseId}:${b.variantId}`, {
+      warehouseId: b.warehouseId,
+      variantId: b.variantId,
+      onHand: b.onHand,
+      reserved: b.reserved,
+      blocked: b.blocked,
+      available: calculateAvailable(b),
+    });
+  }
+  return map;
+}
+
+/**
  * List inventory balances for a warehouse.
  */
 export async function listInventoryBalances(
@@ -192,7 +223,8 @@ export async function receiveStock(
   if (!warehouse) throw new NotFoundError('Gudang', warehouseId);
   if (!variant) throw new NotFoundError('Varian produk', variantId);
 
-  // Atomic: upsert balance + create movement
+  // Atomic: upsert balance + lot FIFO + movement
+  let lotId: string | null = null;
   await prisma.$transaction(async (tx) => {
     await tx.inventoryBalance.upsert({
       where: { warehouseId_variantId: { warehouseId, variantId } },
@@ -210,6 +242,16 @@ export async function receiveStock(
       },
     });
 
+    // Setiap barang masuk = satu LOT baru (dasar alokasi FIFO).
+    const lot = await createStockLot(tx, {
+      warehouseId,
+      variantId,
+      quantity,
+      source: 'RECEIVE',
+      notes: notes ?? 'Penerimaan stok',
+    });
+    lotId = lot.id;
+
     const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
       data: {
@@ -221,6 +263,7 @@ export async function receiveStock(
         referenceType: 'manual',
         reason: notes ?? 'Penerimaan stok',
         actorId: validActorId,
+        stockLotId: lot.id,
       },
     });
   });
@@ -231,7 +274,7 @@ export async function receiveStock(
     action: 'stock_receive',
     entityType: 'InventoryBalance',
     entityId: `${warehouseId}:${variantId}`,
-    metadata: { quantity, warehouseId, variantId },
+    metadata: { quantity, warehouseId, variantId, lotId },
   });
 
   logger.info('Stock received', { tenantId, warehouseId, variantId, quantity });
@@ -298,6 +341,23 @@ export async function adjustStock(
         version: { increment: 1 },
       },
     });
+
+    // Penyesuaian ke atas menambah lot baru; penyesuaian ke bawah memakai FIFO.
+    if (quantityDelta > 0) {
+      await createStockLot(tx, {
+        warehouseId,
+        variantId,
+        quantity: quantityDelta,
+        source: 'ADJUSTMENT',
+        notes: `${reason}${notes ? `: ${notes}` : ''}`,
+      });
+    } else if (quantityDelta < 0) {
+      await consumeStockLotsFifo(tx, {
+        warehouseId,
+        variantId,
+        quantity: Math.abs(quantityDelta),
+      });
+    }
 
     const validActorId = await resolveValidActorId(tx, actorId);
     await tx.inventoryMovement.create({
@@ -526,4 +586,96 @@ export async function listInventoryMovements(
     })),
     pagination: { total, page, pageSize, hasMore: skip + pageSize < total },
   };
+}
+
+/**
+ * Cari varian produk yang berasal dari Shopee (punya mapping hasil sinkronisasi).
+ *
+ * Dipakai oleh kotak "Tambah Stok" di Operasi Harian, supaya operator hanya bisa
+ * memasukkan stok untuk produk yang benar-benar ada di toko Shopee klien —
+ * bukan produk contoh/manual.
+ */
+export async function listShopeeSourcedVariants(
+  tenantId: string,
+  warehouseId: string | null,
+  search?: string,
+) {
+  const keyword = search?.trim();
+  const variants = await prisma.productVariant.findMany({
+    where: {
+      product: { tenantId },
+      externalMappings: { some: { shop: { provider: 'shopee' } } },
+      ...(keyword
+        ? {
+            OR: [
+              { sku: { contains: keyword } },
+              { name: { contains: keyword } },
+              { barcode: { contains: keyword } },
+              { product: { name: { contains: keyword } } },
+            ],
+          }
+        : {}),
+    },
+    include: {
+      product: { select: { name: true } },
+      externalMappings: {
+        where: { shop: { provider: 'shopee' } },
+        select: { externalProductId: true, externalVariantId: true, shop: { select: { name: true } } },
+        take: 1,
+      },
+    },
+    orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
+    take: 40,
+  });
+
+  if (variants.length === 0) return [];
+
+  const balances = warehouseId
+    ? await prisma.inventoryBalance.findMany({
+        where: {
+          warehouseId,
+          variantId: { in: variants.map((v) => v.id) },
+        },
+      })
+    : [];
+  const balanceByVariant = new Map(balances.map((b) => [b.variantId, b]));
+
+  const lots = warehouseId
+    ? await prisma.stockLot.findMany({
+        where: {
+          warehouseId,
+          variantId: { in: variants.map((v) => v.id) },
+          remaining: { gt: 0 },
+        },
+        orderBy: [{ receivedAt: 'asc' }, { createdAt: 'asc' }],
+      })
+    : [];
+  const lotsByVariant = new Map<string, typeof lots>();
+  for (const lot of lots) {
+    const list = lotsByVariant.get(lot.variantId) ?? [];
+    list.push(lot);
+    lotsByVariant.set(lot.variantId, list);
+  }
+
+  return variants.map((v) => {
+    const balance = balanceByVariant.get(v.id);
+    const openLots = lotsByVariant.get(v.id) ?? [];
+    return {
+      variantId: v.id,
+      productId: v.productId,
+      productName: v.product.name,
+      sku: v.sku,
+      variantName: v.name,
+      barcode: v.barcode,
+      imageUrl: v.imageUrl,
+      shopName: v.externalMappings[0]?.shop.name ?? null,
+      shopeeItemId: v.externalMappings[0]?.externalProductId ?? null,
+      onHand: balance?.onHand ?? 0,
+      reserved: balance?.reserved ?? 0,
+      available: balance ? calculateAvailable(balance) : 0,
+      /** Lot tertua yang masih tersisa — barang inilah yang akan keluar lebih dulu (FIFO). */
+      oldestLotAt: openLots[0]?.receivedAt ?? null,
+      openLotCount: openLots.length,
+    };
+  });
 }

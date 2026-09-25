@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { ShopeeAdapter } from '@/modules/integrations/infrastructure/shopee.adapter';
 import { processWebhookEvent } from '@/modules/integrations/application/sync.service';
+import { getShopeeAppConfig } from '@/modules/integrations/application/appConfig.service';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { logger } from '@/shared/observability/logger';
 
@@ -55,11 +56,11 @@ export async function POST(request: NextRequest) {
   }
 
   const signature = request.headers.get('authorization') ?? '';
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
+  const { partnerKey } = await getShopeeAppConfig();
 
   // ── Signature verification ─────────────────────────────────────────────────
   if (!partnerKey) {
-    logger.warn('Webhook diterima tetapi SHOPEE_PARTNER_KEY belum disetel — tidak bisa verifikasi.');
+    logger.warn('Webhook diterima tetapi Partner Key belum dikonfigurasi — tidak bisa verifikasi.');
     return NextResponse.json({ error: 'not_configured' }, { status: 503 });
   }
 
