@@ -16,13 +16,38 @@ import { logger } from '@/shared/observability/logger';
 // Input schemas
 // ────────────────────────────────────────────────────────────
 
+export const ADJUSTMENT_REASONS = [
+  'STOCK_COUNT',
+  'DAMAGE',
+  'EXPIRY',
+  'THEFT',
+  'TRANSFER',
+  'RECEIVING_ERROR',
+  'OTHER',
+] as const;
+
+/**
+ * Koreksi stok memakai ANGKA STOK SEBENARNYA, bukan `+5` / `-3`.
+ *
+ * Alasan bisnis: operator melakukan hitung fisik di gudang. Yang diketahui
+ * operator hanyalah "ada 32 pcs di rak", bukan "kurang 5 dari sistem". Input
+ * delta memaksa operator menghitung ulang dan rawan salah ketik.
+ *
+ * Server yang menghitung:
+ *   delta = countedOnHand - currentOnHand
+ *
+ * `expectedOnHand` dipakai sebagai pengaman versi (optimistic lock). Kalau stok
+ * sistem berubah di antara operator membuka form dan menekan simpan, permintaan
+ * ditolak supaya tidak menimpa perubahan orang lain.
+ */
 export const AdjustStockSchema = z.object({
   warehouseId: z.string().min(1),
   variantId: z.string().min(1),
-  quantityDelta: z.number().int().refine((v) => v !== 0, 'Delta tidak boleh 0.'),
-  reason: z.enum([
-    'STOCK_COUNT', 'DAMAGE', 'EXPIRY', 'THEFT', 'TRANSFER', 'RECEIVING_ERROR', 'OTHER',
-  ]),
+  /** Angka stok fisik hasil hitung. Boleh 0 (barang habis). */
+  countedOnHand: z.number().int().min(0, 'Stok hasil hitung tidak boleh negatif.'),
+  /** Stok sistem saat form dibuka; dipakai sebagai pengaman versi. */
+  expectedOnHand: z.number().int().min(0),
+  reason: z.enum(ADJUSTMENT_REASONS),
   notes: z.string().max(500).optional(),
 });
 
@@ -289,7 +314,12 @@ export async function adjustStock(
   tenantId: string,
   input: AdjustStockInput,
   actorId: string,
-) {
+): Promise<{
+  previousOnHand: number;
+  countedOnHand: number;
+  delta: number;
+  message: string;
+}> {
   const parsed = AdjustStockSchema.safeParse(input);
   if (!parsed.success) {
     throw new ValidationError('Data penyesuaian stok tidak valid.', {
@@ -297,7 +327,7 @@ export async function adjustStock(
     });
   }
 
-  const { warehouseId, variantId, quantityDelta, reason, notes } = parsed.data;
+  const { warehouseId, variantId, countedOnHand, expectedOnHand, reason, notes } = parsed.data;
 
   // Verify tenant ownership
   const [warehouse, variant] = await Promise.all([
@@ -310,18 +340,28 @@ export async function adjustStock(
   if (!warehouse) throw new NotFoundError('Gudang', warehouseId);
   if (!variant) throw new NotFoundError('Varian produk', variantId);
 
-  // Get current balance
+  // Guard versi: operator membuka form saat stok sistem = X. Kalau stok berubah
+  // sebelum ia menekan simpan (mis. pesanan lain terpacking), koreksinya
+  // berbasis hitung lama dan akan menimpa perubahan itu. Tolak dengan pesan
+  // yang menyuruh memuat ulang - bukan diam-diam menimpa.
   const balance = await prisma.inventoryBalance.findUnique({
     where: { warehouseId_variantId: { warehouseId, variantId } },
   });
-
   const currentOnHand = balance?.onHand ?? 0;
-  const newOnHand = currentOnHand + quantityDelta;
-
-  if (newOnHand < 0) {
+  if (currentOnHand !== expectedOnHand) {
     throw new BusinessRuleViolationError(
-      `Penyesuaian stok akan menghasilkan stok negatif. Stok saat ini: ${currentOnHand}.`,
-      { currentOnHand, quantityDelta, newOnHand },
+      `Stok sistem sudah berubah sejak form dibuka (dulu ${expectedOnHand}, sekarang ${currentOnHand}). ` +
+        'Muat ulang daftar dan periksa kembali hasil hitung Anda.',
+      { expectedOnHand, currentOnHand },
+    );
+  }
+
+  // Server yang menghitung selisihnya - operator tidak pernah mengirim +/-.
+  const quantityDelta = countedOnHand - currentOnHand;
+  if (quantityDelta === 0) {
+    throw new BusinessRuleViolationError(
+      `Stok hasil hitung (${countedOnHand}) sama dengan stok sistem. Tidak ada yang perlu disesuaikan.`,
+      { currentOnHand, countedOnHand },
     );
   }
 
@@ -380,8 +420,30 @@ export async function adjustStock(
     action: 'stock_adjust',
     entityType: 'InventoryBalance',
     entityId: `${warehouseId}:${variantId}`,
-    metadata: { quantityDelta, reason, warehouseId, variantId },
+    // `countedOnHand` ikut dicatat: untuk audit, "berapa stok fisik saat
+    // koreksi" jauh lebih berguna daripada hanya selisihnya.
+    metadata: {
+      countedOnHand,
+      previousOnHand: currentOnHand,
+      quantityDelta,
+      reason,
+      warehouseId,
+      variantId,
+      notes: notes ?? null,
+    },
   });
+
+  // Pesan dibuat dari angka yang benar-benar diterima, bukan template kosong,
+  // supaya operator langsung tahu hasilnya benar.
+  const arah = quantityDelta > 0 ? 'bertambah' : 'berkurang';
+  return {
+    previousOnHand: currentOnHand,
+    countedOnHand,
+    delta: quantityDelta,
+    message:
+      `Stok ${variant.sku} disesuaikan dari ${currentOnHand} menjadi ${countedOnHand} unit ` +
+      `(${arah} ${Math.abs(quantityDelta)}).`,
+  };
 }
 
 /**
@@ -462,6 +524,62 @@ export async function reserveStock(
 
     return { reservationId: reservation.id };
   });
+}
+
+/**
+ * Lepas SEMUA reservasi aktif milik satu pesanan dalam satu transaksi.
+ *
+ * Dipakai saat pesanan dibatalkan. Tanpa ini, stok barang pesanan yang batal
+ * tetap terkunci `reserved` sehingga unavailable untuk pesanan lain - barang
+ * ada di gudang tapi sistem bilang habis.
+ *
+ * Idempoten: hanya reservasi berstatus `ACTIVE` yang dilepas, jadi aman
+ * dipanggil berkali-kali (mis. sinkronisasi Shopee berulang).
+ */
+export async function releaseReservationsForOrder(
+  tenantId: string,
+  orderId: string,
+  actorId: string | null,
+  reason: string,
+): Promise<number> {
+  const active = await prisma.stockReservation.findMany({
+    // Reservasi terhubung ke pesanan lewat `orderItemId` (bukan `orderId`
+    // langsung) — mengikuti skema `StockReservation`.
+    where: { orderItem: { orderId }, status: 'ACTIVE' },
+    select: { id: true, warehouseId: true, variantId: true, quantity: true },
+  });
+  if (active.length === 0) return 0;
+
+  const validActorId = actorId ? await resolveValidActorId(prisma, actorId) : null;
+
+  await prisma.$transaction(async (tx) => {
+    for (const r of active) {
+      await tx.stockReservation.update({
+        where: { id: r.id },
+        data: { status: 'RELEASED', releasedAt: new Date() },
+      });
+      await tx.inventoryBalance.update({
+        where: { warehouseId_variantId: { warehouseId: r.warehouseId, variantId: r.variantId } },
+        data: { reserved: { decrement: r.quantity }, version: { increment: 1 } },
+      });
+      await tx.inventoryMovement.create({
+        data: {
+          tenantId,
+          warehouseId: r.warehouseId,
+          variantId: r.variantId,
+          movementType: 'RESERVE_RELEASE',
+          quantityDelta: r.quantity,
+          referenceType: 'order',
+          referenceId: orderId,
+          reason,
+          actorId: validActorId,
+        },
+      });
+    }
+  });
+
+  logger.info('Reservations released', { tenantId, orderId, released: active.length });
+  return active.length;
 }
 
 /**

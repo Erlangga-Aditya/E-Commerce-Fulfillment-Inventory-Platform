@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Pencil, Search, Warehouse, Boxes } from 'lucide-react';
 import { api } from '@/lib/api';
-import { PageHeader, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
+import { PageHeader, LoadingState, ErrorState, EmptyState, Alert } from '@/components/ui';
 import { StockPanel } from '@/components/stock-panel';
 
 interface InvItem {
@@ -19,17 +19,6 @@ interface InvItem {
   available: number;
 }
 
-const REASONS = ['STOCK_COUNT', 'DAMAGE', 'EXPIRY', 'THEFT', 'TRANSFER', 'RECEIVING_ERROR', 'OTHER'] as const;
-const REASON_LABEL: Record<string, string> = {
-  STOCK_COUNT: 'Stock Opname (Hitung Fisik)',
-  DAMAGE: 'Barang Rusak',
-  EXPIRY: 'Kedaluwarsa',
-  THEFT: 'Barang Hilang / Selisih',
-  TRANSFER: 'Transfer Antar Gudang',
-  RECEIVING_ERROR: 'Koreksi Penerimaan',
-  OTHER: 'Alasan Lainnya',
-};
-
 export default function InventoriPage() {
   const [items, setItems] = useState<InvItem[]>([]);
   const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([]);
@@ -40,10 +29,9 @@ export default function InventoriPage() {
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
 
   const [stockOpen, setStockOpen] = useState(false);
-  const [modal, setModal] = useState<InvItem | null>(null);
-  const [delta, setDelta] = useState('');
-  const [reason, setReason] = useState<string>('STOCK_COUNT');
-  const [submitting, setSubmitting] = useState(false);
+  // Penyesuaian stok TIDAK punya modal sendiri di halaman ini. Semua aksi
+  // masuk/koreksi berada di satu komponen `StockPanel` supaya tidak ada dua
+  // implementasi untuk aksi bisnis yang sama (duplikasi = sumber bug).
 
   const load = useCallback(() => {
     const q = new URLSearchParams();
@@ -72,26 +60,6 @@ export default function InventoriPage() {
     window.addEventListener('shopee:synced', handleSync);
     return () => window.removeEventListener('shopee:synced', handleSync);
   }, [load]);
-
-  async function submitAdjust(e: React.FormEvent) {
-    e.preventDefault();
-    if (!modal) return;
-    setNotice(null);
-    setSubmitting(true);
-    try {
-      await api('/api/v1/inventory/adjustments', {
-        method: 'POST',
-        body: { warehouseId: modal.warehouseId, variantId: modal.variantId, quantityDelta: Number(delta), reason },
-      });
-      setNotice({ tone: 'success', text: `Stok produk ${modal.sku} berhasil disesuaikan.` });
-      setModal(null);
-      load();
-    } catch (err) {
-      setNotice({ tone: 'danger', text: (err as Error).message });
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   return (
     <div>
@@ -239,12 +207,13 @@ export default function InventoriPage() {
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => {
-                        setModal(it);
-                        setDelta('');
+                        // Buka panel yang sama dengan halaman Pesanan — satu
+                        // implementasi untuk satu aksi bisnis.
+                        setStockOpen(true);
                       }}
                     >
                       <Pencil size={12} aria-hidden />
-                      <span>Sesuaikan</span>
+                      <span>Hitung Ulang</span>
                     </button>
                   </td>
                 </tr>
@@ -253,52 +222,6 @@ export default function InventoriPage() {
           </table>
         </div>
       )}
-
-      {/* Accessible Responsive Adjustment Modal */}
-      <Modal isOpen={Boolean(modal)} onClose={() => setModal(null)} title={`Penyesuaian Stok — ${modal?.sku}`}>
-        <form onSubmit={submitAdjust}>
-          <div className="field">
-            <label>Produk Terpilih</label>
-            <div style={{ padding: '8px 12px', background: 'var(--surface-low)', borderRadius: 'var(--r-sm)', fontSize: 13 }}>
-              <strong>{modal?.productName}</strong> ({modal?.variantName}) — Stok saat ini: <strong>{modal?.onHand}</strong> pcs
-            </div>
-          </div>
-
-          <div className="field">
-            <label>Jumlah Selisih (+ atau -)</label>
-            <input
-              type="number"
-              className="input"
-              placeholder="Contoh: +5 atau -2"
-              value={delta}
-              onChange={(e) => setDelta(e.target.value)}
-              required
-              autoFocus
-            />
-            <p className="muted small">Gunakan angka positif untuk menambah stok fisik, atau angka negatif untuk pengurangan.</p>
-          </div>
-
-          <div className="field">
-            <label>Alasan Penyesuaian (Audit Log)</label>
-            <select className="input" value={reason} onChange={(e) => setReason(e.target.value)}>
-              {REASONS.map((r) => (
-                <option key={r} value={r}>
-                  {REASON_LABEL[r]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
-            <button type="submit" className="btn btn-primary grow" disabled={submitting || !delta}>
-              {submitting ? 'Menyimpan...' : 'Simpan Mutasi Stok'}
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={() => setModal(null)}>
-              Batal
-            </button>
-          </div>
-        </form>
-      </Modal>
     </div>
   );
 }

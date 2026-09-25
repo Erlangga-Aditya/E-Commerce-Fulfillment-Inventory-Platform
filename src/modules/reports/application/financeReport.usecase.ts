@@ -125,11 +125,12 @@ export async function getFinanceReport(
     shippingFeeDiscount: o.shippingFeeDiscount,
     platformFee: o.platformFee,
     escrowAmount: o.escrowAmount,
-    hasMoneyDetail:
-      o.totalAmount !== null ||
-      o.itemSubtotal !== null ||
-      o.buyerShippingFee !== null ||
-      o.escrowAmount !== null,
+    // "Punya rincian" berarti Shopee sudah mengirim bagian yang WAJIB untuk
+    // menghitung dana masuk: `platformFee` dan `escrowAmount`. Sebelumnya
+    // hanya `totalAmount` yang dicek, padahal `totalAmount` selalu terisi —
+    // sehingga order yang fee-nya masih kosong ikut dihitung "sudah rinci",
+    // dan kartu Potongan Shopee menampilkan Rp0 palsu.
+    hasMoneyDetail: o.platformFee !== null && o.escrowAmount !== null,
   }));
 
   const sumOf = (key: keyof FinanceOrderRow): number =>

@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const ctx = getAuthContext(request);
-    assertRole(ctx, 'MANAGER'); // Only MANAGER+ can adjust stock
+    assertRole(ctx, 'OWNER'); // Koreksi stok mengubah angka resmi gudang
 
     const body: unknown = await request.json();
     const parsed = AdjustStockSchema.safeParse(body);
@@ -26,12 +26,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    await adjustStock(ctx.tenantId, parsed.data, ctx.userId);
+    const result = await adjustStock(ctx.tenantId, parsed.data, ctx.userId);
 
     // Stok bertambah → coba alokasikan ke pesanan yang tadinya kekurangan stok.
     // Tanpa ini pesanan WAITING_STOCK bisa macet walau stok sudah masuk.
     let stockRetry: { advanced: string[]; stillWaiting: string[] } | null = null;
-    if (parsed.data.quantityDelta > 0) {
+    if (result.delta > 0) {
       try {
         stockRetry = await retryWaitingStockOrders(ctx.tenantId, parsed.data.warehouseId, ctx.userId);
       } catch (err) {
@@ -41,7 +41,10 @@ export async function POST(request: NextRequest) {
 
     return successResponse(
       {
-        message: 'Stok berhasil disesuaikan.',
+        message: result.message,
+        previousOnHand: result.previousOnHand,
+        countedOnHand: result.countedOnHand,
+        delta: result.delta,
         ...(stockRetry ? { stockRetry } : {}),
       },
       { requestId },

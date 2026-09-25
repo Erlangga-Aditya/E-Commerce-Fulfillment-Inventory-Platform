@@ -71,7 +71,14 @@ interface StationOrder {
 interface StationResponse {
   warehouse: { id: string; name: string; code: string } | null;
   sort: 'oldest' | 'newest';
-  stages: { baru: number; menungguStok: number; siapDikemas: number; siapKirim: number; dikirim: number };
+  stages: {
+    baru: number;
+    menungguStok: number;
+    siapDikemas: number;
+    siapKirim: number;
+    dikirim: number;
+    dibatalkan: number;
+  };
   orders: StationOrder[];
   generatedAt: string;
 }
@@ -103,7 +110,7 @@ interface ScanOutcome {
 // Bagian tampilan yang dipakai berulang
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Stage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM';
+type Stage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM' | 'DIBATALKAN';
 
 const STAGE_LABEL: Record<Stage, string> = {
   BARU: 'Perlu Diproses',
@@ -111,6 +118,7 @@ const STAGE_LABEL: Record<Stage, string> = {
   SIAP_DIKEMAS: 'Siap Dikemas',
   SIAP_KIRIM: 'Siap Kirim',
   DIKIRIM: 'Sudah Dikirim',
+  DIBATALKAN: 'Dibatalkan',
 };
 
 const STAGE_TONE: Record<Stage, string> = {
@@ -119,6 +127,7 @@ const STAGE_TONE: Record<Stage, string> = {
   SIAP_DIKEMAS: 'var(--secondary, #7c3aed)',
   SIAP_KIRIM: 'var(--success, #10b981)',
   DIKIRIM: 'var(--muted)',
+  DIBATALKAN: 'var(--danger, #ef4444)',
 };
 
 /** Panduan 4 langkah supaya operator baru langsung paham alurnya. */
@@ -401,6 +410,7 @@ export default function PesananPengirimanPage() {
     { key: 'MENUNGGU_STOK', label: 'Menunggu Stok', count: stages?.menungguStok ?? 0 },
     { key: 'SIAP_DIKEMAS', label: 'Siap Dikemas', count: stages?.siapDikemas ?? 0 },
     { key: 'SIAP_KIRIM', label: 'Siap Kirim', count: stages?.siapKirim ?? 0 },
+    { key: 'DIBATALKAN', label: 'Dibatalkan', count: stages?.dibatalkan ?? 0 },
   ];
 
   return (
@@ -440,6 +450,7 @@ export default function PesananPengirimanPage() {
           { label: 'Siap Dikemas', value: stages?.siapDikemas ?? 0, tone: STAGE_TONE.SIAP_DIKEMAS },
           { label: 'Siap Kirim', value: stages?.siapKirim ?? 0, tone: STAGE_TONE.SIAP_KIRIM },
           { label: 'Sudah Dikirim', value: stages?.dikirim ?? 0, tone: STAGE_TONE.DIKIRIM },
+          { label: 'Dibatalkan', value: stages?.dibatalkan ?? 0, tone: STAGE_TONE.DIBATALKAN },
         ].map((c) => (
           <div className="card" key={c.label}>
             <div className="small muted">{c.label}</div>

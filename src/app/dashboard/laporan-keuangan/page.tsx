@@ -99,6 +99,22 @@ export default function LaporanKeuanganPage() {
     };
   }, [load, from, to]);
 
+  /**
+   * Satu helper untuk semua preset rentang, supaya tidak ada logika tanggal
+   * yang ditulis ulang berkali-kali (sumber bug "tombol ini beda hasilnya").
+   */
+  function setRentang(hariLalu: number) {
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(start.getDate() - (hariLalu - 1));
+    const startStr = toInputDate(start);
+    const endStr = toInputDate(now);
+    setFrom(startStr);
+    setTo(endStr);
+    setLoading(true);
+    void load(startStr, endStr);
+  }
+
   function pilihBulanIni() {
     const now = new Date();
     const start = toInputDate(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -110,15 +126,7 @@ export default function LaporanKeuanganPage() {
   }
 
   function pilih30Hari() {
-    const now = new Date();
-    const start = new Date(now);
-    start.setDate(start.getDate() - 29);
-    const startStr = toInputDate(start);
-    const endStr = toInputDate(now);
-    setFrom(startStr);
-    setTo(endStr);
-    setLoading(true);
-    void load(startStr, endStr);
+    setRentang(30);
   }
 
   /** Minta Shopee mengirim rincian biaya (komisi, biaya layanan, dana dilepas) untuk pesanan terkini. */
@@ -267,6 +275,9 @@ export default function LaporanKeuanganPage() {
           </div>
           <button type="button" className="btn btn-secondary btn-sm" onClick={pilihBulanIni}>
             <span>Bulan ini</span>
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setRentang(7)}>
+            <span>7 hari terakhir</span>
           </button>
           <button type="button" className="btn btn-secondary btn-sm" onClick={pilih30Hari}>
             <span>30 hari terakhir</span>

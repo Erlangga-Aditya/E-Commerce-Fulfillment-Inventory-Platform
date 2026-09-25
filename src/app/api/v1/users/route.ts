@@ -2,7 +2,7 @@ import { type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { successResponse, created, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, parsePagination } from '@/shared/application/routeHelpers';
+import { getAuthContext, getRequestId, parsePagination, assertRole } from '@/shared/application/routeHelpers';
 import { ConflictError, ValidationError } from '@/shared/errors/AppError';
 import bcrypt from 'bcryptjs';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
@@ -18,11 +18,18 @@ const InviteUserSchema = z.object({
 /**
  * GET /api/v1/users — daftar anggota workspace (tenant members)
  * POST /api/v1/users — undang / tambah pengguna baru ke workspace
+ *
+ * Keamanan: manajemen dan perubahan hak akses adalah urusan pemilik. Hanya OWNER
+ * yang boleh melihat daftar anggota, menambahkan pengguna, atau mengubah peran.
+ * Tanpa guard ini, akun ber-role rendah (mis. STAFF) bisa membuat akun OWNER
+ * sendiri lewat endpoint ini — privilege escalation yang memberi akses penuh
+ * ke seluruh data toko.
  */
 export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertRole(ctx, UserRole.OWNER);
     const { page, pageSize } = parsePagination(request);
     const skip = (page - 1) * pageSize;
 
@@ -61,6 +68,9 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    // Hanya pemilik yang boleh menambah pengguna — dan hanya dengan peran
+    // yang tidak melebihi haknya sendiri.
+    assertRole(ctx, UserRole.OWNER);
     const body: unknown = await request.json();
     const parsed = InviteUserSchema.safeParse(body);
     if (!parsed.success) {

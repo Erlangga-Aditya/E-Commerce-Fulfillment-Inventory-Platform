@@ -22,6 +22,12 @@ import {
   describeLabelFailure,
   pollUntilReady,
 } from '../domain/shipping-document';
+import { describeShape, extractEscrowList, extractIncome } from '../domain/escrow-detail';
+import {
+  describeNoChannel,
+  extractSupportedChannels,
+  pickChannel,
+} from '../domain/shipping-channel';
 import {
   createDocument,
   downloadDocument,
@@ -80,20 +86,34 @@ async function configFromStore(): Promise<ShopeeConfig> {
   return { partnerId: cfg.partnerId, partnerKey: cfg.partnerKey, apiHost: cfg.apiHost };
 }
 
+/**
+ * Base string untuk tanda tangan Shopee (developer-guide §2.1).
+ *
+ * Setiap endpoint punya aturan parameter sendiri, dan Shopee menolak keras
+ * bila kombinasi salah. Bukti dari error produksi:
+ *
+ *  - `get_escrow_detail_batch` tanpa `shop_id`      → "There is no shop_id in query"
+ *  - `get_escrow_detail_batch` tanpa `access_token` → "There is no access_token in query"
+ *  - signature app-level (`partner_id + path + timestamp` saja) → "error_sign"
+ *
+ * Jadi untuk endpoint Shopee yang dipakai aplikasi ini, kombinasinya selalu
+ * `access_token` + `shop_id`. Scope `app` tetap dipertahankan untuk endpoint
+ * publik (mis. tukar access token) yang memang tidak memakai kredensial toko.
+ */
+export type ShopeeAuthScope = 'shop' | 'app';
+
 function buildBaseString(
   partnerId: string,
   apiPath: string,
   timestamp: number,
   accessToken?: string,
   shopId?: string,
+  scope: ShopeeAuthScope = 'shop',
 ): string {
-  // Base string rule (verified from official docs §2.1):
-  // Shop API:   partner_id + api_path + timestamp + access_token + shop_id
-  // Public API: partner_id + api_path + timestamp  (no access_token or shop_id)
-  let base = `${partnerId}${apiPath}${timestamp}`;
-  if (accessToken) base += accessToken;
-  if (shopId !== undefined && shopId !== '') base += shopId;
-  return base;
+  if (scope === 'app') {
+    return `${partnerId}${apiPath}${timestamp}`;
+  }
+  return `${partnerId}${apiPath}${timestamp}${accessToken ?? ''}${shopId ?? ''}`;
 }
 
 export function signShopee(
@@ -103,10 +123,11 @@ export function signShopee(
   timestamp: number,
   accessToken?: string,
   shopId?: string,
+  scope: ShopeeAuthScope = 'shop',
 ): string {
   return crypto
     .createHmac('sha256', partnerKey)
-    .update(buildBaseString(partnerId, apiPath, timestamp, accessToken, shopId))
+    .update(buildBaseString(partnerId, apiPath, timestamp, accessToken, shopId, scope))
     .digest('hex');
 }
 
@@ -129,6 +150,12 @@ export interface ShopeeRequestOptions {
   method?: 'GET' | 'POST';
   params?: Record<string, unknown>;
   body?: Record<string, unknown>;
+  /**
+   * `shop` (default) memakai access_token + shop_id di signature dan query.
+   * `app` hanya memakai partner_id + path + timestamp — untuk endpoint
+   * yang diotorisasi di level aplikasi (mis. `payment/get_escrow_detail_batch`).
+   */
+  authScope?: ShopeeAuthScope;
 }
 
 /**
@@ -161,10 +188,16 @@ async function callShopee<T>(
     ? (optionsOrBody as ShopeeRequestOptions).body
     : (optionsOrBody as Record<string, unknown>);
 
+  // Endpoint app-level tidak memakai access_token. `shopIdOnly` tetap mengirim
+  // shop_id karena endpoint escrow mewajibkannya.
+  const authScope: ShopeeAuthScope = isOptionsObject
+    ? (optionsOrBody as ShopeeRequestOptions).authScope ?? 'shop'
+    : 'shop';
+
   const timestamp = Math.floor(Date.now() / 1000);
-  const shopId = creds?.shopId;
-  const accessToken = creds?.accessToken;
-  const sign = signShopee(cfg.partnerId, cfg.partnerKey, apiPath, timestamp, accessToken, shopId);
+  const shopId = authScope === 'app' ? undefined : creds?.shopId;
+  const accessToken = authScope === 'shop' ? creds?.accessToken : undefined;
+  const sign = signShopee(cfg.partnerId, cfg.partnerKey, apiPath, timestamp, accessToken, shopId, authScope);
 
   const url = new URL(apiPath, cfg.apiHost);
   url.searchParams.set('partner_id', cfg.partnerId);
@@ -177,9 +210,13 @@ async function callShopee<T>(
     for (const [k, v] of Object.entries(params)) {
       if (v === undefined || v === null) continue;
       if (Array.isArray(v)) {
-        for (const item of v) {
-          url.searchParams.append(k, String(item));
-        }
+        // Shopee UNTUK list expects format JSON, contoh:
+        //   order_sn_list=["A","B"]
+        // Kalau ditulis `order_sn_list=A&order_sn_list=B`, Shopee menjawab:
+        //   "order_sn_list is required, format should be string[]"
+        // Endpoint yang memang menerima pengulangan parameter tidak terpengaruh —
+        // pemanggil memakai bentuk JSON secara eksplisit bila memang perlu.
+        url.searchParams.set(k, JSON.stringify(v));
       } else {
         url.searchParams.set(k, String(v));
       }
@@ -586,44 +623,50 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     const result = new Map<string, Record<string, unknown>>();
     if (orderSns.length === 0) return result;
 
-    for (let i = 0; i < orderSns.length; i += 50) {
-      const batch = orderSns.slice(i, i + 50);
-      let list: Array<Record<string, unknown>> = [];
+    // Satu panggilan per pesanan. Endpoint `get_escrow_detail` bekerja per
+    // `order_sn`, bukan daftar, jadi tidak ada lagi batas 50 per panggilan.
+    for (const orderSn of orderSns) {
       try {
-        const res = await callShopee<Record<string, unknown>>(
+        // WAJIB GET. Dikonfirmasi di Shopee API Test Tool (Partner 1245182 →
+        // Payment → v2.payment.get_escrow_detail): "Http Method: GET".
+        // `get_escrow_detail_batch` dijawab `order_sn_list is required,
+        // format should be string[]` dengan request_id kosong, artinya tidak
+        // tersedia untuk app ini — bukan karena format-nya salah.
+        const res = await callShopee<unknown>(
           cfg,
-          '/api/v2/payment/get_escrow_detail_batch',
+          '/api/v2/payment/get_escrow_detail',
           {
-            method: 'POST',
-            body: { order_sn_list: batch },
+            method: 'GET',
+            params: { order_sn: orderSn },
+            authScope: 'shop',
           },
           { shopId: creds.shopId, accessToken: creds.accessToken },
         );
-        // Bentuk respons dapat bervariasi antar-versi; baca beberapa kemungkinan kunci
-        // secara toleran, lalu catat bila tidak ada yang cocok (supaya bisa ditelusuri).
-        const candidates = [res?.order_income_list, res?.escrow_list, res?.order_list];
-        for (const candidate of candidates) {
-          if (Array.isArray(candidate)) {
-            list = candidate as Array<Record<string, unknown>>;
-            break;
-          }
-        }
-        if (list.length === 0) {
+
+        // Toleran terhadap bentuk respons: bisa array, objek pembungkus, atau
+        // objek berkunci indeks.
+        const rows: Array<Record<string, unknown>> = extractEscrowList(res);
+        // Rincian satu pesanan: barisnya boleh tanpa `order_sn`, jadi cari
+        // lewat nomor pesanan yang diminta, lalu fallback ke Income langsung.
+        const single: Record<string, unknown> | null =
+          typeof res === 'object' && res !== null && !Array.isArray(res)
+            ? extractIncome(res as Record<string, unknown>)
+            : null;
+        const match = rows.find((r) => String(r.order_sn ?? '') === orderSn);
+        const income = match ? extractIncome(match) : (single ?? (rows[0] ? extractIncome(rows[0]) : null));
+        if (income) {
+          // Kunci map memakai nomor pesanan yang diminta supaya pemanggil
+          // selalu menemukan hasilnya, mesmo kalau Shopee tidak echoing order_sn.
+          result.set(orderSn, income);
+        } else {
           logger.info(
-            `Rincian biaya (escrow): Shopee mengembalikan data kosong untuk ${batch.length} pesanan. ` +
-              `Kunci respons: ${Object.keys(res ?? {}).join(', ') || '(kosong)'}`,
+            `Rincian biaya (escrow): Shopee tidak mengirim rincian untuk ${orderSn}. ` +
+              `Bentuk respons: ${describeShape(res)}`,
           );
         }
       } catch (err) {
-        logger.warn(
-          `Ambil rincian biaya (escrow) gagal untuk ${batch.length} pesanan: ${(err as Error).message}`,
-        );
+        logger.warn(`Ambil rincian biaya (escrow) gagal untuk ${orderSn}: ${(err as Error).message}`);
         continue;
-      }
-      for (const row of list) {
-        const sn = String(row.order_sn ?? '');
-        const income = (row.order_income ?? row.escrow ?? null) as Record<string, unknown> | null;
-        if (sn && income) result.set(sn, income);
       }
     }
     return result;
@@ -993,26 +1036,54 @@ export class ShopeeAdapter implements MarketplaceAdapter {
    * Mengatur pengiriman ("Atur Pengiriman") untuk pesanan Shopee.
    * Endpoint: POST /api/v2/logistics/ship_order
    *
-   * Flow Shopee OpenAPI v2:
+   * Flow Shopee OpenAPI v2 (WAJIB urut, jangan dilewati):
    * 1. Order status: READY_TO_SHIP
-   * 2. Call /api/v2/logistics/ship_order with dropoff or pickup object
-   * 3. Call get_tracking_number to retrieve AWB
+   * 2. get_shipping_parameter → channel yang benar-benar DIDUKUNG pesanan ini
+   * 3. ship_order dengan channel itu (pickup ATAU dropoff — bukan asal kirim dropoff)
+   * 4. get_tracking_number → AWB
+   *
+   * Langkah 2 tidak boleh dilewati: mengirim `dropoff: {}` tanpa memeriksa
+   * dukungan Shopee menghasilkan `logistics.ship_order_unsupport_dropoff` dan
+   * operator tidak punya cara memperbaikinya sendiri.
    */
   async arrangeShipment(creds: ShopCredentials, input: ArrangeShipmentInput): Promise<ArrangeShipmentResult> {
     const cfg = await this.cfg();
     try {
-      const body: Record<string, unknown> = {
-        order_sn: input.orderSn,
-      };
-      if (input.packageNumber) body.package_number = input.packageNumber;
+      // 1) Tanya Shopee channel apa yang didukung pesanan ini.
+      const paramRes = await callShopee<unknown>(
+        cfg,
+        '/api/v2/logistics/get_shipping_parameter',
+        {
+          method: 'POST',
+          body: { order_list: [{ order_sn: input.orderSn, ...(input.packageNumber ? { package_number: input.packageNumber } : {}) }] },
+        },
+        { shopId: creds.shopId, accessToken: creds.accessToken },
+      );
+      const channels = extractSupportedChannels(paramRes);
+      if (channels.length === 0) {
+        logger.warn(`Tidak ada kanal pengiriman yang didukung untuk order ${input.orderSn}`, {
+          shopId: creds.shopId,
+        });
+        throw describeNoChannel(input.orderSn);
+      }
+      const channel = pickChannel(channels, {
+        pickupTimeId: input.pickupTimeId ?? null,
+        // `branchId` di kontrak bertipe number (dari get_branch_list), sedangkan
+        // Shopee mengirim id kanal sebagai string. Semuanya dinormalkan ke string
+        // supaya perbandingan tidak pernah gagal diam-diam.
+        branchId: input.branchId === undefined || input.branchId === null
+          ? null
+          : String(input.branchId),
+      });
+      if (!channel) throw describeNoChannel(input.orderSn);
 
-      // Build pickup or dropoff object
-      if (input.pickupTimeId) {
-        body.pickup = { pickup_time_id: input.pickupTimeId };
+      // 2) Kirim hanya channel yang Shopee dukung.
+      const body: Record<string, unknown> = { order_sn: input.orderSn };
+      if (input.packageNumber) body.package_number = input.packageNumber;
+      if (channel.kind === 'pickup') {
+        body.pickup = { pickup_time_id: channel.pickupTimeId };
       } else {
-        // Default: dropoff (antar ke cabang / agen kurir)
-        body.dropoff = {};
-        if (input.branchId) (body.dropoff as Record<string, unknown>).branch_id = input.branchId;
+        body.dropoff = channel.branchId ? { branch_id: channel.branchId } : {};
       }
 
       await callShopee<Record<string, unknown>>(
@@ -1022,7 +1093,7 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
 
-      // Setelah `ship_order` diterima, ambil nomor resi. Resi WAJIB ada sebelum
+      // 3) Setelah `ship_order` diterima, ambil nomor resi. Resi WAJIB ada sebelum
       // dianggap berhasil — kalau Shopee belum menerbitkannya, kembalikan
       // kegagalan apa adanya supaya operator tahu harus mencoba lagi.
       const trackingNumber = await this.getTrackingNumber(creds, input.orderSn);
@@ -1033,7 +1104,9 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         return { success: false, trackingNumber: null, message: msg };
       }
 
-      logger.info(`arrangeShipment berhasil: order ${input.orderSn}, AWB ${trackingNumber}`, { shopId: creds.shopId });
+      logger.info(`arrangeShipment berhasil: order ${input.orderSn}, kanal ${channel.kind}, AWB ${trackingNumber}`, {
+        shopId: creds.shopId,
+      });
       return { success: true, trackingNumber };
     } catch (err) {
       const msg = (err as Error).message;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Boxes, Minus, Plus, Search } from 'lucide-react';
+import { Boxes, ClipboardCheck, Plus, Search } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Alert } from '@/components/ui';
 
@@ -10,8 +10,16 @@ import { Alert } from '@/components/ui';
  * "Stok Gudang" supaya perilakunya persis sama (satu sumber kode, bukan duplikat).
  *
  * Produk diambil otomatis dari toko Shopee (hasil sinkronisasi), bisa ditambah
- * (barang masuk → batch baru) maupun dikurangi (koreksi), dan alokasinya FIFO.
+ * (barang masuk → batch baru) maupun dikoreksi lewat hitung fisik.
+ *
+ * CATATAN DESAIN PENTING
+ * ----------------------
+ * Koreksi stok TIDAK memakai input `+5` / `-3`. Yang diketahui operator hanyalah
+ * "ada 32 pcs di rak". Jadi inputnya adalah angka stok fisik hasil hitung, dan
+ * server yang menghitung selisihnya. Alasan wajib diisi karena itu yang
+ * menjelaskan selisihnya.
  */
+
 interface StockOption {
   variantId: string;
   productName: string;
@@ -23,6 +31,17 @@ interface StockOption {
   oldestLotAt: string | null;
 }
 
+/** Alasan koreksi — cerminan `ADJUSTMENT_REASONS` di server. */
+const ADJUSTMENT_REASONS: Array<{ value: string; label: string }> = [
+  { value: 'STOCK_COUNT', label: 'Hasil hitung fisik' },
+  { value: 'DAMAGE', label: 'Barang rusak' },
+  { value: 'EXPIRY', label: 'Kedaluwarsa' },
+  { value: 'THEFT', label: 'Hilang' },
+  { value: 'TRANSFER', label: 'Pindah gudang' },
+  { value: 'RECEIVING_ERROR', label: 'Salah catat barang masuk' },
+  { value: 'OTHER', label: 'Lainnya' },
+];
+
 export interface StockPanelProps {
   open: boolean;
   onClose: () => void;
@@ -33,12 +52,14 @@ export interface StockPanelProps {
 
 /** Stok Gudang: produk otomatis dari toko Shopee, bisa ditambah maupun dikurangi. */
 export function StockPanel({ open, onClose, warehouseId, prefillVariantId, onDone }: StockPanelProps) {
-  const [mode, setMode] = useState<'masuk' | 'kurang'>('masuk');
+  const [mode, setMode] = useState<'masuk' | 'koreksi'>('masuk');
   const [search, setSearch] = useState('');
   const [options, setOptions] = useState<StockOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<StockOption | null>(null);
   const [quantity, setQuantity] = useState('');
+  const [countedOnHand, setCountedOnHand] = useState('');
+  const [reason, setReason] = useState('STOCK_COUNT');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -91,16 +112,16 @@ export function StockPanel({ open, onClose, warehouseId, prefillVariantId, onDon
   if (!open) return null;
 
   async function submit() {
-    const qty = Number(quantity);
     if (!selected || !warehouseId) return;
-    if (!Number.isInteger(qty) || qty <= 0) {
-      setError('Jumlah harus angka bulat lebih dari 0.');
-      return;
-    }
     setBusy(true);
     setError('');
     try {
       if (mode === 'masuk') {
+        const qty = Number(quantity);
+        if (!Number.isInteger(qty) || qty <= 0) {
+          setError('Jumlah barang masuk harus angka bulat lebih dari 0.');
+          return;
+        }
         const res = await api<{ message: string }>('/api/v1/inventory/stock-in', {
           method: 'POST',
           body: {
@@ -112,19 +133,37 @@ export function StockPanel({ open, onClose, warehouseId, prefillVariantId, onDon
         });
         onDone(res.message);
       } else {
-        await api('/api/v1/inventory/adjustments', {
+        // Koreksi: kirim ANGKA STOK FISIK, bukan selisih +/-.
+        const counted = Number(countedOnHand);
+        if (countedOnHand.trim() === '' || !Number.isInteger(counted) || counted < 0) {
+          setError('Stok hasil hitung harus angka bulat 0 atau lebih.');
+          return;
+        }
+        if (counted === selected.onHand) {
+          setError('Stok hasil hitung sama dengan stok sistem. Tidak ada yang perlu disesuaikan.');
+          return;
+        }
+        if (reason === 'OTHER' && !notes.trim()) {
+          setError('Untuk alasan "Lainnya", isi catatan penjelasan.');
+          return;
+        }
+        const res = await api<{ message: string }>('/api/v1/inventory/adjustments', {
           method: 'POST',
           body: {
             warehouseId,
             variantId: selected.variantId,
-            quantityDelta: -qty,
-            reason: 'STOCK_COUNT',
-            notes: notes || 'Pengurangan stok dari halaman Pesanan',
+            countedOnHand: counted,
+            // Dikirim supaya server bisa menolak kalau stok sudah berubah
+            // di antara form dibuka dan tombol ditekan.
+            expectedOnHand: selected.onHand,
+            reason,
+            notes: notes || undefined,
           },
         });
-        onDone(`Stok ${selected.sku} dikurangi ${qty} unit.`);
+        onDone(res.message);
       }
       setQuantity('');
+      setCountedOnHand('');
       setNotes('');
       const list = await loadOptions(search);
       const updated = list.find((o) => o.variantId === selected.variantId);
@@ -165,11 +204,11 @@ export function StockPanel({ open, onClose, warehouseId, prefillVariantId, onDon
         </button>
         <button
           type="button"
-          className={`btn btn-sm ${mode === 'kurang' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setMode('kurang')}
+          className={`btn btn-sm ${mode === 'koreksi' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setMode('koreksi')}
         >
-          <Minus size={13} aria-hidden />
-          <span>Kurangi / Koreksi</span>
+          <ClipboardCheck size={13} aria-hidden />
+          <span>Hitung Stok Fisik</span>
         </button>
       </div>
 
@@ -242,37 +281,98 @@ export function StockPanel({ open, onClose, warehouseId, prefillVariantId, onDon
           }}
         >
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>
-            {selected.productName} — <code className="mono">{selected.sku}</code> (stok sekarang: {selected.onHand})
+            {selected.productName} — <code className="mono">{selected.sku}</code> (stok sistem: {selected.onHand})
           </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-            <div style={{ width: 130 }}>
-              <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
-                Jumlah
-              </label>
-              <input
-                className="input"
-                inputMode="numeric"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                placeholder="0"
-              />
+          {mode === 'masuk' ? (
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <div style={{ width: 130 }}>
+                <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                  Jumlah barang masuk
+                </label>
+                <input
+                  className="input"
+                  inputMode="numeric"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  placeholder="0"
+                />
+              </div>
+              <div style={{ flex: '1 1 220px' }}>
+                <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                  Catatan (opsional)
+                </label>
+                <input
+                  className="input"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Contoh: produksi 23 Sep"
+                />
+              </div>
+              <button type="button" className="btn btn-primary" disabled={busy} onClick={submit}>
+                <Plus size={15} aria-hidden />
+                <span>{busy ? 'Menyimpan...' : 'Simpan Barang Masuk'}</span>
+              </button>
             </div>
-            <div style={{ flex: '1 1 220px' }}>
-              <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
-                Catatan (opsional)
-              </label>
-              <input
-                className="input"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder={mode === 'masuk' ? 'Contoh: produksi 23 Sep' : 'Contoh: rusak / salah hitung'}
-              />
-            </div>
-            <button type="button" className="btn btn-primary" disabled={busy} onClick={submit}>
-              {mode === 'masuk' ? <Plus size={15} aria-hidden /> : <Minus size={15} aria-hidden />}
-              <span>{busy ? 'Menyimpan...' : mode === 'masuk' ? 'Simpan Barang Masuk' : 'Simpan Pengurangan'}</span>
-            </button>
-          </div>
+          ) : (
+            <>
+              <p className="small muted" style={{ margin: '0 0 12px', lineHeight: 1.55 }}>
+                Hitung barang yang benar-benar ada di gudang, lalu masukkan angkanya. Sistem menghitung
+                sendiri selisihnya dan mencatat alasan koreksi.
+              </p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div style={{ width: 160 }}>
+                  <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                    Stok hasil hitung
+                  </label>
+                  <input
+                    className="input"
+                    inputMode="numeric"
+                    value={countedOnHand}
+                    onChange={(e) => setCountedOnHand(e.target.value)}
+                    placeholder={String(selected.onHand)}
+                  />
+                </div>
+                <div style={{ width: 220 }}>
+                  <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                    Alasan
+                  </label>
+                  <select className="input" value={reason} onChange={(e) => setReason(e.target.value)}>
+                    {ADJUSTMENT_REASONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ flex: '1 1 220px' }}>
+                  <label style={{ fontSize: 12.5, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                    Catatan
+                    {reason === 'OTHER' ? ' (wajib)' : ' (opsional)'}
+                  </label>
+                  <input
+                    className="input"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Contoh: 2 pcs hilang saat kirim"
+                  />
+                </div>
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={submit}>
+                  <ClipboardCheck size={15} aria-hidden />
+                  <span>{busy ? 'Menyimpan...' : 'Simpan Hasil Hitung'}</span>
+                </button>
+              </div>
+              {countedOnHand.trim() !== '' && Number(countedOnHand) !== selected.onHand && (
+                <p className="small" style={{ margin: '10px 0 0', color: 'var(--muted)' }}>
+                  Selisih:{' '}
+                  <strong>
+                    {Number(countedOnHand) > selected.onHand ? '+' : ''}
+                    {Number(countedOnHand) - selected.onHand}
+                  </strong>{' '}
+                  unit ({selected.onHand} → {countedOnHand})
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
 

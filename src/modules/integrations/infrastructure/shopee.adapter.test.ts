@@ -61,6 +61,39 @@ describe('ShopeeAdapter', () => {
       const sign = signShopee(partnerId, partnerKey, apiPath, timestamp);
       expect(sign).toBe(expectedSign);
     });
+
+    /**
+     * Regresi untuk `get_escrow_detail_batch` yang selalu gagal sehingga kartu
+     * "Potongan Shopee" dan "Estimasi dana masuk" tidak pernah muncul.
+     *
+     * Bukti error produksi (Shopee menolak kombinasi parameter yang salah):
+     *   - tanpa `shop_id`      → "There is no shop_id in query"
+     *   - tanpa `access_token` → "There is no access_token in query"
+     *   - signature app-level   → "error_sign"
+     * Artinya endpoint ini WAJIB scope `shop` (access_token + shop_id).
+     */
+    it('get_escrow_detail_batch wajib memakai scope shop (accessToken + shopId)', () => {
+      const apiPath = '/api/v2/payment/get_escrow_detail_batch';
+      const timestamp = 1710000000;
+      const shopScope = crypto
+        .createHmac('sha256', partnerKey)
+        .update(`${partnerId}${apiPath}${timestamp}${accessToken}${shopId}`)
+        .digest('hex');
+      const appScope = crypto
+        .createHmac('sha256', partnerKey)
+        .update(`${partnerId}${apiPath}${timestamp}`)
+        .digest('hex');
+
+      // Scope shop = kombinasi yang Shopee terima.
+      expect(signShopee(partnerId, partnerKey, apiPath, timestamp, accessToken, shopId, 'shop')).toBe(
+        shopScope,
+      );
+      // Scope app menghasilkan signature berbeda → memicu "error_sign".
+      expect(signShopee(partnerId, partnerKey, apiPath, timestamp, accessToken, shopId, 'app')).toBe(
+        appScope,
+      );
+      expect(appScope).not.toBe(shopScope);
+    });
   });
 
   describe('verifyWebhookSignature', () => {
@@ -324,45 +357,82 @@ describe('ShopeeAdapter', () => {
       partnerKey,
     };
 
-    it('calls /api/v2/logistics/ship_order with POST and retrieves tracking number', async () => {
+    it('menanyakan kanal ke Shopee dulu, lalu kirim ship_order sesuai kanal yang didukung', async () => {
       const fetchMock = vi
         .fn()
-        // 1st call: ship_order
-        .mockResolvedValueOnce({
-          status: 200,
-          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
-        })
-        // 2nd call: get_tracking_number
+        // 1st call: get_shipping_parameter → Shopee hanya mendukung dropoff ini.
         .mockResolvedValueOnce({
           status: 200,
           text: async () =>
             JSON.stringify({
               error: '',
               message: '',
-              response: { tracking_number: 'SPXID9988776655' },
+              response: {
+                shipping_document_list: [{ dropoff_branch_list: [{ branch_id: 'BR-77' }] }],
+              },
+            }),
+        })
+        // 2nd call: ship_order
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
+        })
+        // 3rd call: get_tracking_number
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              error: '',
+              message: '',
+              response: { tracking_number: 'SPX9988776655' },
             }),
         });
 
       global.fetch = fetchMock;
 
-      const result = await adapter.arrangeShipment(creds, {
-        orderSn: '240921ORDER001',
-      });
+      const result = await adapter.arrangeShipment(creds, { orderSn: '240921ORDER001' });
 
       expect(result.success).toBe(true);
-      expect(result.trackingNumber).toBe('SPXID9988776655');
+      expect(result.trackingNumber).toBe('SPX9988776655');
 
-      const [firstUrl, firstInit] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(firstUrl).toContain('/api/v2/logistics/ship_order');
-      expect(firstInit.method).toBe('POST');
-      const body = JSON.parse(firstInit.body as string);
+      // Langkah 1: wajib menanyakan kanal lebih dulu (anti ship_order_unsupport_dropoff).
+      const [paramUrl, paramInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(paramUrl).toContain('/api/v2/logistics/get_shipping_parameter');
+      expect(paramInit.method).toBe('POST');
+      expect(JSON.parse(paramInit.body as string).order_list[0].order_sn).toBe('240921ORDER001');
+
+      // Langkah 2: ship_order memakai kanal yang Shopee dukung, lengkap dengan branch_id.
+      const [shipUrl, shipInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+      expect(shipUrl).toContain('/api/v2/logistics/ship_order');
+      expect(shipInit.method).toBe('POST');
+      const body = JSON.parse(shipInit.body as string);
       expect(body.order_sn).toBe('240921ORDER001');
-      expect(body.dropoff).toBeDefined();
+      expect(body.dropoff).toEqual({ branch_id: 'BR-77' });
+      expect(body.pickup).toBeUndefined();
 
-      const [secondUrl, secondInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      expect(secondUrl).toContain('/api/v2/logistics/get_tracking_number');
-      expect(secondInit.method).toBe('GET');
-      expect(secondUrl).toContain('order_sn=240921ORDER001');
+      // Langkah 3: ambil nomor resi.
+      const [trackUrl, trackInit] = fetchMock.mock.calls[2] as [string, RequestInit];
+      expect(trackUrl).toContain('/api/v2/logistics/get_tracking_number');
+      expect(trackInit.method).toBe('GET');
+      expect(trackUrl).toContain('order_sn=240921ORDER001');
+    });
+
+    it('menolak dengan pesan jelas saat Shopee tidak mendukung kanal apa pun (tidak asal kirim dropoff)', async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        status: 200,
+        text: async () => JSON.stringify({ error: '', message: '', response: { shipping_document_list: [{}] } }),
+      });
+
+      global.fetch = fetchMock;
+
+      const result = await adapter.arrangeShipment(creds, { orderSn: '240921ORDER001' });
+
+      expect(result.success).toBe(false);
+      expect(result.trackingNumber).toBeNull();
+      expect(result.message).toContain('belum punya kanal pengiriman');
+      // ship_order TIDAK boleh dipanggil saat tidak ada kanal yang didukung.
+      const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
+      expect(calledUrls.some((u) => u.includes('ship_order'))).toBe(false);
     });
   });
 
@@ -393,7 +463,12 @@ describe('ShopeeAdapter', () => {
       const [calledUrl, calledInit] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(calledInit.method).toBe('GET');
       expect(calledUrl).toContain('/api/v2/product/get_item_list');
-      expect(calledUrl).toContain('item_status=NORMAL');
+      // Parameter list pada Shopee dikirim sebagai JSON, bukan berulang:
+      //   item_status=["NORMAL","UNLIST","BANNED"]
+      // Bentuk berulang (`item_status=NORMAL&item_status=...`) ditolak Shopee
+      // dengan "format should be string[]" (terbukti di error produksi untuk
+      // `order_sn_list`).
+      expect(calledUrl).toContain(`item_status=${encodeURIComponent('["NORMAL","UNLIST","BANNED"]')}`);
     });
 
     it('uses HTTP POST with body for updateStock', async () => {

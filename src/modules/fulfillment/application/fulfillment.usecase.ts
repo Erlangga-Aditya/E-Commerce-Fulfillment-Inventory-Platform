@@ -777,8 +777,20 @@ export async function handOverToCarrier(
   return { shipmentId: shipment.id };
 }
 
-/** Tahapan alur yang dilihat operator (bahasa sehari-hari). */
-export type StationStage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM';
+/**
+ * Tahapan alur yang dilihat operator (bahasa sehari-hari).
+ *
+ * `DIBATALKAN` bukan tahap kerja — pesanan ini tidak akan pernah dikemas.
+ * Tetap ditampilkan supaya operator bisa melihat pesanan mana yang batal,
+ * alih-alih pesanan itu hilang tanpa kabar.
+ */
+export type StationStage =
+  | 'BARU'
+  | 'MENUNGGU_STOK'
+  | 'SIAP_DIKEMAS'
+  | 'SIAP_KIRIM'
+  | 'DIKIRIM'
+  | 'DIBATALKAN';
 
 /**
  * Data untuk SATU halaman kerja: pesanan masuk → ambil resi → scan resi → serahkan ke kurir.
@@ -799,7 +811,10 @@ export async function getFulfillmentStation(
   });
 
   const orders = await prisma.order.findMany({
-    where: { tenantId, status: { in: ['NEW', 'CONFIRMED'] } },
+    // `CANCELLED` ikut diambil supaya operator bisa melihat pesanan yang batal.
+    // Pesanan batal tidak boleh hilang dari halaman — kalau hilang, operator
+    // tidak pernah tahu kalau ada pembeli yang membatalkan pesanan.
+    where: { tenantId, status: { in: ['NEW', 'CONFIRMED', 'CANCELLED'] } },
     include: {
       shop: { select: { name: true, provider: true } },
       items: {
@@ -854,15 +869,21 @@ export async function getFulfillmentStation(
       };
     });
 
-    const stage: StationStage = !fo
-      ? 'BARU'
-      : fo.status === 'WAITING_STOCK'
-        ? 'MENUNGGU_STOK'
-        : fo.status === 'PACKED' || fo.status === 'READY_TO_SHIP'
-          ? 'SIAP_KIRIM'
-          : fo.status === 'HANDED_OVER'
-            ? 'DIKIRIM'
-            : 'SIAP_DIKEMAS';
+    // Pesanan batal tidak punya tahap kerja: tidak akan pernah dikemas, dan
+    // tombol aksi (scan, ambil resi, serahkan) harus dimatikan.
+    const stage: StationStage = o.status === 'CANCELLED'
+      ? 'DIBATALKAN'
+      : !fo
+        ? 'BARU'
+        : fo.status === 'WAITING_STOCK'
+          ? 'MENUNGGU_STOK'
+          : fo.status === 'PACKED' || fo.status === 'READY_TO_SHIP'
+            ? 'SIAP_KIRIM'
+            : fo.status === 'HANDED_OVER'
+              ? 'DIKIRIM'
+              : 'SIAP_DIKEMAS';
+
+    const dibatalkan = o.status === 'CANCELLED';
 
     return {
       orderId: o.id,
@@ -879,9 +900,15 @@ export async function getFulfillmentStation(
       fulfillmentStatus: fo?.status ?? null,
       awb: shipment?.awb ?? null,
       carrier: shipment?.carrier ?? null,
-      canArrangeShipment: !shipment?.awb,
+      isCancelled: dibatalkan,
+      canCancel: false,
+      // Pesanan batal tidak boleh offer aksi apa pun: tidak bisa scan, tidak
+      // bisa minta resi baru. Kalau tidak dijaga, operator bisa memicu
+      // perubahan stok untuk pesanan yang sudah dibatalkan pembeli.
+      canArrangeShipment: !dibatalkan && !shipment?.awb,
       /** Barang hanya boleh dinyatakan siap kirim setelah nomor resi terbit. */
-      canPack: Boolean(shipment?.awb),
+      canPack: !dibatalkan && Boolean(shipment?.awb),
+      canHandOver: !dibatalkan && fo?.status === 'READY_TO_SHIP',
       stage,
       items,
       totalUnits: items.reduce((sum, i) => sum + i.quantity, 0),
@@ -898,6 +925,7 @@ export async function getFulfillmentStation(
       siapDikemas: unified.filter((u) => u.stage === 'SIAP_DIKEMAS').length,
       siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
       dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
+      dibatalkan: unified.filter((u) => u.stage === 'DIBATALKAN').length,
     },
     orders: unified,
     generatedAt: new Date().toISOString(),

@@ -11,6 +11,7 @@ import { logger } from '@/shared/observability/logger';
 import type { ShopCredentials, ArrangeShipmentInput } from '../domain/marketplace.adapter';
 import { broadcastSystemEvent } from '@/lib/sse';
 import { getShopeeAppConfig } from './appConfig.service';
+import { computePlatformFee, toAmount } from '../domain/escrow-fee-mapping';
 
 const shopee = new ShopeeAdapter();
 
@@ -919,7 +920,12 @@ export async function syncEscrowDetailsForShop(
       tenantId,
       shopId,
       status: { notIn: ['CANCELLED'] },
-      escrowAmount: null,
+      // Ambil juga order yang rinciannya sudah ada tapi perlu disegarkan.
+      // Filter lama hanya `escrowAmount: null`, sehingga order yang gagal di
+      // sinkronisasi pertama tidak pernah dicoba lagi. `platformFee = 0` juga
+      // ikut diambil: nol bisa berarti "belum pernah dihitung" pada run lama
+      // (mapping fee sebelumnya salah nama field), bukan "memang tanpa potongan".
+      OR: [{ escrowAmount: null }, { platformFee: null }, { platformFee: 0 }],
     },
     orderBy: { placedAt: 'desc' },
     take: limit,
@@ -927,7 +933,11 @@ export async function syncEscrowDetailsForShop(
   });
 
   if (orders.length === 0) {
-    return { requested: 0, updated: 0, message: 'Semua pesanan sudah punya rincian biaya.' };
+    return {
+      requested: 0,
+      updated: 0,
+      message: 'Semua pesanan sudah punya rincian dana dan potongan Shopee.',
+    };
   }
 
   const { conn, creds } = await loadConnection(tenantId, shopId);
@@ -939,22 +949,19 @@ export async function syncEscrowDetailsForShop(
     orders.map((o) => o.externalOrderId),
   );
 
-  const num = (value: unknown): number | null => {
-    if (value === null || value === undefined || value === '') return null;
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  };
+  // `toAmount` dipakai agar konversi angka konsisten dengan pemetaan biaya.
+  const num = toAmount;
 
   let updated = 0;
   for (const order of orders) {
     const income = escrows.get(order.externalOrderId);
     if (!income) continue;
 
-    const commission = num(income.commission_fee) ?? 0;
-    const service = num(income.service_fee) ?? 0;
-    const campaign = num(income.campaign_fee) ?? 0;
-    const tax = num(income.escrow_tax) ?? 0;
-    const totalPlatformFee = commission + service + campaign + tax;
+    // "Potongan Shopee" memakai daftar field biaya resmi Shopee. Nama fieldnya
+    // bukan `commission_fee` saja — pada toko ini biaya sebenarnya ada di
+    // `pay_per_sale`, sehingga asumsi lama selalu menghasilkan null.
+    // Lihat `domain/escrow-fee-mapping.ts`.
+    const platformFee = computePlatformFee(income);
 
     await prisma.order.update({
       where: { id: order.id },
@@ -965,7 +972,9 @@ export async function syncEscrowDetailsForShop(
         buyerShippingFee: num(income.buyer_paid_shipping_fee) ?? num(income.actual_shipping_fee),
         shippingFeeDiscount:
           num(income.shipping_fee_discount_from_3pl) ?? num(income.shopee_shipping_rebate),
-        platformFee: totalPlatformFee > 0 ? totalPlatformFee : null,
+        // `null` = Shopee belum mengirim rincian. `0` = memang tanpa potongan.
+        // Keduanya sengaja dibedakan supaya UI tidak menampilkan "Rp0" palsu.
+        platformFee,
         escrowAmount: num(income.escrow_amount_after_adjustment) ?? num(income.escrow_amount),
         incomeJson: income as Prisma.InputJsonValue,
       },

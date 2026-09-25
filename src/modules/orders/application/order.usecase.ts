@@ -14,6 +14,7 @@ import {
   InvalidStateTransitionError,
 } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
+import { releaseReservationsForOrder } from '@/modules/inventory/application/inventory.usecase';
 import { logger } from '@/shared/observability/logger';
 
 // ────────────────────────────────────────────────────────────
@@ -174,6 +175,22 @@ export async function importOrder(
         }
       });
     }
+
+    // Pesanan dibatalkan → lepas reservasi stoknya. Tanpa ini, barang pesanan
+    // yang batal tetap terkunci `reserved`: barang ada di gudang tapi sistem
+    // bilang habis, sehingga pesanan lain ikut terpakos.
+    //
+    // Idempoten: hanya reservasi `ACTIVE` yang dilepas, jadi aman saat Shopee
+    // mengirim status `CANCELLED` berulang kali.
+    if (incoming === 'CANCELLED' && existing.status !== 'CANCELLED') {
+      await releaseReservationsForOrder(
+        existing.tenantId,
+        existing.id,
+        null,
+        'Pesanan dibatalkan di Shopee',
+      );
+    }
+
     return { orderId: existing.id, created: false };
   }
 
@@ -526,6 +543,27 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
     carrier: mainShipment?.carrier ?? null,
     shipmentStatus: mainShipment?.status ?? null,
     canPrintOfficialLabel: Boolean(order.shipments?.[0]?.awb?.trim()),
+    // Rincian uang WAJIB ikut dikembalikan. Halaman detail pesanan dan Laporan
+    // Keuangan menampilkan "Estimasi dana masuk" serta "Potongan Shopee"; kalau
+    // field ini tidak dikirim, UI selalu menampilkan "—" walau nilainya sudah
+    // ada di database.
+    //
+    // Field-nya sengaja dikembalikan RATA ATAS (bukan nested di `money`) supaya
+    // kontrak frontend tidak berubah dan tidak ada dua bentuk data untuk
+    // hal yang sama.
+    totalAmount: order.totalAmount,
+    itemSubtotal: order.itemSubtotal,
+    sellerDiscount: order.sellerDiscount,
+    shopeeDiscount: order.shopeeDiscount,
+    buyerShippingFee: order.buyerShippingFee,
+    shippingFeeDiscount: order.shippingFeeDiscount,
+    platformFee: order.platformFee,
+    escrowAmount: order.escrowAmount,
+    paymentMethod: order.paymentMethod,
+    isCod: order.isCod,
+    paidAt: order.paidAt,
+    packageNumber: order.packageNumber,
+    buyerNote: order.buyerNote,
     priority: {
       score: order.priorityScore,
       level: order.priorityLevel,

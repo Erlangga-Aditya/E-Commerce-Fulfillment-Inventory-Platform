@@ -1,4 +1,16 @@
-export type OperatorStage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM';
+/**
+ * Tahap yang dilihat operator.
+ *
+ * `DIBATALKAN` sengaja ada di sini: pesanan batal bukan tahap kerja, tapi
+ * operator tetap harus bisa melihatnya (dan tidak boleh offer aksi apa pun).
+ */
+export type OperatorStage =
+  | 'BARU'
+  | 'MENUNGGU_STOK'
+  | 'SIAP_DIKEMAS'
+  | 'SIAP_KIRIM'
+  | 'DIKIRIM'
+  | 'DIBATALKAN';
 
 export type NextOperatorAction =
   | 'ARRANGE_SHIPMENT'
@@ -26,6 +38,13 @@ export interface OperatorWorkflow {
  * menjadi penjaga; helper ini hanya mencegah tombol yang salah tampil.
  */
 export function deriveOperatorWorkflow(input: OperatorWorkflowInput): OperatorWorkflow {
+  // Pesanan batal: tidak ada aksi sama sekali. Tanpa guard ini, UI bisa
+  // menampilkan tombol scan/serahkan untuk pesanan yang tidak akan pernah
+  // dikirim — dan operator bisa memicu perubahan stok untuk pesanan batal.
+  if (input.stage === 'DIBATALKAN') {
+    return { stage: input.stage, nextAction: 'NONE', canScan: false, canHandover: false };
+  }
+
   if (input.stage === 'DIKIRIM') {
     return { stage: input.stage, nextAction: 'NONE', canScan: false, canHandover: false };
   }
