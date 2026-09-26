@@ -1054,8 +1054,23 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         cfg,
         '/api/v2/logistics/get_shipping_parameter',
         {
-          method: 'POST',
-          body: { order_list: [{ order_sn: input.orderSn, ...(input.packageNumber ? { package_number: input.packageNumber } : {}) }] },
+          // WAJIB GET + query param, bukan POST + body.
+          // Dikonfirmasi langsung di Shopee API Test Tool
+          // (Partner 1245182 -> Logistics -> v2.logistics.get_shipping_parameter):
+          //   "Http Method: GET" dengan Request Parameters `order_sn` dan
+          //   `package_number` (keduanya bertanda wajib `*`).
+          //
+          // Bentuk POST + body `{ order_list: [...] }` dijawab sandbox
+          // dengan `HTTP 404 page not found`, bukan error Shopee yang jelas.
+          // Karena itu aplikasi diam-diam jatuh ke `dropoff: {}` dan gagal dengan
+          // `ship_order_unsupport_dropoff`.
+          method: 'GET',
+          params: {
+            order_sn: input.orderSn,
+            // Tanpa `package_number`, Shopee menjawab
+            // `logistics.package_not_exist` karena paketnya tidak bisa ditemukan.
+            ...(input.packageNumber ? { package_number: input.packageNumber } : {}),
+          },
         },
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );

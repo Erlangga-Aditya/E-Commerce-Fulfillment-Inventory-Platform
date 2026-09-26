@@ -1036,6 +1036,12 @@ export async function arrangeShipmentForOrder(
 
     const result = await shopee.arrangeShipment(credentials, {
       orderSn: order.externalOrderId,
+      // `package_number` WAJIB diteruskan. Tanpa itu, `get_shipping_parameter`
+      // dijawab `logistics.package_not_exist`, dan kalau diteruskan angka yang
+      // salah, Shopee mengembalikan 0 channel sehingga aplikasi pernah jatuh ke
+      // `dropoff: {}` dan gagal dengan `ship_order_unsupport_dropoff`.
+      // Sumbernya: `package_number` dari Shopee yang tersimpan saat order diimpor.
+      ...(order.packageNumber ? { packageNumber: order.packageNumber } : {}),
       ...input,
     });
     success = result.success;

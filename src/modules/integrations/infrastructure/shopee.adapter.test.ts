@@ -357,6 +357,45 @@ describe('ShopeeAdapter', () => {
       partnerKey,
     };
 
+    /**
+     * Regresi untuk `ship_order_unsupport_dropoff`.
+     *
+     * Bukti produksi (Shopee API Test Tool, Partner 1245182 → Logistics):
+     *   `v2.logistics.get_shipping_parameter`
+     *     - Http Method: **GET**
+     *     - Request Parameters wajib: `order_sn`, `package_number`
+     *
+     * Versi lama memakai POST + body `{ order_list: [...] }` → sandbox menjawab
+     * `HTTP 404 page not found`; karena 0 channel terbaca, aplikasi jatuh ke
+     * `dropoff: {}` dan gagal dengan `logistics.ship_order_unsupport_dropoff`.
+     */
+    it('memakai GET + order_sn + package_number untuk get_shipping_parameter', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
+        })
+        .mockResolvedValue({
+          status: 200,
+          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
+        });
+      global.fetch = fetchMock;
+
+      await adapter
+        .arrangeShipment(creds, {
+          orderSn: '2609251DP1HPAW',
+          packageNumber: 'OFG244049059201461',
+        })
+        .catch(() => undefined);
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toContain('/api/v2/logistics/get_shipping_parameter');
+      expect(init.method).toBe('GET');
+      expect(url).toContain('order_sn=2609251DP1HPAW');
+      expect(url).toContain('package_number=OFG244049059201461');
+    });
+
     it('menanyakan kanal ke Shopee dulu, lalu kirim ship_order sesuai kanal yang didukung', async () => {
       const fetchMock = vi
         .fn()
@@ -396,10 +435,11 @@ describe('ShopeeAdapter', () => {
       expect(result.trackingNumber).toBe('SPX9988776655');
 
       // Langkah 1: wajib menanyakan kanal lebih dulu (anti ship_order_unsupport_dropoff).
+      // Kontrak resmi: GET + query param, bukan POST + body.
       const [paramUrl, paramInit] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(paramUrl).toContain('/api/v2/logistics/get_shipping_parameter');
-      expect(paramInit.method).toBe('POST');
-      expect(JSON.parse(paramInit.body as string).order_list[0].order_sn).toBe('240921ORDER001');
+      expect(paramInit.method).toBe('GET');
+      expect(paramUrl).toContain('order_sn=240921ORDER001');
 
       // Langkah 2: ship_order memakai kanal yang Shopee dukung, lengkap dengan branch_id.
       const [shipUrl, shipInit] = fetchMock.mock.calls[1] as [string, RequestInit];
