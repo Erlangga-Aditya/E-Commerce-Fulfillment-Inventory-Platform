@@ -1128,9 +1128,20 @@ export async function generateShippingLabel(
  const fresh = await ensureFreshToken(conn.id, creds);
  const credentials = buildShopCredentials(fresh);
 
+ // PAKET WAJIB diteruskan. Bukti produksi 2026-09-26 (Shopee sandbox):
+ // `get_shipping_document_parameter` TIDAK pernah mengembalikan
+ // `package_number` pada responsnya, jadi nilai ini tidak bisa diambil dari
+ // Shopee saat runtime - harus dari pesanan yang sudah tersimpan.
+ //
+ // Tanpa package_number, `get_shipping_document_result` menjawab dengan
+ // `result_list` KOSONG (bukan error), sehingga aplikasi menganggap label
+ // "belum ada di Shopee" padahal paketnya sebenarnya sudah READY.
+ // Dengan package_number, status langsung READY dan PDF berhasil diunduh.
+ const resolvedPackageNumber = (packageNumber ?? order.packageNumber ?? '').trim() || null;
+
  const { label, documentType } = await shopee.fetchOfficialShippingLabel(credentials, {
   orderSn: order.externalOrderId,
-  packageNumber: packageNumber ?? null,
+  packageNumber: resolvedPackageNumber,
   trackingNumber,
  });
 
