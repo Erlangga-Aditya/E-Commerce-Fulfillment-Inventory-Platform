@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Search,
   Truck,
@@ -10,12 +10,11 @@ import {
   ChevronUp,
   Copy,
   Check,
-  Plus,
   Clock,
   
   } from 'lucide-react';
 import { api, formatDate, openOfficialLabel } from '@/lib/api';
-import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert, Modal } from '@/components/ui';
+import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState, Alert } from '@/components/ui';
 
 interface TrackingEvent {
   id: string;
@@ -57,6 +56,11 @@ export default function PengirimanPage() {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  // Paginasi: server sudah mengembalikan `pagination`, jadi UI tidak pernah
+  // menarik seluruh riwayat pengiriman sekaligus.
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
@@ -66,47 +70,43 @@ export default function PengirimanPage() {
   const [detailData, setDetailData] = useState<Record<string, ShipmentDetail>>({});
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Manual Event modal
-  const [modal, setModal] = useState<Shipment | null>(null);
-  const [ev, setEv] = useState({ status: 'PICKED_UP', carrierStatus: '', description: '' });
-  const [submitting, setSubmitting] = useState(false);
-
   // Label printing state
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
 
   // Copied AWB indicator
   const [copiedAwb, setCopiedAwb] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    api<{ items: Shipment[] }>('/api/v1/shipments')
-      .then((d) => setShipments(d.items ?? []))
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false));
-  }, []);
+  const load = useCallback(
+    (pageNo: number) => {
+      const q = new URLSearchParams({ page: String(pageNo), pageSize: String(PAGE_SIZE) });
+      if (statusFilter !== 'ALL') q.set('status', statusFilter);
+      if (search.trim()) q.set('search', search.trim());
+      return api<{ items: Shipment[]; pagination: { total: number } }>(`/api/v1/shipments?${q}`)
+        .then((d) => {
+          setShipments(d.items ?? []);
+          setTotal(d.pagination?.total ?? 0);
+        })
+        .catch((e) => setError((e as Error).message))
+        .finally(() => setLoading(false));
+    },
+    [statusFilter, search],
+  );
 
-  useEffect(load, [load]);
+  useEffect(() => {
+    void load(page);
+  }, [load, page]);
 
   // Realtime auto-update whenever background auto-sync completes
   useEffect(() => {
-    const handleSync = () => load();
+    const handleSync = () => void load(page);
     window.addEventListener('shopee:synced', handleSync);
     return () => window.removeEventListener('shopee:synced', handleSync);
-  }, [load]);
+  }, [load, page]);
 
-  const filteredShipments = useMemo(() => {
-    return shipments.filter((s) => {
-      if (statusFilter !== 'ALL' && s.status !== statusFilter) return false;
-      if (!search.trim()) return true;
-      const q = search.toLowerCase();
-      return (
-        (s.awb && s.awb.toLowerCase().includes(q)) ||
-        s.externalOrderId.toLowerCase().includes(q) ||
-        (s.buyerName && s.buyerName.toLowerCase().includes(q)) ||
-        (s.carrier && s.carrier.toLowerCase().includes(q)) ||
-        (s.shopName && s.shopName.toLowerCase().includes(q))
-      );
-    });
-  }, [shipments, search, statusFilter]);
+  // Filter & pencarian dijalankan di server (lihat `load`), jadi daftar di
+  // layar ini sudah pasti hanya berisi hasil yang cocok. Tidak ada lagi
+  // penyaringan dua kali yang bisa membuat tampilan beda dengan data.
+  const filteredShipments = shipments;
 
   // Expand / collapse shipment row and load full event timeline
   async function toggleExpand(shipment: Shipment) {
@@ -159,28 +159,24 @@ export default function PengirimanPage() {
     }
   }
 
-  async function addEvent(e: React.FormEvent) {
-    e.preventDefault();
-    if (!modal) return;
-    setNotice(null);
-    setSubmitting(true);
-    try {
-      await api(`/api/v1/shipments/${modal.id}/events`, { method: 'POST', body: ev });
-      setNotice({ tone: 'success', text: 'Event pelacakan logistik berhasil ditambahkan.' });
-      setModal(null);
-      // Invalidate detail cache for this shipment
-      setDetailData((prev) => {
-        const copy = { ...prev };
-        delete copy[modal.id];
-        return copy;
-      });
-      load();
-    } catch (err) {
-      setNotice({ tone: 'danger', text: (err as Error).message });
-    } finally {
-      setSubmitting(false);
-    }
+  /**
+   * Ganti filter/pencarian selalu kembali ke halaman 1. Tanpa ini, operator bisa
+   * terjebak di halaman 5 yang sudah kosong setelah filter berubah.
+   *
+   * Dilakukan di event handler, bukan effect: setState di dalam effect
+   * menyebabkan render berantai.
+   */
+  function applyFilter(value: string) {
+    setPage(1);
+    setStatusFilter(value);
   }
+
+  function applySearch(value: string) {
+    setPage(1);
+    setSearch(value);
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div>
@@ -194,7 +190,7 @@ export default function PengirimanPage() {
             onClick={() => {
               setLoading(true);
               setError('');
-              load();
+              void load(page);
             }}
           >
             <RefreshCw size={14} aria-hidden />
@@ -219,7 +215,7 @@ export default function PengirimanPage() {
               className="search-input"
               placeholder="Cari No. Resi (AWB), No. Pesanan, Pembeli, Kurir..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => applySearch(e.target.value)}
             />
           </div>
         </div>
@@ -232,7 +228,7 @@ export default function PengirimanPage() {
               type="button"
               className={`btn btn-sm ${statusFilter === f.value ? 'btn-primary' : 'btn-secondary'}`}
               style={{ borderRadius: 20, fontSize: 12, padding: '4px 12px' }}
-              onClick={() => setStatusFilter(f.value)}
+              onClick={() => applyFilter(f.value)}
             >
               {f.label}
             </button>
@@ -248,7 +244,7 @@ export default function PengirimanPage() {
           onRetry={() => {
             setLoading(true);
             setError('');
-            load();
+            void load(page);
           }}
         />
       ) : filteredShipments.length === 0 ? (
@@ -362,18 +358,6 @@ export default function PengirimanPage() {
                             <span>{isPrinting ? 'Menyiapkan...' : 'Cetak Label'}</span>
                           </button>
 
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => {
-                              setModal(s);
-                              setEv({ status: 'PICKED_UP', carrierStatus: '', description: '' });
-                            }}
-                            title="Tambah status pelacakan secara manual"
-                          >
-                            <Plus size={13} aria-hidden />
-                            <span>Event</span>
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -468,61 +452,29 @@ export default function PengirimanPage() {
       )}
 
 
-      {/* Modal Tambah Event Manual */}
-      <Modal
-        isOpen={Boolean(modal)}
-        onClose={() => setModal(null)}
-        title={`Tambah Event Pelacakan — ${modal?.awb ?? modal?.externalOrderId}`}
-      >
-        <form onSubmit={addEvent}>
-          <div className="field">
-            <label>Status Sistem Internal</label>
-            <select
-              className="input"
-              value={ev.status}
-              onChange={(e) => setEv({ ...ev, status: e.target.value })}
-            >
-              <option value="PICKED_UP">PICKED_UP (Diserahkan ke Kurir)</option>
-              <option value="IN_TRANSIT">IN_TRANSIT (Dalam Perjalanan)</option>
-              <option value="DELIVERED">DELIVERED (Terkirim ke Pembeli)</option>
-              <option value="FAILED">FAILED (Gagal Kirim)</option>
-              <option value="RETURNED">RETURNED (Retur ke Penjual)</option>
-            </select>
-          </div>
-
-          <div className="field">
-            <label>Status dari Kurir / Ekspedisi</label>
-            <input
-              type="text"
-              className="input"
-              value={ev.carrierStatus}
-              onChange={(e) => setEv({ ...ev, carrierStatus: e.target.value })}
-              required
-              placeholder="Contoh: ON_PROCESS / WITH_COURIER / DELIVERED"
-            />
-          </div>
-
-          <div className="field">
-            <label>Catatan / Keterangan Event (Opsional)</label>
-            <input
-              type="text"
-              className="input"
-              value={ev.description}
-              onChange={(e) => setEv({ ...ev, description: e.target.value })}
-              placeholder="Contoh: Paket sedang dibawa kurir menuju alamat penerima"
-            />
-          </div>
-
-          <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
-            <button type="submit" className="btn btn-primary grow" disabled={submitting || !ev.carrierStatus}>
-              {submitting ? 'Menyimpan...' : 'Simpan Event'}
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={() => setModal(null)}>
-              Batal
-            </button>
-          </div>
-        </form>
-      </Modal>
+      {total > PAGE_SIZE && (
+        <div className="pagination" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={page <= 1 || loading}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            <span>Sebelumnya</span>
+          </button>
+          <span className="small muted">
+            Halaman {page} dari {totalPages} ({total} kiriman)
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={page >= totalPages || loading}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            <span>Berikutnya</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

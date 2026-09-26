@@ -254,7 +254,22 @@ export function AutoSyncStatus() {
         ) : (
           <Radio size={12} aria-hidden />
         )}
-        <span>{syncing ? 'Menyinkronkan...' : realtime ? `Tersambung (langsung) - ${timeAgoLabel()}` : `Tersambung - ${timeAgoLabel()}`}</span>
+        {/*
+         * Teks penuh "Tersambung (langsung) - baru saja" terlalu lebar untuk
+         * layar sempit dan membuat topbar menabrak sidebar. Layar lebar tetap
+         * mendapat teks lengkap; layar kecil hanya ikon + waktu, sementara
+         * `title` di atas tetap menjelaskan statusnya saat hover/touch.
+         */}
+        <span className="auto-sync-label-full">
+          {syncing
+            ? 'Menyinkronkan...'
+            : realtime
+              ? `Tersambung (langsung) - ${timeAgoLabel()}`
+              : `Tersambung - ${timeAgoLabel()}`}
+        </span>
+        <span className="auto-sync-label-short" aria-hidden>
+          {syncing ? 'Sinkron' : timeAgoLabel()}
+        </span>
         <ChevronDown size={11} style={{ opacity: 0.7 }} aria-hidden />
       </button>
 
@@ -265,6 +280,7 @@ export function AutoSyncStatus() {
             top: 'calc(100% + 8px)',
             right: 0,
             width: 340,
+            maxWidth: 'calc(100vw - 32px)',
             background: 'var(--surface-container, #ffffff)',
             border: '1px solid var(--outline-variant, #e5e7eb)',
             borderRadius: 12,

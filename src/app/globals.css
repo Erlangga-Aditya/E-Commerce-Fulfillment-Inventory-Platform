@@ -197,11 +197,14 @@ a:hover {
   overflow: hidden;
   border-radius: 12px;
   background: #0f172a;
-  visibility: hidden;
+  /* Tanpa `display: none`, elemen ini tetap mengambil ruang layout walau
+     kameranya mati — itulah hasilnya gap putih panjang di bawah form.
+     `visibility: hidden` hanya menyembunyikan gambar, bukan tempatnya. */
+  display: none;
 }
 
 .scanner-camera-shell.is-ready {
-  visibility: visible;
+  display: block;
 }
 
 .scanner-video {
@@ -497,6 +500,21 @@ a:hover {
   flex-shrink: 0;
 }
 
+/* Label badge sinkronisasi: penuh di layar lebar, ringkas di layar kecil. */
+.auto-sync-label-short {
+  display: none;
+}
+
+@media (max-width: 639px) {
+  .auto-sync-label-full {
+    display: none;
+  }
+
+  .auto-sync-label-short {
+    display: inline;
+  }
+}
+
 .hamburger-btn {
   display: none;
   background: transparent;
@@ -593,6 +611,40 @@ a:hover {
 
   .topbar-subtitle {
     display: none;
+  }
+
+  /*
+   * Badge "Tersambung (langsung)" punya teks panjang + `white-space: nowrap`.
+   * Tanpa aturan ini, `.topbar-right` (yang `flex-shrink: 0`) memaksa topbar
+   * melebar melebihi viewport, sehingga badge menabrak sidebar di layar sempit.
+   * Di mobile, cukup ikon + label pendek.
+   */
+  .topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .topbar-left {
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .topbar-right {
+    gap: 6px;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  /* Judul halaman di topbar boleh dipotong, bukan mendorong badge. */
+  .topbar-right .topbar-subtitle,
+  .topbar-left .topbar-subtitle {
+    display: none;
+  }
+
+  /* Panel status yang memuat teks panjang tidak boleh melebihi viewport. */
+  .topbar-right .status-dropdown,
+  .topbar-right [role='menu'] {
+    max-width: min(320px, calc(100vw - 32px));
   }
 }
 

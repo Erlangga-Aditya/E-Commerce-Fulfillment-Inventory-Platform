@@ -4,12 +4,9 @@ import type { ShipmentStatus } from '@prisma/client';
 import {
   NotFoundError,
   ValidationError,
-  InvalidStateTransitionError,
   BusinessRuleViolationError,
 } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
-import { transitionOrderStatus } from '@/modules/orders/application/order.usecase';
-import { isValidShipmentTransition } from '../domain/shipping.entity';
 
 export const CreateShipmentSchema = z.object({
   orderId: z.string().min(1),
@@ -17,12 +14,7 @@ export const CreateShipmentSchema = z.object({
   awb: z.string().max(100).optional(),
 });
 
-export const AddShipmentEventSchema = z.object({
-  status: z.enum(['PENDING', 'READY_TO_SHIP', 'PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED', 'RETURNED']),
-  carrierStatus: z.string().min(1).max(100),
-  description: z.string().max(500).optional(),
-  occurredAt: z.coerce.date().optional(),
-});
+
 
 export async function createShipment(
   tenantId: string,
@@ -52,50 +44,6 @@ export async function createShipment(
 
   await auditLog({ tenantId, actorId, action: 'shipment_create', entityType: 'Shipment', entityId: shipment.id, metadata: { orderId: parsed.data.orderId, carrier: parsed.data.carrier, awb: parsed.data.awb } });
   return shipment;
-}
-
-export async function addShipmentEvent(
-  tenantId: string,
-  shipmentId: string,
-  input: z.infer<typeof AddShipmentEventSchema>,
-  actorId: string,
-) {
-  const parsed = AddShipmentEventSchema.safeParse(input);
-  if (!parsed.success) throw new ValidationError('Data event pengiriman tidak valid.', { fields: parsed.error.flatten().fieldErrors });
-
-  const shipment = await prisma.shipment.findFirst({
-    where: { id: shipmentId, order: { tenantId } },
-    include: { order: true },
-  });
-  if (!shipment) throw new NotFoundError('Pengiriman', shipmentId);
-
-  const nextStatus = parsed.data.status as ShipmentStatus;
-  if (nextStatus !== shipment.status && !isValidShipmentTransition(shipment.status, nextStatus)) {
-    throw new InvalidStateTransitionError('Shipment', shipment.status, nextStatus);
-  }
-
-  const occurredAt = parsed.data.occurredAt || new Date();
-
-  await prisma.$transaction(async (tx) => {
-    await tx.shipment.update({
-      where: { id: shipmentId },
-      data: {
-        status: nextStatus,
-        ...(nextStatus === 'PICKED_UP' ? { shippedAt: occurredAt } : {}),
-        ...(nextStatus === 'DELIVERED' ? { deliveredAt: occurredAt } : {}),
-      },
-    });
-    await tx.shipmentEvent.create({
-      data: { shipmentId, status: parsed.data.carrierStatus, description: parsed.data.description, occurredAt },
-    });
-  });
-
-  // Delivered → order COMPLETED (only from CONFIRMED).
-  if (nextStatus === 'DELIVERED' && shipment.order.status === 'CONFIRMED') {
-    await transitionOrderStatus(tenantId, shipment.orderId, 'COMPLETED', actorId, 'Paket telah diterima pembeli');
-  }
-
-  await auditLog({ tenantId, actorId, action: 'shipment_event_add', entityType: 'Shipment', entityId: shipmentId, metadata: { status: nextStatus, carrierStatus: parsed.data.carrierStatus } });
 }
 
 export async function listShipments(

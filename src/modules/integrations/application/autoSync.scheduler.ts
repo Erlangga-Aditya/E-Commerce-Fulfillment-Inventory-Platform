@@ -1,6 +1,6 @@
 import { prisma } from '@/shared/infrastructure/prisma';
 import { logger } from '@/shared/observability/logger';
-import { triggerOrderSync } from './sync.service';
+import { triggerOrderSync, triggerTrackingSync } from './sync.service';
 
 /**
  * Sinkronisasi otomatis di sisi SERVER.
@@ -134,6 +134,23 @@ export async function runAutoSyncTick(): Promise<AutoSyncTickResult> {
         const message = (err as Error).message;
         if (!firstError) firstError = message;
         logger.warn(`Auto-sync gagal untuk toko ${target.shopName}: ${message}`, { shopId: target.shopId });
+      }
+
+      // Status pengiriman harus ikut terambil otomatis. Sebelumnya hanya
+      // pesanan yang di-sync, sehingga status "sedang OTW" dan "sudah
+      // diterima" tidak pernah berubah kecuali operator menekan tombol manual
+      // (yang sekarang sudah dihapus). Lacak Kiriman hanya menampilkan data
+      // Shopee — jadi tanpa sync tracking, halaman itu statis.
+      try {
+        await triggerTrackingSync(target.tenantId, target.shopId, target.actorId);
+      } catch (err) {
+        // Kegagalan tracking tidak boleh menggagalkan sync pesanan: pesanan
+        // tetap penting, status pengiriman akan dicoba lagi pada putar
+        // berikutnya.
+        const message = (err as Error).message;
+        logger.warn(`Auto-sync tracking gagal untuk toko ${target.shopName}: ${message}`, {
+          shopId: target.shopId,
+        });
       }
     }
   } catch (err) {
