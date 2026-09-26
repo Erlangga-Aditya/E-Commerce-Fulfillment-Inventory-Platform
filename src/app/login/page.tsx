@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { PackageCheck, LogIn } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -85,7 +84,7 @@ export default function LoginPage() {
         </div>
 
         <p className="muted" style={{ textAlign: 'center', marginTop: 16, fontSize: 13 }}>
-          Belum punya akun? <Link href="/register">Daftar sekarang</Link>
+          Belum bisa masuk? Hubungi pemilik toko atau support.
         </p>
       </div>
     </div>

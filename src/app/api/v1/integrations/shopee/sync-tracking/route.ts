@@ -3,6 +3,7 @@ import { triggerTrackingSync, listSyncRuns } from '@/modules/integrations/applic
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
+import { prisma } from '@/shared/infrastructure/prisma';
 
 /**
  * GET  /api/v1/integrations/shopee/sync-tracking — daftar sync run tracking
@@ -25,9 +26,31 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
-    const body = (await request.json()) as { shopId?: string };
-    if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
-    const result = await triggerTrackingSync(ctx.tenantId, body.shopId, ctx.userId);
+    // `request.json()` melempar SyntaxError untuk body kosong, dan itu akan
+    // berubah menjadi 500 INTERNAL_ERROR yang tidak menjelaskan apa pun ke
+    // operator. Body kosong kini menjadi 400 VALIDATION_ERROR yang jelas.
+    // daripada 500 INTERNAL_ERROR yang tidak menjelaskan apa pun ke operator.
+    const body = (await request.json().catch(() => ({}))) as { shopId?: string };
+    // Toko boleh dilewati: bila hanya ada satu toko terhubung (situasi umum
+    // seller individual), picking otomatisnya tidak perlu menebak.
+    let shopId = body.shopId;
+    if (!shopId) {
+      const shops = await prisma.shop.findMany({
+        where: { tenantId: ctx.tenantId },
+        select: { id: true },
+        take: 2,
+      });
+      if (shops.length === 1 && shops[0]) {
+        shopId = shops[0].id;
+      } else {
+        throw new ValidationError(
+          shops.length === 0
+            ? 'Belum ada toko Shopee yang terhubung.'
+            : 'Ada lebih dari satu toko. Pilih toko yang mau disinkronkan.',
+        );
+      }
+    }
+    const result = await triggerTrackingSync(ctx.tenantId, shopId, ctx.userId);
     return successResponse(
       { message: 'Sinkronisasi tracking selesai.', syncRun: result },
       { requestId },

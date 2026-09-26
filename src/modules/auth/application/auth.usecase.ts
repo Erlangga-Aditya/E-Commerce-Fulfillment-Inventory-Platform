@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
-import { hashPassword, verifyPassword } from '../infrastructure/password.service';
+import { verifyPassword } from '../infrastructure/password.service';
 import type { AuthContext } from '../domain/entities/auth.entity';
 import {
   ValidationError,
@@ -14,85 +14,18 @@ import { auditLog } from '@/modules/audit/application/auditLog.service';
 // Input schemas (Zod)
 // ────────────────────────────────────────────────────────────
 
-export const RegisterSchema = z.object({
-  name: z.string().min(2, 'Nama minimal 2 karakter.').max(100),
-  email: z.string().email('Format email tidak valid.').toLowerCase(),
-  password: z
-    .string()
-    .min(8, 'Password minimal 8 karakter.')
-    .regex(/[A-Z]/, 'Password harus mengandung huruf besar.')
-    .regex(/[0-9]/, 'Password harus mengandung angka.'),
-  tenantName: z.string().min(2, 'Nama toko minimal 2 karakter.').max(100),
-});
-
 export const LoginSchema = z.object({
   email: z.string().email('Format email tidak valid.').toLowerCase(),
   password: z.string().min(1, 'Password tidak boleh kosong.'),
   tenantId: z.string().optional(),
 });
 
-export type RegisterInput = z.infer<typeof RegisterSchema>;
 export type LoginInput = z.infer<typeof LoginSchema>;
-
-export interface RegisterResult {
-  context: AuthContext;
-  tenantName: string;
-  user: { id: string; name: string; email: string };
-}
 
 export interface LoginResult {
   context: AuthContext;
   tenantName: string;
   user: { id: string; name: string; email: string };
-}
-
-/**
- * Register a user + first tenant + default warehouse + default Shopee shop.
- * FR-AUTH-001, FR-TEN-001.
- */
-export async function registerUser(input: RegisterInput): Promise<RegisterResult> {
-  const parsed = RegisterSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new ValidationError('Data registrasi tidak valid.', { fields: parsed.error.flatten().fieldErrors });
-  }
-  const { name, email, password, tenantName } = parsed.data;
-
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) throw new ConflictError('Email sudah digunakan. Silakan gunakan email lain.');
-
-  const passwordHash = await hashPassword(password);
-  const slugBase = tenantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
-  const slug = slugBase || `tenant-${Date.now()}`;
-
-  const result = await prisma.$transaction(async (tx) => {
-    const existingSlug = await tx.tenant.findUnique({ where: { slug } });
-    const tenant = await tx.tenant.create({
-      data: { name: tenantName, slug: existingSlug ? `${slug}-${Date.now()}` : slug, status: 'ACTIVE' },
-    });
-    const user = await tx.user.create({
-      data: { name, email, passwordHash, status: 'ACTIVE' },
-    });
-    await tx.tenantMembership.create({
-      data: { tenantId: tenant.id, userId: user.id, role: 'OWNER' },
-    });
-    // Default warehouse + default Shopee shop so the workspace is usable immediately.
-    await tx.warehouse.create({ data: { tenantId: tenant.id, name: 'Gudang Utama', code: 'WH-01', status: 'ACTIVE' } });
-    await tx.shop.create({
-      data: { tenantId: tenant.id, provider: 'shopee', name: 'Shopee', status: 'ACTIVE' },
-    });
-    return { tenant, user };
-  });
-
-  await auditLog({
-    tenantId: result.tenant.id, actorId: result.user.id, action: 'user_registered',
-    entityType: 'User', entityId: result.user.id, metadata: { email, tenantId: result.tenant.id },
-  });
-
-  return {
-    context: { userId: result.user.id, email: result.user.email, tenantId: result.tenant.id, role: 'OWNER' },
-    tenantName: result.tenant.name,
-    user: { id: result.user.id, name: result.user.name, email: result.user.email },
-  };
 }
 
 /**

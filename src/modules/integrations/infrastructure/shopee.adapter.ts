@@ -1167,11 +1167,21 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       // ship_order, jadi beberapa percobaan dengan jeda singkat. Kalau tetap
       // kosong, kembalikan kegagalan apa adanya supaya operator tahu harus
       // mencoba lagi — JANGAN mengarang nomor resi.
+      // Shopee sandbox baru menerbitkan resi cukup lama setelah ship_order
+      // diterima. Diperiksa 2026-09-27: `get_tracking_number` dijawab
+      // `tracking_number: ""` pada detik pertama, lalu berisi 30 detik
+      // kemudian. Empat percobaan berjarak 700ms-2,1s (total ~4,2s) karena
+      // itu selalu kalah, sehingga operator melihat "resi belum terbit"
+      // padahal Shopee sudah menerbitkannya. Karena itu jeda diperpanjang.
+      //
+      // Total tunggu ~20 detik. Timeout warehouse di sisi server dipatok 60
+      // detik, jadi masih aman dan tidak menahan antrean.
+      const AWAIT_AWB_DELAYS_MS = [0, 1_000, 2_000, 3_000, 4_000, 5_000, 5_000];
       let trackingNumber: string | null = null;
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (const waitMs of AWAIT_AWB_DELAYS_MS) {
+        if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
         trackingNumber = await this.getTrackingNumber(creds, input.orderSn, input.packageNumber);
         if (trackingNumber) break;
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
       }
       if (!trackingNumber) {
         const msg =
