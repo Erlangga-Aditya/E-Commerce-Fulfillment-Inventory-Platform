@@ -16,6 +16,7 @@ Tambahkan INSTALL=1 untuk memaksa memasang ulang tanpa perubahan apa pun.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import sys
 import tarfile
