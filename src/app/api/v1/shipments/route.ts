@@ -1,13 +1,20 @@
 import { type NextRequest } from 'next/server';
 import { createShipment, listShipments, CreateShipmentSchema } from '@/modules/shipping/application/shipping.usecase';
 import { successResponse, created, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, parsePagination, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  parsePagination,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import type { ShipmentStatus } from '@prisma/client';
 
 export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.shipping');
     const { page, pageSize } = parsePagination(request);
     const result = await listShipments(ctx.tenantId, {
       search: getQueryParam(request, 'search'),
@@ -23,6 +30,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.shipping');
     const body: unknown = await request.json();
     const validated = CreateShipmentSchema.parse(body);
     const shipment = await createShipment(ctx.tenantId, validated, ctx.userId);

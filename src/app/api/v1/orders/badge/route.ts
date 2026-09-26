@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +23,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.orders');
     const where = {
       tenantId: ctx.tenantId,
       status: 'CONFIRMED' as const,

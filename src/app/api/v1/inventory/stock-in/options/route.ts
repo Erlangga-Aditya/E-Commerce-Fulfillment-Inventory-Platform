@@ -1,7 +1,12 @@
 import { type NextRequest } from 'next/server';
 import { listShopeeSourcedVariants } from '@/modules/inventory/application/inventory.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { prisma } from '@/shared/infrastructure/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +22,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.inventory');
     let warehouseId: string | null = getQueryParam(request, 'warehouseId') ?? null;
 
     if (!warehouseId) {

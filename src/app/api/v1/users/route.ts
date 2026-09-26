@@ -65,6 +65,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'team.manage');
     // `team.manage` tidak diberikan ke staff apa pun — daftar izin adalah
     // hak owner, bukan hak yang bisa diberikan ke orang lain.
     assertPermission(ctx, 'team.manage');
@@ -111,6 +112,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'team.manage');
     // Hanya pemilik yang boleh menambah pengguna — dan hanya dengan peran
     // yang tidak melebihi haknya sendiri.
     assertRole(ctx, UserRole.OWNER);

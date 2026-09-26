@@ -3,7 +3,11 @@ import {
   listInventoryBalances,
 } from '@/modules/inventory/application/inventory.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 // GET /api/v1/inventory?warehouseId=...&page=1&pageSize=50&search=...
 export async function GET(request: NextRequest) {
@@ -11,6 +15,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.inventory');
     const { searchParams } = new URL(request.url);
 
     const warehouseId = searchParams.get('warehouseId') ?? '';

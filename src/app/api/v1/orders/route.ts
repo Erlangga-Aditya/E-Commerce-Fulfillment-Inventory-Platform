@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { listOrders } from '@/modules/orders/application/order.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import type { OrderStatus } from '@/modules/orders/domain/order.entity';
 
 // GET /api/v1/orders?status=NEW&shopId=...&page=1&sortByPriority=true
@@ -10,6 +14,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.orders');
     const { searchParams } = new URL(request.url);
 
     const status = searchParams.get('status') as OrderStatus | null;

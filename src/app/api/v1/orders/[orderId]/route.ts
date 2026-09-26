@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { getOrderDetail } from '@/modules/orders/application/order.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 // GET /api/v1/orders/[orderId]
 export async function GET(
@@ -12,6 +16,7 @@ export async function GET(
 
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.orders');
     const { orderId } = await params;
 
     const order = await getOrderDetail(ctx.tenantId, orderId);

@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { getDashboardMetrics, getPriorityDistribution } from '@/modules/reporting/application/dashboard.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 // GET /api/v1/dashboard
 export async function GET(request: NextRequest) {
@@ -9,6 +13,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.dashboard');
 
     const [metrics, priorityDistribution] = await Promise.all([
       getDashboardMetrics(ctx.tenantId),
