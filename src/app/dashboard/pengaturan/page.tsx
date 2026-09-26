@@ -291,10 +291,10 @@ function UserManagementSection({ currentUserId }: { currentUserId: string }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
   const [showInvite, setShowInvite] = useState(false);
-  const [invite, setInvite] = useState({ name: '', email: '', password: '', role: 'STAFF' });
+  const [invite, setInvite] = useState({ name: '', email: '', password: '', role: 'OWNER' });
   const [saving, setSaving] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [editRole, setEditRole] = useState<string>('STAFF');
+  const [editRole, setEditRole] = useState<string>('OWNER');
   const [deleteConfirm, setDeleteConfirm] = useState<UserMember | null>(null);
   const [showPw, setShowPw] = useState(false);
 
@@ -361,10 +361,7 @@ function UserManagementSection({ currentUserId }: { currentUserId: string }) {
   }
 
   const roleBadgeClass: Record<string, string> = {
-    OWNER: 'badge-danger',
-    MANAGER: 'badge-primary',
-    FINANCE: 'badge-warning',
-    STAFF: 'badge-neutral',
+    OWNER: 'badge-primary',
   };
 
   return (
@@ -420,9 +417,6 @@ function UserManagementSection({ currentUserId }: { currentUserId: string }) {
                 <label>Hak Akses</label>
                 <select className="input" value={invite.role} onChange={(e) => setInvite({ ...invite, role: e.target.value })}>
                   <option value="OWNER">Owner — Pemilik, akses penuh</option>
-                  <option value="MANAGER">Manager — Kelola semua operasi</option>
-                  <option value="FINANCE">Finance — Akses laporan keuangan</option>
-                  <option value="STAFF">Staff — Operasional harian (default)</option>
                 </select>
               </div>
             </div>
@@ -466,9 +460,6 @@ function UserManagementSection({ currentUserId }: { currentUserId: string }) {
                         style={{ width: 'auto' }}
                       >
                         <option value="OWNER">OWNER</option>
-                        <option value="MANAGER">MANAGER</option>
-                        <option value="FINANCE">FINANCE</option>
-                        <option value="STAFF">STAFF</option>
                       </select>
                     ) : (
                       <span className={`badge ${roleBadgeClass[u.role] ?? 'badge-neutral'}`}>{u.role}</span>

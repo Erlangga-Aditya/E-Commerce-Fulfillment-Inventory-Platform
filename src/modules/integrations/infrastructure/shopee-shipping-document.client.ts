@@ -103,7 +103,17 @@ async function postJson(
     );
   }
   if (json.error) {
-    const msg = `Shopee API error [${json.error}] pada ${apiPath}: ${json.message ?? '(no message)'}`;
+    // `common.batch_api_all_failed` (dan beberapa error batch lain) SELALU
+    // menyertakan `result_list` berisi alasan sebenarnya per order. Tanpa
+    // membacanya, operator hanya melihat "All failed" tanpa tahu apa yang
+    // harus diperbaiki - itu sebabnya pesan label selalu tidak berguna.
+    //
+    // Bukti produksi: create_shipping_document menjawab
+    //   [common.batch_api_all_failed] All failed, please check result_list
+    // sementara alasan sebenarnya (mis. kanal tidak mendukung tipe label itu)
+    // ada di dalam result_list.
+    const detail = describeBatchFailure(json);
+    const msg = `Shopee API error [${json.error}] pada ${apiPath}: ${detail}`;
     logger.error(msg, { apiPath, request_id: json.request_id, error: json.error });
     throw new ExternalIntegrationError('shopee', msg, {
       providerCode: json.error,
@@ -112,6 +122,36 @@ async function postJson(
     });
   }
   return json;
+}
+
+/**
+ * Ambil alasan sebenarnya dari `result_list` pada respons error batch Shopee.
+ * Falls back ke pesan biasa kalau `result_list` tidak ada.
+ */
+function describeBatchFailure(json: RawShopeeResponse): string {
+  const fallback = json.message ?? '(no message)';
+  const response = json.response as Record<string, unknown> | undefined;
+  const list =
+    (Array.isArray(response?.result_list) && (response?.result_list as unknown[])) ||
+    (Array.isArray(response?.result) && (response?.result as unknown[])) ||
+    (Array.isArray((json as Record<string, unknown>).result_list) &&
+      ((json as Record<string, unknown>).result_list as unknown[])) ||
+    [];
+
+  const reasons = list
+    .map((row) => {
+      if (typeof row !== 'object' || row === null) return null;
+      const r = row as Record<string, unknown>;
+      const failMessage = typeof r.fail_message === 'string' ? r.fail_message : '';
+      const failError = typeof r.fail_error === 'string' ? r.fail_error : '';
+      if (!failMessage && !failError) return null;
+      const sn = typeof r.order_sn === 'string' ? r.order_sn : null;
+      return sn ? `${sn}: ${failMessage || failError}` : failMessage || failError;
+    })
+    .filter((v): v is string => Boolean(v));
+
+  if (reasons.length === 0) return fallback;
+  return `${fallback} - ${reasons.join('; ')}`;
 }
 
 /** Bangun `order_list` sesuai dokumen: package_number & tracking_number tidak boleh string kosong. */

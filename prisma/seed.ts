@@ -48,8 +48,8 @@ async function main() {
   await prisma.tenantMembership.createMany({
     data: [
       { tenantId: tenant.id, userId: owner.id, role: 'OWNER' },
-      { tenantId: tenant.id, userId: manager.id, role: 'MANAGER' },
-      { tenantId: tenant.id, userId: staff.id, role: 'STAFF' },
+      { tenantId: tenant.id, userId: manager.id, role: 'OWNER' },
+      { tenantId: tenant.id, userId: staff.id, role: 'OWNER' },
     ],
   });
 

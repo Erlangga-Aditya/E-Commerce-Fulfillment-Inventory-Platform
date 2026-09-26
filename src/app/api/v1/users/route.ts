@@ -12,7 +12,7 @@ const InviteUserSchema = z.object({
   name: z.string().min(2).max(100),
   email: z.string().email(),
   password: z.string().min(8, 'Password minimal 8 karakter'),
-  role: z.nativeEnum(UserRole).default(UserRole.STAFF),
+  role: z.nativeEnum(UserRole).default(UserRole.OWNER),
 });
 
 /**
@@ -21,7 +21,7 @@ const InviteUserSchema = z.object({
  *
  * Keamanan: manajemen dan perubahan hak akses adalah urusan pemilik. Hanya OWNER
  * yang boleh melihat daftar anggota, menambahkan pengguna, atau mengubah peran.
- * Tanpa guard ini, akun ber-role rendah (mis. STAFF) bisa membuat akun OWNER
+ * Tanpa guard ini, akun ber-role rendah (mis. akun non-pemilik) bisa membuat akun OWNER
  * sendiri lewat endpoint ini — privilege escalation yang memberi akses penuh
  * ke seluruh data toko.
  */

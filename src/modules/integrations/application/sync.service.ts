@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import type { SyncStatus } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { ShopeeAdapter } from '../infrastructure/shopee.adapter';
@@ -1477,17 +1478,78 @@ export function mapLogisticsStatus(
 // Public query functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function listSyncRuns(tenantId: string, shopId?: string, operation?: string) {
-  return prisma.syncRun.findMany({
-    where: {
-      tenantId,
-      ...(shopId ? { shopId } : {}),
-      ...(operation ? { operation } : {}),
-    },
-    include: { shop: { select: { name: true, provider: true } } },
+/**
+ * Daftar riwayat sinkronisasi dengan PAGINASI.
+ *
+ * MASALAH YANG DISELESAIKAN
+ * ------------------------
+ * Versi lama mengambil `take: 50` dan UI memanggilnya EMPAT kali (satu per
+ * operasi) lalu menyatukan hasilnya di browser. Akibatnya:
+ *   - sampai 200 baris dikirim untuk satu tampilan,
+ *   - riwayat manual tenggelam oleh replenish otomatis yang jauh lebih sering,
+ *   - tiap reload (mount, SSE, tiap klik tombol) menarik semuanya lagi.
+ *
+ * Sekarang satu endpoint, satu query, sudah dipaginasi. `operation` boleh
+ * berupa daftar (dipakai filter di UI) dan `status` bisa disaring.
+ */
+export async function listSyncRuns(
+  tenantId: string,
+  options: {
+    shopId?: string;
+    operation?: string[];
+    status?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
+) {
+  const { shopId, operation, status, page = 1, pageSize = 20 } = options;
+  const take = Math.min(Math.max(pageSize, 1), 100);
+  const skip = (page - 1) * take;
+
+  const where = {
+    tenantId,
+    ...(shopId ? { shopId } : {}),
+    ...(operation && operation.length > 0 ? { operation: { in: operation } } : {}),
+    ...(status ? { status: status as SyncStatus } : {}),
+  };
+
+  const [runs, total] = await Promise.all([
+    prisma.syncRun.findMany({
+      where,
+      include: { shop: { select: { name: true, provider: true } } },
+      orderBy: { startedAt: 'desc' },
+      skip,
+      take,
+    }),
+    prisma.syncRun.count({ where }),
+  ]);
+
+  return {
+    items: runs,
+    pagination: { total, page, pageSize: take, hasMore: skip + take < total },
+  };
+}
+
+/**
+ * Run terakhir per jenis operasi, untuk kartu status di halaman integrasi.
+ *
+ * Dipisah dari `listSyncRuns` supaya kartu status tidak bergantung pada halaman
+ * riwayat yang sedang dibuka: kalau operator sedang di halaman 5, kartu
+ * "sinkron terakhir" tetap harus menampilkan run terbaru, bukan run yang kebetulan
+ * ada di halaman itu.
+ */
+export async function getLastRunsByOperation(tenantId: string, shopId?: string) {
+  const runs = await prisma.syncRun.findMany({
+    where: { tenantId, ...(shopId ? { shopId } : {}) },
     orderBy: { startedAt: 'desc' },
-    take: 50,
+    take: 60,
   });
+
+  const latest = new Map<string, (typeof runs)[number]>();
+  for (const run of runs) {
+    if (!latest.has(run.operation)) latest.set(run.operation, run);
+  }
+  return Object.fromEntries(latest);
 }
 
 /** Connect Shopee by storing (encrypted) seller tokens + setting the external shop id. */

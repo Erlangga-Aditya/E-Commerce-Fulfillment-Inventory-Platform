@@ -15,7 +15,10 @@ export async function GET(request: NextRequest) {
     const ctx = getAuthContext(request);
     const shopId = getQueryParam(request, 'shopId');
     const operation = getQueryParam(request, 'operation') ?? 'import_orders';
-    const runs = await listSyncRuns(ctx.tenantId, shopId, operation);
+    const runs = await listSyncRuns(ctx.tenantId, {
+      shopId,
+      operation: operation ? [operation] : undefined,
+    });
     return successResponse(runs, { requestId });
   } catch (error) {
     return handleRouteError(error, requestId, request);

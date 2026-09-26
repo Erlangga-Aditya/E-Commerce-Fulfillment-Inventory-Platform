@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
-    assertRole(ctx, 'STAFF');
+    assertRole(ctx, 'OWNER');
 
     const parsed = StockInSchema.safeParse(await request.json());
     if (!parsed.success) {

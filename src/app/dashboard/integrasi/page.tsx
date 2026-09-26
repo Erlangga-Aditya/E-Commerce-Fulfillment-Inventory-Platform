@@ -26,6 +26,8 @@ interface ConnStatus {
  sandbox: boolean;
  lastSyncAt: string | null;
  partnerConfigured: boolean;
+ /** Run terakhir per operasi - sumber kartu status, bukan dari halaman riwayat. */
+ lastRuns?: Record<string, SyncRun>;
  externalShopId: string | null;
  tokenExpiresAt: string | null;
  tokenExpiresInMinutes: number | null;
@@ -155,7 +157,14 @@ function SyncCard({ icon, title, description, buttonLabel, loadingLabel, disable
 export default function IntegrasiPage() {
  const [shop, setShop] = useState<Shop | null>(null);
  const [status, setStatus] = useState<ConnStatus | null>(null);
+ // Riwayat sinkronisasi: satu endpoint, dipaginasi, dengan cache ringan supaya
+ // pindah halaman/men-trigger SSE tidak menembak API berulang.
  const [allRuns, setAllRuns] = useState<SyncRun[]>([]);
+ const [runsPage, setRunsPage] = useState(1);
+ const [runsTotal, setRunsTotal] = useState(0);
+ const RUNS_PAGE_SIZE = 20;
+ const runsCache = useRef<Map<string, { items: SyncRun[]; at: number }>>(new Map());
+ const RUNS_CACHE_MS = 30_000;
  const [loading, setLoading] = useState(true);
  const [error, setError] = useState('');
  const [notice, setNotice] = useState<{ tone: 'success' | 'danger' | 'info' | 'warning'; text: string } | null>(null);
@@ -251,6 +260,40 @@ export default function IntegrasiPage() {
   }
  }
 
+ /**
+  * Ambil riwayat sinkronisasi dari SATU endpoint dengan paginasi + cache.
+  *
+  * Versi lama memanggil empat endpoint (satu per operasi) lalu menggabungkan
+  * semuanya di browser —Rn hingga 200 baris untuk satu tampilan, di-refresh
+  * setiap mount, setiap event SSE, dan setiap klik tombol.
+  *
+  * @param force true = abaikan cache (mis. setelah operator menjalankan sinkron)
+  */
+ const loadRuns = useCallback(async (page: number, force = false) => {
+  const s = shopRef.current;
+  if (!s) return;
+  const key = `${s.id}:${page}`;
+  if (!force) {
+   const hit = runsCache.current.get(key);
+   if (hit && Date.now() - hit.at < RUNS_CACHE_MS) {
+    setAllRuns(hit.items);
+    setRunsTotal(hit.items.length);
+    return;
+   }
+  }
+  try {
+   const q = new URLSearchParams({ shopId: s.id, page: String(page), pageSize: String(RUNS_PAGE_SIZE) });
+   const res = await api<{ items: SyncRun[]; pagination: { total: number } }>(
+    `/api/v1/integrations/shopee/sync-runs?${q.toString()}`,
+   );
+   setAllRuns(res.items ?? []);
+   setRunsTotal(res.pagination?.total ?? 0);
+   runsCache.current.set(key, { items: res.items ?? [], at: Date.now() });
+  } catch {
+   setError('Riwayat sinkronisasi tidak bisa dimuat. Coba muat ulang.');
+  }
+ }, []);
+
  const load = useCallback(async () => {
   try {
    const shops = await api<Shop[]>('/api/v1/shops');
@@ -258,21 +301,11 @@ export default function IntegrasiPage() {
    setShop(s);
    shopRef.current = s;
    if (s) {
-    const [st, runs] = await Promise.all([
+    const [st] = await Promise.all([
      api<ConnStatus>(`/api/v1/integrations/shopee/status?shopId=${s.id}`),
-     api<SyncRun[]>(`/api/v1/integrations/shopee/sync?shopId=${s.id}`).catch(() => [] as SyncRun[]),
     ]);
     setStatus(st);
-
-    // Fetch all sync operations
-    const [productRuns, returnRuns, trackingRuns] = await Promise.all([
-     api<SyncRun[]>(`/api/v1/integrations/shopee/sync-products?shopId=${s.id}`).catch(() => [] as SyncRun[]),
-     api<SyncRun[]>(`/api/v1/integrations/shopee/sync-returns?shopId=${s.id}`).catch(() => [] as SyncRun[]),
-     api<SyncRun[]>(`/api/v1/integrations/shopee/sync-tracking?shopId=${s.id}`).catch(() => [] as SyncRun[]),
-    ]);
-    setAllRuns([...runs, ...productRuns, ...returnRuns, ...trackingRuns].sort(
-     (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
-    ));
+    await loadRuns(1, true);
    } else {
     setStatus(null);
     setAllRuns([]);
@@ -282,7 +315,7 @@ export default function IntegrasiPage() {
   } finally {
    setLoading(false);
   }
- }, []);
+ }, [loadRuns]);
 
  // Handle URL params (OAuth redirect result)
  useEffect(() => {
@@ -434,10 +467,13 @@ export default function IntegrasiPage() {
  const isNearExpiry = (status?.tokenExpiresInMinutes ?? 999) < 60;
  const isExpired = (status?.tokenExpiresInMinutes ?? 999) <= 0;
 
- const lastOrderRun = allRuns.find((r) => r.operation === 'import_orders') ?? null;
- const lastProductRun = allRuns.find((r) => r.operation === 'sync_products') ?? null;
- const lastReturnRun = allRuns.find((r) => r.operation === 'sync_returns') ?? null;
- const lastTrackingRun = allRuns.find((r) => r.operation === 'sync_tracking') ?? null;
+ // Kartu status memakai `lastRuns` dari endpoint status, BUKAN `allRuns` (isi
+ // halaman riwayat). Kalau tidak, membuka riwayat di halaman 5 membuat kartu
+ // "sinkron terakhir" menampilkan run lama karena run terbaru ada di halaman 1.
+ const lastOrderRun = status?.lastRuns?.import_orders ?? null;
+ const lastProductRun = status?.lastRuns?.sync_products ?? null;
+ const lastReturnRun = status?.lastRuns?.sync_returns ?? null;
+ const lastTrackingRun = status?.lastRuns?.sync_tracking ?? null;
 
  if (loading) return <LoadingState message="Memeriksa status koneksi Shopee Open Platform..." />;
  if (error) return <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); load(); }} />;
@@ -907,6 +943,32 @@ export default function IntegrasiPage() {
         ))}
        </tbody>
       </table>
+
+      {runsTotal > RUNS_PAGE_SIZE && (
+       <div
+        style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', marginTop: 12, flexWrap: 'wrap' }}
+       >
+        <button
+         type="button"
+         className="btn btn-secondary btn-sm"
+         disabled={runsPage <= 1}
+         onClick={() => { const p = runsPage - 1; setRunsPage(p); void loadRuns(p); }}
+        >
+         <span>Sebelumnya</span>
+        </button>
+        <span className="small muted">
+         Halaman {runsPage} dari {Math.max(1, Math.ceil(runsTotal / RUNS_PAGE_SIZE))} ({runsTotal} riwayat)
+        </span>
+        <button
+         type="button"
+         className="btn btn-secondary btn-sm"
+         disabled={runsPage >= Math.ceil(runsTotal / RUNS_PAGE_SIZE)}
+         onClick={() => { const p = runsPage + 1; setRunsPage(p); void loadRuns(p); }}
+        >
+         <span>Berikutnya</span>
+        </button>
+       </div>
+      )}
      </div>
     )}
    </div>

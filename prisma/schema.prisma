@@ -83,11 +83,10 @@ model TenantMembership {
   @@map("tenant_memberships")
 }
 
+/// Hanya ada satu role. Struktur role akan dideklarasikan ulang lengkap
+/// setelah kebutuhan akses & action dipetakan dari operasional nyata.
 enum UserRole {
   OWNER
-  MANAGER
-  FINANCE
-  STAFF
 }
 
 // ============================================================

@@ -1,5 +1,8 @@
 import { type NextRequest } from 'next/server';
-import { getShopeeConnectionStatus } from '@/modules/integrations/application/sync.service';
+import {
+  getShopeeConnectionStatus,
+  getLastRunsByOperation,
+} from '@/modules/integrations/application/sync.service';
 import { getShopeeAppConfigPublic } from '@/modules/integrations/application/appConfig.service';
 import {
   autoSyncState,
@@ -38,10 +41,14 @@ export async function GET(request: NextRequest) {
       return successResponse({ connected: false, shop: null, ...appConfig }, { requestId });
     }
 
-    const status = await getShopeeConnectionStatus(ctx.tenantId, shopId);
+    const [status, lastRuns] = await Promise.all([
+      getShopeeConnectionStatus(ctx.tenantId, shopId),
+      getLastRunsByOperation(ctx.tenantId, shopId),
+    ]);
     return successResponse(
       {
         ...status,
+        lastRuns,
         ...appConfig,
         autoSync: {
           enabled: isAutoSyncEnabled(),

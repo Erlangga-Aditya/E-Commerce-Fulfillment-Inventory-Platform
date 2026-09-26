@@ -4,7 +4,20 @@
  * (Clean Architecture: domain must not import infrastructure)
  */
 
-export type UserRole = 'OWNER' | 'MANAGER' | 'FINANCE' | 'STAFF';
+/**
+ * Role yang tersedia di aplikasi.
+ *
+ * SENGAJA HANYA `OWNER`.
+ *
+ * Keputusan bisnis: struktur role akan dideklarasikan ulang lengkap (siapa bisa
+ * akses apa, dan actions apa yang boleh dilakukan) setelah dipetakan dari
+ * kebutuhan nyata. Sampai saat itu, satu role berarti satu orang bertanggung
+ * jawab penuh - jadi lebih aman daripada menyimpan role yang belum punya
+ * arti jelas tapi sudah jadi kode produksi.
+ *
+ * Endpoint yang dulu memakai role lain sudah dikunci ke `OWNER`.
+ */
+export type UserRole = 'OWNER';
 export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED';
 export type TenantStatus = 'ACTIVE' | 'SUSPENDED' | 'INACTIVE';
 
@@ -46,13 +59,7 @@ export interface AuthContext {
 // Allowed role transitions / permission matrix
 // ────────────────────────────────────────────────────────────
 
-const ROLE_HIERARCHY: Record<UserRole, number> = {
-  OWNER: 4,
-  MANAGER: 3,
-  FINANCE: 2,
-  STAFF: 1,
-};
-
+/** Hanya ada satu role, jadi hierarki tidak perlu dihitung. */
 export function hasMinimumRole(userRole: UserRole, requiredRole: UserRole): boolean {
-  return ROLE_HIERARCHY[userRole] >= ROLE_HIERARCHY[requiredRole];
+  return userRole === 'OWNER' && requiredRole === 'OWNER';
 }
