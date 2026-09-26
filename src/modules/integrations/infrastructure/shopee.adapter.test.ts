@@ -232,7 +232,7 @@ describe('ShopeeAdapter', () => {
       });
     }
 
-    const creds: ShopCredentials = { shopId, accessToken, refreshToken: 'r' };
+    const creds: ShopCredentials = { shopId, accessToken, partnerId, partnerKey };
 
     it('kirim address_id sebagai number dan pickup_time_id sebagai string apa adanya', async () => {
       const bodies: Array<Record<string, unknown>> = [];
@@ -259,13 +259,14 @@ describe('ShopeeAdapter', () => {
       expect(result.trackingNumber).toBe('JP3697577588');
       expect(bodies).toHaveLength(1);
 
-      const pickup = bodies[0].pickup as Record<string, unknown>;
+      const pickup = bodies[0]?.pickup as Record<string, unknown> | undefined;
+      expect(pickup).toBeDefined();
       // address_id WAJIB number — string ditolak "field pickup.address_id type error".
-      expect(typeof pickup.address_id).toBe('number');
-      expect(pickup.address_id).toBe(290774);
+      expect(typeof pickup?.address_id).toBe('number');
+      expect(pickup?.address_id).toBe(290774);
       // pickup_time_id WAJIB string — angka ditolak "field pickup.pickup_time_id type error".
-      expect(typeof pickup.pickup_time_id).toBe('string');
-      expect(pickup.pickup_time_id).toBe('1790499600_68');
+      expect(typeof pickup?.pickup_time_id).toBe('string');
+      expect(pickup?.pickup_time_id).toBe('1790499600_68');
     });
 
     it('teruskan package_number saat mengambil resi setelah ship_order', async () => {
@@ -321,8 +322,8 @@ describe('ShopeeAdapter', () => {
       expect(result.trackingNumber).toBe('ID264473909543LU');
       // Shopee menolak dengan logistics.ship_order_not_need_pacakge_number
       // bila package_number dikirim untuk pesanan yang belum dipecah.
-      expect(bodies[0].package_number).toBeUndefined();
-      expect(paramUrls[0]).not.toContain('package_number');
+      expect(bodies[0]?.package_number).toBeUndefined();
+      expect(paramUrls[0] ?? '').not.toContain('package_number');
     });
   });
 
