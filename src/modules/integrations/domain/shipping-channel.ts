@@ -25,9 +25,21 @@ import { ExternalIntegrationError } from '@/shared/errors/AppError';
 export interface ShippingChannel {
   /** Kanal yang harus dikirim ke `ship_order`. */
   kind: 'pickup' | 'dropoff';
-  /** `address_id` bila kanalnya pickup (wajib shopee: `info_needed.pickup`). */
+  /**
+   * `address_id` bila kanalnya pickup (wajib shopee: `info_needed.pickup`).
+   *
+   * DISIMPAN SEBAGAI STRING di sini, lalu dikirim sebagai NUMBER oleh adapter.
+   * Shopee membalas `field pickup.address_id type error` kalau dikirim sebagai
+   * string, dan `field pickup.pickup_time_id type error` kalau dikirim sebagai
+   * angka — keduanya bertipe berbeda. Bukti sandbox 2026-09-27.
+   */
   addressId?: string;
-  /** `pickup_time_id` bila kanalnya pickup. */
+  /**
+   * `pickup_time_id` bila kanalnya pickup.
+   *
+   * Nilainya timestamp (mis. `1790499600`), dikirim sebagai NUMBER karena
+   * Shopee menolak string untuk field ini.
+   */
   pickupTimeId?: string;
   /** `branch_id` bila kanalnya dropoff. */
   branchId?: string;
