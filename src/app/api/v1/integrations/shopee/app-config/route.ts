@@ -29,7 +29,10 @@ const SaveSchema = z.object({
 export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
-    getAuthContext(request);
+    const ctx = getAuthContext(request);
+    // Config partner (partner id, mode, status koneksi) adalah Setting, bukan
+    // data operasional. Staff yang cuma butuh ambil resi tidak boleh membacanya.
+    assertPermission(ctx, 'shopee.manage');
     return successResponse(await getShopeeAppConfigPublic(), { requestId });
   } catch (error) {
     return handleRouteError(error, requestId, request);

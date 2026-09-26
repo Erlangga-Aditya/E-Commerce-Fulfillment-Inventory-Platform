@@ -2,7 +2,9 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { verifyJwt, AUTH_COOKIE } from '@/modules/auth/infrastructure/jwt.service';
 import { AUTH_CONTEXT_HEADER } from '@/shared/application/httpHeaders';
 import { hasPermission } from '@/modules/auth/domain/entities/auth.entity';
+import { resolveAuthContext } from '@/modules/auth/application/resolveAuthContext';
 import type { Permission } from '@/modules/auth/domain/permissions';
+import type { AuthContext } from '@/modules/auth/domain/entities/auth.entity';
 
 const PUBLIC_API = [
   '/api/v1/auth/login',
@@ -65,6 +67,33 @@ function deniedRedirect(request: NextRequest): NextResponse {
   return NextResponse.redirect(url);
 }
 
+/**
+ * Verifikasi cookie lalu terapkan izin terbaru dari database.
+ *
+ * Token hanya membuktikan "ini siapa", bukan "ini masih boleh". Yang kedua
+ * harus dibaca dari database, kalau tidak mencabut akses tidak berlaku sampai
+ * token kedaluwarsa.
+ */
+async function authenticate(
+  request: NextRequest,
+): Promise<{ ok: true; ctx: AuthContext } | { ok: false }> {
+  const token = request.cookies.get(AUTH_COOKIE)?.value;
+  if (!token) return { ok: false };
+
+  let claims: AuthContext;
+  try {
+    claims = await verifyJwt(token);
+  } catch {
+    return { ok: false };
+  }
+
+  // resolveAuthContext mengembalikan null bila akun sudah dinonaktifkan atau
+  // tidak lagi menjadi anggota tenant ini — dua-duanya berarti akses gugur.
+  const ctx = await resolveAuthContext({ userId: claims.userId, tenantId: claims.tenantId });
+  if (!ctx) return { ok: false };
+  return { ok: true, ctx };
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -87,53 +116,41 @@ export async function proxy(request: NextRequest) {
   headers.delete('x-tenant-id');
   headers.delete('x-user-id');
 
-  const token = request.cookies.get(AUTH_COOKIE)?.value;
-
   if (pathname.startsWith('/api/v1/')) {
     if (PUBLIC_API.includes(pathname)) {
       return NextResponse.next({ request: { headers } });
     }
-    if (!token) return unauthorized();
-    try {
-      const ctx = await verifyJwt(token);
-      headers.set(AUTH_CONTEXT_HEADER, JSON.stringify(ctx));
-      return NextResponse.next({ request: { headers } });
-    } catch {
-      return unauthorized();
-    }
+    const auth = await authenticate(request);
+    if (!auth.ok) return unauthorized();
+    headers.set(AUTH_CONTEXT_HEADER, JSON.stringify(auth.ctx));
+    return NextResponse.next({ request: { headers } });
   }
 
   if (pathname.startsWith('/dashboard')) {
-    if (!token) return redirectToLogin(request);
-    try {
-      const ctx = await verifyJwt(token);
-      // Halaman di luar daftar guard (mis. /dashboard/apa-saja) tetap boleh
-      // untuk owner; untuk staff, daftar guard yang memegang kendali.
-      if (ctx.role !== 'OWNER') {
-        const guard = PAGE_GUARDS.find(
-          ([prefix]) => pathname === prefix || pathname.startsWith(prefix === '/dashboard' ? '/dashboard/' : prefix + '/'),
-        );
-        if (guard && !hasPermission(ctx, guard[1])) {
-          return deniedRedirect(request);
-        }
+    const auth = await authenticate(request);
+    if (!auth.ok) return redirectToLogin(request);
+    // Halaman di luar daftar guard (mis. /dashboard/apa-saja) tetap boleh
+    // untuk owner; untuk staff, daftar guard yang memegang kendali.
+    if (auth.ctx.role !== 'OWNER') {
+      const guard = PAGE_GUARDS.find(([prefix]) =>
+        prefix === '/dashboard'
+          ? pathname.startsWith('/dashboard/')
+          : pathname === prefix || pathname.startsWith(prefix + '/'),
+      );
+      if (guard && !hasPermission(auth.ctx, guard[1])) {
+        return deniedRedirect(request);
       }
-      headers.set(AUTH_CONTEXT_HEADER, JSON.stringify(ctx));
-      return NextResponse.next({ request: { headers } });
-    } catch {
-      return redirectToLogin(request);
     }
+    headers.set(AUTH_CONTEXT_HEADER, JSON.stringify(auth.ctx));
+    return NextResponse.next({ request: { headers } });
   }
 
   // Akar domain: pengguna yang sudah punya sesi tidak perlu melihat halaman
   // login lagi.
   if (pathname === '/') {
-    if (!token) return redirectToLogin(request);
-    try {
-      await verifyJwt(token);
-      return NextResponse.redirect(new URL('/dashboard', request.url));
-    } catch {
-      return redirectToLogin(request);
-    }
+    const auth = await authenticate(request);
+    if (!auth.ok) return redirectToLogin(request);
+    return NextResponse.redirect(new URL('/dashboard', request.url));
   }
 
   return NextResponse.next({ request: { headers } });
