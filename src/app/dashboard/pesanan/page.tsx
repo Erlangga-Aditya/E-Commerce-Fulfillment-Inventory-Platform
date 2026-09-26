@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { api, formatDate, openOfficialLabel } from '@/lib/api';
 import { deriveOperatorWorkflow } from '@/modules/fulfillment/domain/operator-workflow';
+import { usePermission } from '@/hooks/usePermission';
 import { Alert, EmptyState, ErrorState, LoadingState, PageHeader } from '@/components/ui';
 import { BarcodeScanner, playScanFeedback } from '@/components/barcode-scanner';
 import { StockPanel } from '@/components/stock-panel';
@@ -241,6 +242,14 @@ export default function PesananPengirimanPage() {
   const [now, setNow] = useState<Date | null>(null);
   const [scannerFocusRequest, setScannerFocusRequest] = useState(0);
   /**
+   * Pesanan yang dicentang untuk diproses sekaligus. Disimpan di state biasa
+   * supaya jumlah terpilih ikut ter-render di panel bulk.
+   */
+  const [picked, setPicked] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Staff boleh melihat halaman ini tanpa boleh melakukan semua aksinya.
+  const { can } = usePermission();
+  /**
    * Izin "stok minus" untuk SATU pemindaian berikutnya. Harus one-shot: begitu
    * dipakai langsung dibuang, supaya tidak pernah ikut terpakai untuk barcode
    * pesanan lain yang kebetulan dipindai setelahnya.
@@ -280,6 +289,86 @@ export default function PesananPengirimanPage() {
       clearInterval(clock);
     };
   }, [load, sort]);
+
+  /**
+   * Ambil resi untuk semua pesanan yang dicentang sekaligus.
+   *
+   * Endpoint-nya partial success, jadi jawaban berisi mana yang berhasil dan
+   * mana yang gagal. Yang gagal ditampilkan apa adanya supaya operator tahu
+   * harus mencoba ulang pesanan mana — bukan diberi satu pesan "gagal" yang
+   * tidak menjelaskan apa pun.
+   */
+  async function bulkAmbilResi() {
+    if (picked.length === 0) return;
+    setBulkBusy(true);
+    setError('');
+    setNotice(null);
+    try {
+      const res = await api<{
+        summary: { total: number; ok: number; gagal: number };
+        results: { externalOrderId: string; status: string; message: string }[];
+        message: string;
+      }>('/api/v1/orders/bulk-prepare-shipment', { method: 'POST', body: { orderIds: picked } });
+
+      const gagal = res.results.filter((r) => r.status !== 'OK');
+      if (gagal.length === 0) {
+        setNotice({ tone: 'success', text: res.message });
+      } else {
+        setNotice({
+          tone: 'warning',
+          text: `${res.message} Gagal: ${gagal.map((g) => `${g.externalOrderId} (${g.message})`).join('; ')}`,
+        });
+      }
+      await load();
+      setPicked([]);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  /** Unduh label PDF gabungan untuk pesanan yang dicentang. */
+  async function bulkCetakLabel() {
+    if (picked.length === 0) return;
+    setBulkBusy(true);
+    setError('');
+    try {
+      const res = await fetch('/api/v1/orders/bulk-print-labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderIds: picked }),
+        credentials: 'include',
+      });
+
+      // Server melaporkan label yang gagal lewat header supaya operator tahu
+      // mana yang perlu diunduh satu per satu, tanpa membatalkan yang berhasil.
+      const gagal = res.headers.get('X-Label-Gagal-Daftar');
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(body?.error?.message ?? `Gagal membuat label (${res.status}).`);
+        return;
+      }
+      if (gagal) setNotice({ tone: 'warning', text: `Sebagian label gagal: ${decodeURIComponent(gagal)}` });
+      else setNotice({ tone: 'success', text: `${res.headers.get('X-Label-Ok')} label siap dicetak.` });
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  const togglePick = (orderId: string) =>
+    setPicked((prev) => (prev.includes(orderId) ? prev.filter((x) => x !== orderId) : [...prev, orderId]));
 
   const filtered = useMemo(() => {
     const list = data?.orders ?? [];
@@ -692,6 +781,52 @@ export default function PesananPengirimanPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {picked.length > 0 && (
+            <div
+              className="card"
+              style={{
+                position: 'sticky',
+                top: 8,
+                zIndex: 5,
+                borderLeft: '3px solid var(--color-primary, #2563eb)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}
+            >
+              <strong>
+                {picked.length} pesanan dipilih
+              </strong>
+              {can('order.prepare_shipment') ? (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void bulkAmbilResi()}
+                  disabled={bulkBusy}
+                  title="Minta nomor resi ke Shopee untuk semua pesanan yang dicentang, satu per satu di server"
+                >
+                  <Truck size={13} aria-hidden />
+                  <span>{bulkBusy ? 'Memproses...' : 'Ambil Resi Semua'}</span>
+                </button>
+              ) : null}
+              {can('order.pack') ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void bulkCetakLabel()}
+                  disabled={bulkBusy}
+                  title="Unduh label resmi Shopee untuk semua pesanan yang dicentang dalam satu PDF"
+                >
+                  <Printer size={13} aria-hidden />
+                  <span>Cetak Label Semua</span>
+                </button>
+              ) : null}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicked([])} disabled={bulkBusy}>
+                Batal pilih
+              </button>
+            </div>
+          )}
           {filtered.map((o) => {
             const hoursLeft = o.shipByAt && now ? Math.round((new Date(o.shipByAt).getTime() - now.getTime()) / 3600000) : null;
             const urgent = hoursLeft !== null && hoursLeft <= 24;
@@ -712,7 +847,19 @@ export default function PesananPengirimanPage() {
                     marginBottom: 10,
                   }}
                 >
-                  <div>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <label
+                      title="Centang untuk diproses sekaligus"
+                      style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', paddingTop: 2 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={picked.includes(o.orderId)}
+                        onChange={() => togglePick(o.orderId)}
+                        aria-label={`Pilih pesanan ${o.externalOrderId}`}
+                      />
+                    </label>
+                    <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span className="mono" style={{ fontWeight: 700 }}>{o.externalOrderId}</span>
                       <span className="badge badge-neutral">{STAGE_LABEL[o.stage]}</span>
@@ -730,6 +877,7 @@ export default function PesananPengirimanPage() {
                     <div className="small muted" style={{ marginTop: 4 }}>
                       {o.buyerName ?? 'Pembeli Shopee'} · {o.shopName} · masuk{' '}
                       {formatDate(o.placedAt)} · batas kirim {formatDate(o.shipByAt)} · {o.totalUnits} barang
+                    </div>
                     </div>
                   </div>
 
