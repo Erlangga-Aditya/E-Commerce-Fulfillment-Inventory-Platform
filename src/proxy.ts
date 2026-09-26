@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { verifyJwt, AUTH_COOKIE } from '@/modules/auth/infrastructure/jwt.service';
 import { AUTH_CONTEXT_HEADER } from '@/shared/application/httpHeaders';
+import { hasPermission } from '@/modules/auth/domain/entities/auth.entity';
+import type { Permission } from '@/modules/auth/domain/permissions';
 
 const PUBLIC_API = [
   '/api/v1/auth/login',
@@ -32,6 +34,36 @@ function unauthorized(): NextResponse {
  */
 /** Halaman & endpoint yang sengaja dihapus (seller individual). */
 const REMOVED_PATHS = ['/register', '/api/v1/auth/register'];
+
+/**
+ * Peta path halaman → izin yang dibutuhkan untuk membukanya.
+ *
+ * Ini dicek di server, bukan cuma dengan menyembunyikan menunya. Menu yang
+ * disembunyikan cuma kosmetik: tanpa penjaga di sini, siapa pun yang punya
+ * cookie bisa mengetik URL halaman yang tidak diizinkan dan tetap melihat
+ * datanya.
+ */
+const PAGE_GUARDS: readonly (readonly [prefix: string, permission: Permission])[] = [
+  ['/dashboard/laporan-keuangan', 'page.finance'],
+  ['/dashboard/integrasi', 'page.integrations'],
+  ['/dashboard/pengaturan', 'page.settings'],
+  ['/dashboard/kelola-tim', 'page.team'],
+  ['/dashboard/pengembalian', 'page.returns'],
+  ['/dashboard/laporan', 'page.reports'],
+  ['/dashboard/pengiriman', 'page.shipping'],
+  ['/dashboard/inventori', 'page.inventory'],
+  ['/dashboard/produk', 'page.products'],
+  ['/dashboard/pesanan', 'page.orders'],
+  ['/dashboard', 'page.dashboard'],
+];
+
+/** Halaman yang tidak diizinkan → arahkan ke ringkasan, bukan 403 kosong. */
+function deniedRedirect(request: NextRequest): NextResponse {
+  const url = request.nextUrl.clone();
+  url.pathname = '/dashboard';
+  url.search = '?akses=ditolak';
+  return NextResponse.redirect(url);
+}
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -75,6 +107,16 @@ export async function proxy(request: NextRequest) {
     if (!token) return redirectToLogin(request);
     try {
       const ctx = await verifyJwt(token);
+      // Halaman di luar daftar guard (mis. /dashboard/apa-saja) tetap boleh
+      // untuk owner; untuk staff, daftar guard yang memegang kendali.
+      if (ctx.role !== 'OWNER') {
+        const guard = PAGE_GUARDS.find(
+          ([prefix]) => pathname === prefix || pathname.startsWith(prefix === '/dashboard' ? '/dashboard/' : prefix + '/'),
+        );
+        if (guard && !hasPermission(ctx, guard[1])) {
+          return deniedRedirect(request);
+        }
+      }
       headers.set(AUTH_CONTEXT_HEADER, JSON.stringify(ctx));
       return NextResponse.next({ request: { headers } });
     } catch {

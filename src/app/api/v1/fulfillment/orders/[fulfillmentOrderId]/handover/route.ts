@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { handOverToCarrier } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { z } from 'zod';
 import { ValidationError } from '@/shared/errors/AppError';
 
@@ -14,6 +18,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'order.handover');
     const { fulfillmentOrderId } = await params;
     const body: unknown = await request.json().catch(() => ({}));
     const parsed = HandoverSchema.safeParse(body ?? {});

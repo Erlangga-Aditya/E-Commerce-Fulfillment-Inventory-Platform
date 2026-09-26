@@ -2,7 +2,11 @@ import { type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { successResponse, created, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ConflictError, ValidationError } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
 
@@ -20,6 +24,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'settings.manage');
     const warehouses = await prisma.warehouse.findMany({
       where: { tenantId: ctx.tenantId },
       orderBy: { createdAt: 'asc' },
@@ -35,6 +40,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'settings.manage');
     const body: unknown = await request.json();
     const parsed = CreateWarehouseSchema.safeParse(body);
     if (!parsed.success) {

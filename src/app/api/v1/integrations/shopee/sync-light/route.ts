@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { triggerOrderSync } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { prisma } from '@/shared/infrastructure/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +20,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const body = (await request.json().catch(() => ({}))) as { shopId?: string };
 
     let shopId = body.shopId;

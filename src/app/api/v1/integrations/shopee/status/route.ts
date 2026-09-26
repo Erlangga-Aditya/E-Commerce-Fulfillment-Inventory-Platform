@@ -11,7 +11,12 @@ import {
 } from '@/modules/integrations/application/autoSync.scheduler';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,6 +30,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.integrations');
     const appConfig = await getShopeeAppConfigPublic();
 
     let shopId = getQueryParam(request, 'shopId');

@@ -1,12 +1,19 @@
 import { type NextRequest } from 'next/server';
 import { createProduct, listProducts, CreateProductSchema } from '@/modules/catalog/application/catalog.usecase';
 import { successResponse, created, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, parsePagination, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  parsePagination,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'product.manage');
     const { page, pageSize } = parsePagination(request);
     const result = await listProducts(ctx.tenantId, {
       search: getQueryParam(request, 'search'),
@@ -22,6 +29,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'product.manage');
     const body: unknown = await request.json();
     const validated = CreateProductSchema.parse(body);
     const product = await createProduct(ctx.tenantId, validated, ctx.userId);

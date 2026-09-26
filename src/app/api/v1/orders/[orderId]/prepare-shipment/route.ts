@@ -3,7 +3,11 @@ import { prisma } from '@/shared/infrastructure/prisma';
 import { processOrderForFulfillment, retryWaitingStockOrders } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { arrangeShipmentForOrder } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError, NotFoundError } from '@/shared/errors/AppError';
 
 export const dynamic = 'force-dynamic';
@@ -22,6 +26,7 @@ export async function POST(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'order.prepare_shipment');
     const { orderId } = await params;
 
     const order = await prisma.order.findFirst({

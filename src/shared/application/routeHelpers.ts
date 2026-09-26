@@ -1,7 +1,8 @@
 import type { NextRequest } from 'next/server';
 import type { AuthContext } from '@/modules/auth/domain/entities/auth.entity';
 import { UnauthorizedError, ForbiddenError } from '@/shared/errors/AppError';
-import { hasMinimumRole, type UserRole } from '@/modules/auth/domain/entities/auth.entity';
+import { hasPermission, hasMinimumRole, type UserRole } from '@/modules/auth/domain/entities/auth.entity';
+import { PERMISSIONS, type Permission } from '@/modules/auth/domain/permissions';
 import { AUTH_CONTEXT_HEADER, REQUEST_ID_HEADER } from '@/shared/application/httpHeaders';
 
 /**
@@ -41,6 +42,10 @@ export function getRequestId(request: NextRequest): string {
 /**
  * Assert that the current user has at least the required role.
  * Throws ForbiddenError if insufficient permissions.
+ *
+ * Hanya untuk hak yang memang tidak bisa diberikan oleh owner (mis. kelola tim).
+ * Untuk aksi operasional, pakai `assertPermission` — owner butuh bisa
+ * memberi atau menahan akses staff per izin.
  */
 export function assertRole(ctx: AuthContext, requiredRole: UserRole): void {
   if (!hasMinimumRole(ctx.role, requiredRole)) {
@@ -48,6 +53,22 @@ export function assertRole(ctx: AuthContext, requiredRole: UserRole): void {
       `Tindakan ini memerlukan peran minimal ${requiredRole}. Peran Anda: ${ctx.role}.`,
     );
   }
+}
+
+/**
+ * Tegakkan satu izin. Inilah penjaga sesungguhnya — bukan menu di UI.
+ *
+ * Menu yang disembunyikan hanya kosmetik; endpoint yang tetap terbuka bisa
+ * dipanggil siapa saja yang punya cookie. Karena itu SETIAP route yang
+ * mengubah data memanggil fungsi ini, dan pesannya memakai nama aksi dalam
+ * bahasa awam supaya operator langsung tahu apa yang perlu diminta ke owner.
+ */
+export function assertPermission(ctx: AuthContext, permission: Permission): void {
+  if (hasPermission(ctx, permission)) return;
+  const label = PERMISSIONS[permission].label;
+  throw new ForbiddenError(
+    `Anda tidak punya izin untuk: ${label}. Minta owner membuka izin ini di halaman Kelola Tim.`,
+  );
 }
 
 /**

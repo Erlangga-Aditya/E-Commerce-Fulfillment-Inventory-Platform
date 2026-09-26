@@ -74,6 +74,18 @@ model TenantMembership {
   role      UserRole
   createdAt DateTime @default(now()) @map("created_at")
 
+  /// Izin yang diizinkan untuk akun ini, disimpan sebagai JSON array berisi
+  /// kunci dari `src/modules/auth/domain/permissions.ts` (mis. "order.pick").
+  ///
+  /// Bentuk JSON dipilih karena izin dibaca SELALU utuh untuk satu akun
+  /// (menyaring sidebar, home endpoint, dan setiap route API) — bukan mencari
+  /// per baris. Satu kolom menghindari N+1 dan tabel ikut.
+  ///
+  /// Kosong berarti "tidak punya izin apa pun" dan itu disengaja: staff baru
+  /// tanpa satu pun izin chose yang bisa dilihat/lakukan, sampai owner
+  /// memilihkan. OWNER mengabaikan kolom ini sepenuhnya.
+  permissions Json?  @map("permissions")
+
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -87,6 +99,7 @@ model TenantMembership {
 /// setelah kebutuhan akses & action dipetakan dari operasional nyata.
 enum UserRole {
   OWNER
+  STAFF
 }
 
 // ============================================================

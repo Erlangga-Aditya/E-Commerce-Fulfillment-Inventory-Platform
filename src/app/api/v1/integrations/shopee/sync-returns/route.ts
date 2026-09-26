@@ -1,7 +1,12 @@
 import { type NextRequest } from 'next/server';
 import { triggerReturnSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 
 /**
@@ -13,6 +18,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const shopId = getQueryParam(request, 'shopId');
     const runs = await listSyncRuns(ctx.tenantId, { shopId, operation: ['sync_returns'] });
     return successResponse(runs, { requestId });
@@ -25,6 +31,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const body = (await request.json()) as { shopId?: string };
     if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
     const result = await triggerReturnSync(ctx.tenantId, body.shopId, ctx.userId);

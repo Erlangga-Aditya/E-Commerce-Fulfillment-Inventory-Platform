@@ -5,7 +5,11 @@ import {
   saveShopeeAppConfig,
 } from '@/modules/integrations/application/appConfig.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
 
@@ -41,6 +45,7 @@ export async function PUT(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.manage');
     const parsed = SaveSchema.safeParse(await request.json());
     if (!parsed.success) {
       throw new ValidationError('Data konfigurasi tidak valid.', {

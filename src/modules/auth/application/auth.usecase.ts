@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { verifyPassword } from '../infrastructure/password.service';
 import type { AuthContext } from '../domain/entities/auth.entity';
+import { PERMISSIONS, type Permission } from '../domain/permissions';
 import {
   ValidationError,
   UnauthorizedError,
@@ -32,6 +33,23 @@ export interface LoginResult {
  * Login with database-backed credentials (no demo backdoor).
  * FR-AUTH-001, FR-AUTH-004. Token signing + cookie is done by the route.
  */
+/**
+ * Baca daftar izin dari kolom JSON.
+ *
+ * Dua lapis pencadangan:
+ *  1. Kolomnya `Json?` di Prisma, jadi bisa `null`. `null` berarti belum ada
+ *     izin — bukan "semua".
+ *  2. Isinya bisa rusak (mis. ditimpa manual di database), jadi setiap entri
+ *     divalidasi terhadap registry. Izin yang sudah dihapus dari registry
+ *     diabaikan diam-diam supaya perubahan kode tidak merusak sesi lama.
+ */
+export function readPermissions(raw: unknown): Permission[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (p): p is Permission => typeof p === 'string' && Object.hasOwn(PERMISSIONS, p),
+  );
+}
+
 export async function loginUser(input: LoginInput): Promise<LoginResult> {
   const parsed = LoginSchema.safeParse(input);
   if (!parsed.success) {
@@ -71,7 +89,13 @@ export async function loginUser(input: LoginInput): Promise<LoginResult> {
   });
 
   return {
-    context: { userId: user.id, email: user.email, tenantId: membership.tenantId, role: membership.role as AuthContext['role'] },
+    context: {
+      userId: user.id,
+      email: user.email,
+      tenantId: membership.tenantId,
+      role: membership.role as AuthContext['role'],
+      permissions: readPermissions(membership.permissions),
+    },
     tenantName: membership.tenant.name,
     user: { id: user.id, name: user.name, email: user.email },
   };

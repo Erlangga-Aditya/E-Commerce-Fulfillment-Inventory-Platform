@@ -36,6 +36,10 @@ export interface JwtPayload {
   email: string;
   tenantId: string;
   role: string;
+  /** Izin akun saat token diterbitkan. */
+  permissions?: string[];
+  /** Waktu token diterbitkan (epoch detik) — dipakai untuk batas kesegaran. */
+  iat?: number;
 }
 
 export async function signJwt(context: AuthContext): Promise<string> {
@@ -44,6 +48,7 @@ export async function signJwt(context: AuthContext): Promise<string> {
     email: context.email,
     tenantId: context.tenantId,
     role: context.role,
+    permissions: context.permissions ?? [],
   })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -63,6 +68,7 @@ export async function verifyJwt(token: string): Promise<AuthContext> {
       email: p.email,
       tenantId: p.tenantId,
       role: p.role as AuthContext['role'],
+      permissions: (p.permissions ?? []) as AuthContext['permissions'],
     };
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;

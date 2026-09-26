@@ -2,7 +2,12 @@ import { type NextRequest } from 'next/server';
 import { ShopeeAdapter } from '@/modules/integrations/infrastructure/shopee.adapter';
 import { getShopeeAppConfig } from '@/modules/integrations/application/appConfig.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +22,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.manage');
     const shopId = getQueryParam(request, 'shopId');
     if (!shopId) throw new ValidationError('shopId wajib diisi.');
 

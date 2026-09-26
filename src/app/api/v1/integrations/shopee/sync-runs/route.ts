@@ -1,7 +1,13 @@
 import { type NextRequest } from 'next/server';
 import { listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, parsePagination, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  parsePagination,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import type { SyncStatus } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';
@@ -23,6 +29,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.integrations');
     const { page, pageSize } = parsePagination(request);
 
     const operations = request.nextUrl.searchParams

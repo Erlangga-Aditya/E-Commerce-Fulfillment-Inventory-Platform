@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { updateVariant, UpdateVariantSchema, deleteVariant } from '@/modules/catalog/application/catalog.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 type Ctx = { params: Promise<{ productId: string; variantId: string }> };
 
@@ -9,6 +13,7 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'product.manage');
     const { variantId } = await params;
     const body: unknown = await request.json();
     const validated = UpdateVariantSchema.parse(body);
@@ -23,6 +28,7 @@ export async function DELETE(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'product.manage');
     const { variantId } = await params;
     await deleteVariant(ctx.tenantId, variantId, ctx.userId);
     return successResponse({ deleted: true, variantId }, { requestId });

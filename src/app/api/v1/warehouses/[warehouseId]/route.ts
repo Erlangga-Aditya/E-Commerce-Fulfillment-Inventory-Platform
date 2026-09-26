@@ -2,7 +2,11 @@ import { type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/shared/infrastructure/prisma';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { NotFoundError, ValidationError, BusinessRuleViolationError } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
 
@@ -17,6 +21,7 @@ export async function GET(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'settings.manage');
     const { warehouseId } = await params;
     const warehouse = await prisma.warehouse.findFirst({
       where: { id: warehouseId, tenantId: ctx.tenantId },
@@ -35,6 +40,7 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'settings.manage');
     const { warehouseId } = await params;
     const body: unknown = await request.json();
     const parsed = UpdateWarehouseSchema.safeParse(body);
@@ -72,6 +78,7 @@ export async function DELETE(request: NextRequest, { params }: Ctx) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'settings.manage');
     const { warehouseId } = await params;
 
     const existing = await prisma.warehouse.findFirst({

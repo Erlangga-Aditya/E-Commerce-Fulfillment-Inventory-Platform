@@ -1,7 +1,12 @@
 import { type NextRequest } from 'next/server';
 import { triggerProductSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 /**
  * GET  /api/v1/integrations/shopee/sync-products — daftar sync run produk
@@ -12,6 +17,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const shopId = getQueryParam(request, 'shopId');
     const runs = await listSyncRuns(ctx.tenantId, { shopId, operation: ['sync_products'] });
     return successResponse(runs, { requestId });
@@ -24,6 +30,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const body = (await request.json()) as { shopId?: string };
     if (!body.shopId) {
       const { ValidationError } = await import('@/shared/errors/AppError');

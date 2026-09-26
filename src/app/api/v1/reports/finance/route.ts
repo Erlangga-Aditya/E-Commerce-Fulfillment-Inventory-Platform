@@ -1,7 +1,12 @@
 import { type NextRequest } from 'next/server';
 import { getFinanceReport } from '@/modules/reports/application/financeReport.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +20,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'finance.view');
     const fromRaw = getQueryParam(request, 'from');
     const toRaw = getQueryParam(request, 'to');
     const shopId = getQueryParam(request, 'shopId');

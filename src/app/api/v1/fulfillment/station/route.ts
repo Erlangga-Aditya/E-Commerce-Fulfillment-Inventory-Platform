@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { getFulfillmentStation } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,6 +22,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'page.orders');
     const sortParam = new URL(request.url).searchParams.get('sort');
     const station = await getFulfillmentStation(ctx.tenantId, {
       sort: sortParam === 'newest' ? 'newest' : 'oldest',

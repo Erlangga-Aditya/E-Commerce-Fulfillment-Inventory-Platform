@@ -5,7 +5,11 @@ import {
 } from '@/modules/inventory/application/inventory.usecase';
 import { retryWaitingStockOrders } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, assertRole } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 import { logger } from '@/shared/observability/logger';
 
@@ -15,7 +19,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const ctx = getAuthContext(request);
-    assertRole(ctx, 'OWNER'); // Koreksi stok mengubah angka resmi gudang
+    assertPermission(ctx, 'inventory.adjust'); // Koreksi stok mengubah angka resmi gudang
 
     const body: unknown = await request.json();
     const parsed = AdjustStockSchema.safeParse(body);

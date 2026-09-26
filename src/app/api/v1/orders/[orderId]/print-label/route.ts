@@ -1,6 +1,10 @@
 import { type NextRequest } from 'next/server';
 import { generateShippingLabel } from '@/modules/integrations/application/sync.service';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { handleRouteError } from '@/shared/application/apiResponse';
 import { logger } from '@/shared/observability/logger';
 
@@ -26,6 +30,7 @@ export async function POST(request: NextRequest, { params }: Ctx) {
  const requestId = getRequestId(request);
  try {
   const ctx = getAuthContext(request);
+    assertPermission(ctx, 'order.pack');
   const { orderId } = await params;
   const body = (await request.json().catch(() => ({}))) as {
    shopId?: string;

@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { ShopeeAdapter } from '@/modules/integrations/infrastructure/shopee.adapter';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,7 +18,8 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
-    getAuthContext(request);
+    const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.manage');
     const result = await new ShopeeAdapter().testCredentials();
     return successResponse(result, { requestId });
   } catch (error) {

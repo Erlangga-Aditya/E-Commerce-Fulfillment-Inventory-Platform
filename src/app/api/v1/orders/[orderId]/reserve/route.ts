@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { processOrderForFulfillment } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 import { z } from 'zod';
 
@@ -11,6 +15,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'order.pick');
     const { orderId } = await params;
     const body: unknown = await request.json();
     const parsed = ReserveSchema.safeParse(body);

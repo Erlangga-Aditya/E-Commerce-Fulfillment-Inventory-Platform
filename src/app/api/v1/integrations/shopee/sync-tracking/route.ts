@@ -1,7 +1,12 @@
 import { type NextRequest } from 'next/server';
 import { triggerTrackingSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  getQueryParam,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { resolveShopId } from '@/modules/integrations/application/resolveShopId';
 
 /**
@@ -13,6 +18,7 @@ export async function GET(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     const shopId = getQueryParam(request, 'shopId');
     const runs = await listSyncRuns(ctx.tenantId, { shopId, operation: ['sync_tracking'] });
     return successResponse(runs, { requestId });
@@ -25,6 +31,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'shopee.sync');
     // `request.json()` melempar SyntaxError untuk body kosong, dan itu akan
     // berubah menjadi 500 INTERNAL_ERROR yang tidak menjelaskan apa pun ke
     // operator. Body kosong kini diperlakukan sebagai permintaan tanpa filter.

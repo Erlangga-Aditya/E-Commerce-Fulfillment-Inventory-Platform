@@ -2,7 +2,11 @@ import { type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { scanAwbForPacking } from '@/modules/fulfillment/application/scan-awb.usecase';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
-import { getAuthContext, getRequestId } from '@/shared/application/routeHelpers';
+import {
+  getAuthContext,
+  getRequestId,
+  assertPermission,
+} from '@/shared/application/routeHelpers';
 import { ValidationError } from '@/shared/errors/AppError';
 import { broadcastSystemEvent } from '@/lib/sse';
 
@@ -32,6 +36,7 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
+    assertPermission(ctx, 'order.pick');
     const parsed = ScanAwbSchema.safeParse(await request.json());
     if (!parsed.success) {
       throw new ValidationError('Kode scan tidak valid.', {

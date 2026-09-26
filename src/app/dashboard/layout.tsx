@@ -23,6 +23,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import type { Permission } from '@/modules/auth/domain/permissions';
 import { AutoSyncStatus } from '@/components/AutoSyncStatus';
 import { PwaInstallPrompt } from '@/components/pwa-install-prompt';
 
@@ -31,25 +32,36 @@ import { PwaInstallPrompt } from '@/components/pwa-install-prompt';
  * Halaman "Operasi Harian", "Fulfillment", dan "Scanner" sudah DIGABUNG ke
  * halaman "Pesanan" supaya operator hanya memakai satu alur kerja.
  */
-const NAV_ITEMS = [
-  { href: '/dashboard', icon: LayoutDashboard, label: 'Ringkasan' },
-  { href: '/dashboard/pesanan', icon: ShoppingCart, label: 'Pesanan & Pengiriman' },
-  { href: '/dashboard/inventori', icon: Boxes, label: 'Stok Gudang' },
-  { href: '/dashboard/produk', icon: Package, label: 'Produk' },
-  { href: '/dashboard/pengiriman', icon: Truck, label: 'Lacak Kiriman' },
-  { href: '/dashboard/pengembalian', icon: Undo2, label: 'Pengembalian' },
-  { href: '/dashboard/laporan', icon: ChartColumn, label: 'Laporan' },
-  { href: '/dashboard/laporan-keuangan', icon: Wallet, label: 'Laporan Keuangan' },
-  { href: '/dashboard/integrasi', icon: Cable, label: 'Hubungkan Shopee' },
-  { href: '/dashboard/pengaturan', icon: Settings, label: 'Pengaturan' },
+/**
+ * Setiap menu membawa izin yang membukanya.
+ *
+ * Menu difilter di sini berdasarkan `me.can`, yang dikirim server sebagai
+ * "apakah boleh" per izin. Ini PRIBADI tampilan saja — penjaga sebenarnya ada
+ * di proxy (halaman) dan di setiap route API (aksi). Kalau menu ini bocor,
+ * yang terjadi cuma menu kelihatan; kliknya tetap ditolak server.
+ */
+const NAV_ITEMS: { href: string; icon: typeof LayoutDashboard; label: string; need: Permission }[] = [
+  { href: '/dashboard', icon: LayoutDashboard, label: 'Ringkasan', need: 'page.dashboard' },
+  { href: '/dashboard/pesanan', icon: ShoppingCart, label: 'Pesanan & Pengiriman', need: 'page.orders' },
+  { href: '/dashboard/inventori', icon: Boxes, label: 'Stok Gudang', need: 'page.inventory' },
+  { href: '/dashboard/produk', icon: Package, label: 'Produk', need: 'page.products' },
+  { href: '/dashboard/pengiriman', icon: Truck, label: 'Lacak Kiriman', need: 'page.shipping' },
+  { href: '/dashboard/pengembalian', icon: Undo2, label: 'Pengembalian', need: 'page.returns' },
+  { href: '/dashboard/laporan', icon: ChartColumn, label: 'Laporan', need: 'page.reports' },
+  { href: '/dashboard/laporan-keuangan', icon: Wallet, label: 'Laporan Keuangan', need: 'page.finance' },
+  { href: '/dashboard/integrasi', icon: Cable, label: 'Hubungkan Shopee', need: 'page.integrations' },
+  { href: '/dashboard/kelola-tim', icon: UserCheck, label: 'Kelola Tim', need: 'page.team' },
+  { href: '/dashboard/pengaturan', icon: Settings, label: 'Pengaturan', need: 'page.settings' },
 ];
 
 const FRESH_ORDER_MS = 5 * 60 * 1000; // pesanan baru < 5 menit → badge berdenyut
 
 interface Me {
-  user: { id: string; name: string; email: string } | null;
+  user: { id: string; name: string; email: string; status?: string } | null;
   tenantName: string | null;
   role: string | null;
+  /** "apakah boleh" per izin — dihitung server, bukan dari daftar izin mentah. */
+  can: Partial<Record<Permission, boolean>>;
 }
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -115,6 +127,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     router.refresh();
   }
 
+  // OWNER boleh semua; staff hanya yang diizinkan owner.
+  // `me` masih null saat pertama render, jadi sembunyikan dulu supaya staff
+  // tidak sempat melihat menu yang haram sesaat sebelum /me selesai.
+  const can = (permission: Permission): boolean =>
+    me?.role === 'OWNER' ? true : me?.can?.[permission] === true;
+  const visibleNav = me ? NAV_ITEMS.filter((item) => can(item.need)) : [];
+
   // Get readable current page context for topbar
   const currentItem = NAV_ITEMS.find(
     (item) => pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href)),
@@ -154,7 +173,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
 
           <nav className="sidebar-nav">
-          {NAV_ITEMS.map((item) => {
+          {visibleNav.map((item) => {
             const active = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href + '/'));
             const Icon = item.icon;
             return (
