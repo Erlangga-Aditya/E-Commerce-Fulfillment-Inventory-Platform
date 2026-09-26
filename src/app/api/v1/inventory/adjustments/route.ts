@@ -30,8 +30,13 @@ export async function POST(request: NextRequest) {
 
     // Stok bertambah → coba alokasikan ke pesanan yang tadinya kekurangan stok.
     // Tanpa ini pesanan WAITING_STOCK bisa macet walau stok sudah masuk.
+    //
+    // Syaratnya `delta !== 0`, bukan hanya `> 0`: penyesuaian yang menaikkan
+    // stok dari angka negatif (mis. -2 → 0 karena hasil hitung fisik) juga
+    // membuat pesanan bisa lanjut, dan `delta > 0` dalam bentuk lama
+    // melewatkan kasus itu.
     let stockRetry: { advanced: string[]; stillWaiting: string[] } | null = null;
-    if (result.delta > 0) {
+    if (result.delta !== 0) {
       try {
         stockRetry = await retryWaitingStockOrders(ctx.tenantId, parsed.data.warehouseId, ctx.userId);
       } catch (err) {

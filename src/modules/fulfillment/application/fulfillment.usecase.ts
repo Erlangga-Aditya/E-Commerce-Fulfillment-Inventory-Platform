@@ -99,6 +99,13 @@ export async function processOrderForFulfillment(
 
   const status: FulfillmentStatus = failedSkus.length > 0 ? 'WAITING_STOCK' : 'READY_TO_PICK';
 
+  // Pembuatan fulfillment order harus idempoten terhadap klik ganda / dua
+  // operator yang memproses pesanan sama bersamaan. Dua permintaan bisa sama
+  // sama lolos pemeriksaan `existing` di atas dan masing-masing membuat
+  // fulfillmentOrder + pickingTask, sehingga paket ter-scan dua kali.
+  //
+  // Diperbaiki dengan membuat di dalam transaksi lalu, bila `existing` ternyata
+  // sudah ada, devolvusi ke record itu alih-alih record baru.
   const fo = await prisma.$transaction(async (tx) => {
     const fulfillmentOrder = await tx.fulfillmentOrder.create({
       data: { orderId, warehouseId, status },
@@ -120,6 +127,20 @@ export async function processOrderForFulfillment(
     }
     return fulfillmentOrder;
   });
+
+  // Kalau ada yang lebih dulu berhasil membuat fulfillment order untuk pesanan
+  // ini, hapus yang baru saja dibuat (beserta picking task-nya) dan pakai
+  // record yang sudah ada supaya tidak ada duplikat.
+  const raced = await prisma.fulfillmentOrder.findFirst({
+    where: { orderId, id: { not: fo.id }, status: { notIn: ['COMPLETED', 'EXCEPTION'] } },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (raced) {
+    await prisma.pickingTask.deleteMany({ where: { fulfillmentOrderId: fo.id } });
+    await prisma.fulfillmentOrder.delete({ where: { id: fo.id } });
+    await recalculateOrderPriority(tenantId, orderId);
+    return { fulfillmentOrderId: raced.id, success: raced.status !== 'WAITING_STOCK', failedSkus: [] };
+  }
 
   await recalculateOrderPriority(tenantId, orderId);
 
@@ -469,16 +490,34 @@ export async function retryWaitingStockOrders(
       continue;
     }
 
-    await prisma.$transaction(async (tx) => {
+    // Transition WAITING_STOCK -> READY_TO_PICK harus ATOMIK.
+    //
+    // Dua operator (atau operator + sinkronisasi otomatis) bisa memproses pesanan
+    // yang sama pada saat bersamaan. Kalau status dicek lalu di-update di luar
+    // transaksi, keduanya bisa lolos dan membuat dua picking task untuk satu
+    // pesanan. `updateMany` dengan filter status membuat update kedua FAIL
+    // (0 baris) alih-alih menimpa, sehingga yang menang tetap satu.
+    //
+    // `skipDuplicates` dipakai di `ensurePickingTask` untuk alasan yang sama.
+    const moved = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.fulfillmentOrder.updateMany({
+        where: { id: fo.id, status: 'WAITING_STOCK' },
+        data: { status: 'READY_TO_PICK' },
+      });
+      // Orang lain sudah memindahkan pesanan ini lebih dulu.
+      if (claimed.count === 0) return false;
+
       await ensurePickingTask(
         tx,
         fo.id,
         fo.order.items.map((i) => ({ variantId: i.variantId, expectedQuantity: i.quantity })),
       );
       assertTransition('WAITING_STOCK', 'READY_TO_PICK');
-      await tx.fulfillmentOrder.update({ where: { id: fo.id }, data: { status: 'READY_TO_PICK' } });
+      return true;
     });
-    advanced.push(fo.id);
+
+    if (moved) advanced.push(fo.id);
+    else stillWaiting.push(fo.id);
   }
 
   if (advanced.length > 0) {

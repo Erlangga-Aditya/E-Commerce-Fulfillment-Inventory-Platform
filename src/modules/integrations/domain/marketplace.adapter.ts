@@ -60,6 +60,15 @@ export interface MarketplaceOrder {
   trackingNumber: string | null;
   carrier: string | null;
   payment: MarketplaceOrderPayment | null;
+  /**
+   * Jumlah paket dari `package_list` Shopee; `null` = belum diketahui.
+   *
+   * Menentukan boleh-tidaknya `package_number` dikirim ke `ship_order`:
+   * Shopee MENOLAK `package_number` untuk pesanan satu paket
+   * (`logistics.ship_order_not_need_pacakge_number`) dan MEMBUTUHKANNYA untuk
+   * pesanan multi-paket (`logistics.package_not_exist`). Bukti sandbox 2026-09-26.
+   */
+  packageCount?: number | null;
 }
 
 export interface MarketplaceProductVariant {

@@ -569,6 +569,9 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       isCod: Boolean(d.cod),
       paidAt: toDate(d.pay_time),
       packageNumber: (firstPackage.package_number as string) ?? null,
+      // Berapa paket yang dibuat Shopee untuk pesanan ini. Penting untuk
+      // `ship_order`: `package_number` hanya sah bila pesanan dipecah paket.
+      packageCount: packages.length > 0 ? packages.length : null,
       income,
     };
 
@@ -1096,7 +1099,13 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       const body: Record<string, unknown> = { order_sn: input.orderSn };
       if (input.packageNumber) body.package_number = input.packageNumber;
       if (channel.kind === 'pickup') {
-        body.pickup = { pickup_time_id: channel.pickupTimeId };
+        // `address_id` WAJIB ikut: Shopee menulis `info_needed.pickup =
+        // ["address_id","pickup_time_id"]` ketika alamat jemput belum dipilih
+        // (respons sandbox 2026-09-26). Tanpa address_id, ship_order ditolak.
+        body.pickup = {
+          ...(channel.addressId ? { address_id: channel.addressId } : {}),
+          pickup_time_id: channel.pickupTimeId,
+        };
       } else {
         body.dropoff = channel.branchId ? { branch_id: channel.branchId } : {};
       }

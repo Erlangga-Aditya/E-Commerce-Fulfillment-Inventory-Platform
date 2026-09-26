@@ -283,6 +283,8 @@ export async function triggerOrderSync(tenantId: string, shopId: string, actorId
         buyerNote: mOrder.buyerNote,
         shippingAddress: mOrder.shippingAddress,
         status: mapShopeeStatusToInternal(mOrder.rawStatus),
+        // Jumlah paket asli Shopee — dasar keputusan package_number di ship_order.
+        ...(mOrder.packageCount != null ? { packageCount: mOrder.packageCount } : {}),
         items,
         currency: mOrder.payment?.currency ?? undefined,
         totalAmount: mOrder.payment?.totalAmount ?? undefined,
@@ -1006,6 +1008,28 @@ export async function syncEscrowDetailsForShop(
  * Mengatur pengiriman untuk satu pesanan ("Atur Pengiriman").
  * Memanggil Shopee logistics/init, kemudian auto-menyimpan AWB ke database lokal.
  */
+/**
+ * Apakah pesanan ini dipecah jadi LEBIH DARI SATU paket oleh Shopee?
+ *
+ * Ini penentu boleh-tidaknya `package_number` dikirim ke `ship_order`.
+ * Bukti sandbox 2026-09-26:
+ *  - `package_count === 1` → Shopee menolak `package_number` dengan
+ *    `logistics.ship_order_not_need_pacakge_number`.
+ *  - `package_count > 1`  → `package_number` wajib; tanpa itu
+ *    `logistics.package_not_exist`.
+ *
+ * `null` berarti belum diketahui (pesanan lama sebelum kolom ini ada), lalu
+ * dianggap satu paket — pilihan paling aman karena Shopee hanya menolak kalau
+ * kita mengirim `package_number` untuk pesanan yang tidak dipecah.
+ */
+async function hasSplitPackages(orderId: string): Promise<boolean> {
+  const row = await prisma.order.findFirst({
+    where: { id: orderId },
+    select: { packageCount: true },
+  });
+  return (row?.packageCount ?? 1) > 1;
+}
+
 export async function arrangeShipmentForOrder(
   tenantId: string,
   shopId: string,
@@ -1035,14 +1059,24 @@ export async function arrangeShipmentForOrder(
     const fresh = await ensureFreshToken(conn.id, creds);
     const credentials = buildShopCredentials(fresh);
 
+    // PAKET: Bedakan pesanan yang Shopee pecah jadi beberapa paket dari yang
+    // satu paket utuh. Aturan ini DIBUKTI dari Shopee sandbox (2026-09-26):
+    //
+    //  - Pesanan SATU paket: `package_number` DITOLAK dengan
+    //    `logistics.ship_order_not_need_pacakge_number` ("Please don't
+    //    request with package_number for this unsplit order").
+    //  - Pesanan yang SUDAH dipecah Shopee: `package_number` wajib, tanpa
+    //    itu `logistics.package_not_exist`.
+    //
+    // Dulu aplikasi selalu mengirim `package_number` dari respons order, jadi
+    // setiap pesanan satu paket gagal di `ship_order` dengan pesan yang tidak
+    // menjelaskan apa pun. Sekarang keputusannya berdasarkan data Shopee:
+    // `package_number` hanya dipakai kalau pesanan itu benar-benar multi-paket.
+    const isSplitPackage = await hasSplitPackages(orderId);
+
     const result = await shopee.arrangeShipment(credentials, {
       orderSn: order.externalOrderId,
-      // `package_number` WAJIB diteruskan. Tanpa itu, `get_shipping_parameter`
-      // dijawab `logistics.package_not_exist`, dan kalau diteruskan angka yang
-      // salah, Shopee mengembalikan 0 channel sehingga aplikasi pernah jatuh ke
-      // `dropoff: {}` dan gagal dengan `ship_order_unsupport_dropoff`.
-      // Sumbernya: `package_number` dari Shopee yang tersimpan saat order diimpor.
-      ...(order.packageNumber ? { packageNumber: order.packageNumber } : {}),
+      ...(isSplitPackage && order.packageNumber ? { packageNumber: order.packageNumber } : {}),
       ...input,
     });
     success = result.success;

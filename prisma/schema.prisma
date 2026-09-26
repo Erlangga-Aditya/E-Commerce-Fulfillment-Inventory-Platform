@@ -360,6 +360,10 @@ model Order {
   isCod                Boolean        @default(false) @map("is_cod")
   paidAt               DateTime?      @map("paid_at")
   packageNumber        String?        @map("package_number")
+  /// Jumlah paket menurut Shopee (`package_list`). 1 = satu paket utuh.
+  /// Dipakai untuk memutuskan apakah `package_number` boleh dikirim; lihat
+  /// migration 20260927010000_order_package_count.
+  packageCount         Int?           @map("package_count")
   /// Rincian mentah dari Shopee (cadangan bila ada field baru).
   incomeJson           Json?          @map("income_json")
   // Priority fields

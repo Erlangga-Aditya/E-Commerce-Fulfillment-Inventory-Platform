@@ -25,12 +25,16 @@ import { ExternalIntegrationError } from '@/shared/errors/AppError';
 export interface ShippingChannel {
   /** Kanal yang harus dikirim ke `ship_order`. */
   kind: 'pickup' | 'dropoff';
+  /** `address_id` bila kanalnya pickup (wajib shopee: `info_needed.pickup`). */
+  addressId?: string;
   /** `pickup_time_id` bila kanalnya pickup. */
   pickupTimeId?: string;
   /** `branch_id` bila kanalnya dropoff. */
   branchId?: string;
   /** Nama kanal untuk ditampilkan ke operator (dari Shopee bila ada). */
   label?: string;
+  /** Slot jemput yang Shopee tandai `recommended` (kalau ada). */
+  recommended?: boolean;
 }
 
 /** Shopee bisa mengirim id sebagai angka; selalu dinormalkan ke string. */
@@ -80,6 +84,26 @@ export function extractSupportedChannels(res: unknown): ShippingChannel[] {
       }
     }
   }
+
+  // BENTUK RESMI (respons mentah sandbox 2026-09-26): daftar alamat jemput
+  // berada di `response.pickup.address_list[]` — satu level lebih dalam dari
+  // semua kunci yang pernah dikodekan. Tanpa cabang ini, Shopee yang jelas
+  // menawar kanal dianggap tidak punya kanal sama sekali.
+  for (const scope of [root, inner]) {
+    if (!scope) continue;
+    for (const key of ['pickup', 'dropoff', 'shipping', 'delivery']) {
+      const sub = scope[key];
+      if (sub && typeof sub === 'object' && !Array.isArray(sub)) {
+        const bucket = sub as Record<string, unknown>;
+        for (const listKey of ['address_list', 'branch_list', 'dropoff_branch_list', 'office_list']) {
+          if (Array.isArray(bucket[listKey])) {
+            candidates.push(toArray(bucket[listKey]));
+          }
+        }
+        // `dropoff.branch_list` bisa `null` — itu normal, bukan error.
+      }
+    }
+  }
   // Terakhir: objek datar yang langsung memuat daftar turunan (branch/pickup).
   if (root) candidates.push(toArray(root));
 
@@ -90,16 +114,43 @@ export function extractSupportedChannels(res: unknown): ShippingChannel[] {
 
   const channels: ShippingChannel[] = [];
 
-  // 1) Kanal pickup: butuh `pickup_time_id` dari daftar waktu jemput.
+  // 1) Kanal pickup: butuh `address_id` + `pickup_time_id`.
+  //
+  // BENTUK RESMI (respons mentah sandbox 2026-09-26, order 260927416Q1VJ9):
+  //   response.pickup.address_list[].time_slot_list[].pickup_time_id
+  // Field `time_slot_list` inilah yang sebelumnya tidak dibaca — kode hanya
+  // mencari `pickup_time_list`/`pickup_time_id_list`, jadi kanal Shopee yang
+  // sebenarnya tersedia dianggap "tidak ada kanal yang didukung".
   for (const entry of entries) {
-    const times = toArray(entry.pickup_time_list ?? entry.pickup_time_id_list);
-    for (const t of times) {
+    for (const key of ['address_list', 'pickup_address_list', 'address_list_pickup']) {
+      for (const addr of toArray(entry[key])) {
+        const addressId = asString(addr.address_id);
+        const slots = toArray(addr.time_slot_list ?? addr.pickup_time_list ?? addr.pickup_time_id_list);
+        for (const t of slots) {
+          const timeId = asString(t?.pickup_time_id);
+          if (!timeId) continue;
+          channels.push({
+            kind: 'pickup',
+            addressId: addressId ?? undefined,
+            pickupTimeId: timeId,
+            label: asString(t?.pickup_time_name ?? t?.name) ?? undefined,
+            recommended: Array.isArray(t?.flags) && (t.flags as unknown[]).includes('recommended'),
+          });
+        }
+      }
+    }
+    // Bentuk datar (entry = address + daftar slot sekaligus).
+    const flatAddressId = asString(entry.address_id);
+    const flatSlots = toArray(entry.time_slot_list ?? entry.pickup_time_list ?? entry.pickup_time_id_list);
+    for (const t of flatSlots) {
       const timeId = asString(t?.pickup_time_id);
       if (!timeId) continue;
       channels.push({
         kind: 'pickup',
+        addressId: flatAddressId ?? undefined,
         pickupTimeId: timeId,
         label: asString(t?.pickup_time_name ?? t?.name) ?? undefined,
+        recommended: Array.isArray(t?.flags) && (t.flags as unknown[]).includes('recommended'),
       });
     }
   }
@@ -140,8 +191,11 @@ export function extractSupportedChannels(res: unknown): ShippingChannel[] {
  * Urutan pilihan:
  * 1. Kalau operator sudah memilih kanal (pickupTimeId/branchId) dan Shopee
  *    mendukungnya, pakai itu.
- * 2. Kalau tidak ada pilihan, ambil kanal pertama yang didukung Shopee.
- * 3. Kalau Shopee tidak mendukung channel apa pun → null (caller memberi pesan).
+ * 2. Kalau tidak ada pilihan, ambil slot jemput yang Shopee tandai
+ *    `recommended` (lihat `flags` pada respons resmi) — ini slot paling awal
+ *    yang masih memenuhi `ship_by_date`, jadi paling aman dikirim otomatis.
+ * 3. Fallback ke kanal pertama.
+ * 4. Kalau Shopee tidak mendukung channel apa pun → null (caller beri pesan).
  */
 export function pickChannel(
   channels: readonly ShippingChannel[],
@@ -159,6 +213,17 @@ export function pickChannel(
     const match = channels.find((c) => c.kind === 'dropoff' && c.branchId === preferred.branchId);
     if (match) return match;
   }
+
+  const recommended = channels.find((c) => c.recommended === true);
+  if (recommended) return recommended;
+
+  // Tanpa `recommended`, ambil slot paling awal: `pickup_time_id` Shopee berisi
+  // timestamp, jadi pengurutan string sama dengan pengurutan waktu.
+  const pickupTimes = channels
+    .filter((c) => c.kind === 'pickup' && c.pickupTimeId)
+    .sort((a, b) => (a.pickupTimeId! < b.pickupTimeId! ? -1 : 1));
+  if (pickupTimes.length > 0) return pickupTimes[0]!;
+
   return channels[0]!;
 }
 

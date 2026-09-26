@@ -2,6 +2,95 @@ import { describe, it, expect } from 'vitest';
 import { extractSupportedChannels, pickChannel } from './shipping-channel';
 
 /**
+ * Regresi untuk bug "belum punya kanal pengiriman yang didukung Shopee".
+ *
+ * Bukti produksi 2026-09-26 (Shopee sandbox, order 260927416Q1VJ9): Shopee
+ * menyediakan kanal pickup, tapi jawabannya meletakkan slot jemput di
+ * `response.pickup.address_list[].time_slot_list[]` — bukan di
+ * `pickup_time_list` seperti yang dibaca kode lama. Akibatnya aplikasi tidak
+ * menemukan kanal apa pun padahal Shopee menawarkannya, dan operator terjebak
+ * tanpa cara memperbaiki sendiri.
+ *
+ * Respons mentah yang dipakai test ini SALINAN PERSIS dari Shopee.
+ */
+const REAL_SANDBOX_RESPONSE = {
+  error: '',
+  message: '',
+  response: {
+    info_needed: {
+      dropoff: [],
+      pickup: ['address_id', 'pickup_time_id'],
+    },
+    pickup: {
+      address_list: [
+        {
+          address_id: 290774,
+          region: 'ID',
+          state: 'DKI JAKARTA',
+          city: 'KOTA JAKARTA PUSAT',
+          district: 'CEMPAKA PUTIH',
+          address: 'Jalan Sudirman No. 10',
+          zipcode: '10510',
+          address_flag: ['default_address', 'pickup_address', 'return_address'],
+          time_slot_list: [
+            { date: 1790499600, pickup_time_id: '1790499600', flags: ['recommended'] },
+            { date: 1790586000, pickup_time_id: '1790586000', flags: [] },
+            { date: 1790672400, pickup_time_id: '1790672400', flags: [] },
+          ],
+        },
+      ],
+    },
+    dropoff: { branch_list: null },
+  },
+  warning: '',
+};
+
+describe('bentuk resmi respons kanal Shopee (time_slot_list)', () => {
+  it('membaca kanal pickup dari address_list[].time_slot_list', () => {
+    const channels = extractSupportedChannels(REAL_SANDBOX_RESPONSE);
+
+    expect(channels.length).toBe(3);
+    expect(channels.every((c) => c.kind === 'pickup')).toBe(true);
+    expect(channels[0]!.pickupTimeId).toBe('1790499600');
+  });
+
+  it('membawa address_id karena Shopee menandainya wajib', () => {
+    const channels = extractSupportedChannels(REAL_SANDBOX_RESPONSE);
+
+    // `info_needed.pickup = ["address_id","pickup_time_id"]` — tanpa
+    // address_id, ship_order akan ditolak.
+    expect(channels[0]!.addressId).toBe('290774');
+  });
+
+  it('mendeteksi slot jemput yang Shopee tandai recommended', () => {
+    const channels = extractSupportedChannels(REAL_SANDBOX_RESPONSE);
+
+    const recommended = channels.filter((c) => c.recommended === true);
+    expect(recommended).toHaveLength(1);
+    expect(recommended[0]!.pickupTimeId).toBe('1790499600');
+  });
+
+  it('tidak gagal hanya karena dropoff branch_list bernilai null', () => {
+    // `branch_list: null` adalah hal normal saat toko belum mengatur cabang
+    // dropoff. Kanal pickup tetap harus terbaca.
+    const channels = extractSupportedChannels(REAL_SANDBOX_RESPONSE);
+
+    expect(channels.some((c) => c.kind === 'dropoff')).toBe(false);
+    expect(channels.length).toBeGreaterThan(0);
+  });
+
+  it('pickChannel memilih slot recommended untuk pengiriman otomatis', () => {
+    const channels = extractSupportedChannels(REAL_SANDBOX_RESPONSE);
+
+    const picked = pickChannel(channels);
+
+    expect(picked?.kind).toBe('pickup');
+    expect(picked?.pickupTimeId).toBe('1790499600');
+    expect(picked?.addressId).toBe('290774');
+  });
+});
+
+/**
  * Regresi untuk bug `logistics.ship_order_unsupport_dropoff`.
  *
  * Versi lama mengirim `dropoff: {}` tanpa pernah menanyakan ke Shopee channel
