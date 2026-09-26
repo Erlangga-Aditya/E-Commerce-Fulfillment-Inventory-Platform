@@ -15,6 +15,7 @@ Tambahkan INSTALL=1 kalau ada perubahan paket di package.json (menjalankan npm c
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import sys
 import tarfile
@@ -27,6 +28,7 @@ HOST = os.environ.get("VPS_HOST", "103.178.174.224")
 USER = os.environ.get("VPS_USER", "root")
 PASSWORD = os.environ.get("SSHPASS")
 PORT = int(os.environ.get("VPS_PORT", "22"))
+LOCK_PATH = ROOT / "package-lock.json"
 APP_DIR = "/opt/efulfill/app"
 DO_INSTALL = os.environ.get("INSTALL") == "1"
 
@@ -123,14 +125,36 @@ def main() -> None:
     )
     run(client, sync_cmd, "1/5 Berkas diperbarui")
 
-    if DO_INSTALL:
+    # Deteksi perubahan package.json / package-lock.json di server. Tanpa ini,
+    # tambah satu dependency baru (mis. pdf-lib) lolos ke server tapi tidak
+    # terpasang, dan build gagal dengan "Cannot find module" yang jauh dari
+    #jelas penyebabnya. Perbandingan dilakukan lewat hash, bukan isi
+    # berkas, supaya cepat dan tidak bocor ke log.
+    local_lock_hash = hashlib.sha256(LOCK_PATH.read_bytes()).hexdigest()
+    remote_hash = run(
+        client,
+        f"test -f {APP_DIR}/package-lock.json "
+        f"&& sha256sum {APP_DIR}/package-lock.json | cut -d' ' -f1 || echo tidak-ada",
+        "",
+    ).strip()
+    deps_changed = remote_hash != local_lock_hash
+    if deps_changed:
+        print("   package-lock.json berubah -> dependensi akan dipasang ulang")
+    elif DO_INSTALL:
+        deps_changed = True
+        print("   INSTALL=1 diminta -> dependensi dipasang ulang")
+
+    if deps_changed:
         run(client, f"cd {APP_DIR} && npm ci --no-audit --no-fund", "2/5 Memasang dependensi (npm ci)")
     else:
-        print("\n── 2/5 Memasang dependensi dilewati (pakai INSTALL=1 bila package.json berubah) ──")
+        print("\n── 2/5 Memasang dependensi dilewati (package-lock.json tidak berubah) ──")
 
     run(client, f"cd {APP_DIR} && npx prisma generate", "3/5 Menyiapkan Prisma")
     run(client, f"cd {APP_DIR} && npx prisma migrate deploy", "   migrasi database")
-    run(client, f"cd {APP_DIR} && npm run build", "4/5 Build produksi")
+    # .next dibersihkan sebelum build: Turbopack menyimpan cache transformasi
+    # di dalam .next, dan cache lama pernah referencing modul yang sudah
+    # tidak ada sehingga build gagal padahal dependensinya sudah benar.
+    run(client, f"cd {APP_DIR} && rm -rf .next && npm run build", "4/5 Build produksi")
     run(client, "pm2 restart efulfill && sleep 5 && pm2 status", "5/5 Menyalakan ulang aplikasi")
 
     print("\n── Pemeriksaan ──")
