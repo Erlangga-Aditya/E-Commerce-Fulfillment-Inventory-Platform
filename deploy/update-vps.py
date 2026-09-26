@@ -66,6 +66,22 @@ def build_tarball() -> bytes:
     return buf.getvalue()
 
 
+def build_tarball_manifest() -> set[str]:
+    """Daftar path yang ikut terkirim ke server (harus sama dengan isi tarball)."""
+    paths: set[str] = set()
+    skip_dirs = {"node_modules", ".next", ".git", "dist", "coverage", ".vercel"}
+    skip_files = {".env", ".env.local", ".env.production", ".DS_Store"}
+    for root, dirs, files in os.walk("."):
+        rel_root = Path(root).resolve().relative_to(Path.cwd().resolve())
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for name in files:
+            rel = (rel_root / name).as_posix()
+            if name in skip_files or rel.endswith((".log", ".tmp")):
+                continue
+            paths.add(rel.lstrip("./"))
+    return paths
+
+
 def main() -> None:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -77,7 +93,35 @@ def main() -> None:
     print(f"   paket: {len(data) / 1024 / 1024:.1f} MB")
     with sftp.open("/root/efulfill-update.tar.gz", "wb") as fh:
         fh.write(data)
-    run(client, f"tar -xzf /root/efulfill-update.tar.gz -C {APP_DIR} && rm -f /root/efulfill-update.tar.gz", "1/5 Berkas diperbarui")
+
+    # `tar -x` menimpa berkas yang ada, tapi TIDAK menghapus berkas yang di repo
+    # sudah dihapus. Akibatnya file mati di server masih ikut ter-build. Contoh
+    # nyata: src/app/api/v1/auth/register/route.ts masih ada setelah dihapus,
+    # lalu build gagal dengan "Export registerUser doesn't exist in target
+    # module" padahal di repo sudah bersih.
+    #
+    # Perbaikannya: sebelum menimpa, daftar dulu path yang dihapus di repo
+    # (path yang ada di server tapi tidak ada di paket) lalu hapus. Src dan
+    # prisma yang dibersihkan penuh karena itu yang dipakai build; berkas lain
+    # (.env, log, upload) tidak boleh ikut terhapus.
+    manifest = "\n".join(sorted(rel.replace("\\", "/") for rel in build_tarball_manifest()))
+    with sftp.open("/root/efulfill-manifest.txt", "w") as fh:
+        fh.write(manifest)
+
+    sync_cmd = (
+        f"cd {APP_DIR} && "
+        # Path yang ada di server tapi tidak ada di paket = dihapus di repo.
+        "find src prisma -type f | sort > /tmp/efulfill-on-server.txt && "
+        "grep -E '^(src|prisma)/' /root/efulfill-manifest.txt | sort > /tmp/efulfill-in-package.txt && "
+        "comm -23 /tmp/efulfill-on-server.txt /tmp/efulfill-in-package.txt > /tmp/efulfill-to-delete.txt && "
+        "if [ -s /tmp/efulfill-to-delete.txt ]; then "
+        "  echo 'Menghapus berkas yang sudah dihapus di repo:'; "
+        "  xargs -a /tmp/efulfill-to-delete.txt -r -d '\n' rm -f; "
+        "fi && "
+        f"tar -xzf /root/efulfill-update.tar.gz -C {APP_DIR} && "
+        "rm -f /root/efulfill-update.tar.gz /root/efulfill-manifest.txt"
+    )
+    run(client, sync_cmd, "1/5 Berkas diperbarui")
 
     if DO_INSTALL:
         run(client, f"cd {APP_DIR} && npm ci --no-audit --no-fund", "2/5 Memasang dependensi (npm ci)")
