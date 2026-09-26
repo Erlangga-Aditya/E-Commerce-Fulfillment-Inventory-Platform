@@ -583,6 +583,126 @@ export async function releaseReservationsForOrder(
 }
 
 /**
+ * Bersihkan reservasi yatim: reservasi masih ACTIVE padahal pesanannya sudah
+ * tidak butuh lagi.
+ *
+ * MASALAH YANG DISOLUSI (dibuktikan di produksi 2026-09-27): kolom `reserved`
+ * bisa tertinggal lebih besar dari `onHand`. Contoh nyata: `onHand=0,
+ * reserved=3`. Reservasinya milik pesanan yang sudah dibatalkan atau sudah
+ * diserahkan, tapi tidak pernah dilepas.
+ *
+ * Akibatnya `available = max(0, onHand - reserved - blocked)` bernilai 0
+meski gudang jelas punya barang fisik. Setiap pesanan baru lalu
+ * macet di WAITING_STOCK selamanya, dan operator tidak bisa memperbaikinya
+ * karena pesanannya sudah tidak aktif.
+ *
+ * Kapan reservasi disebut yatim:
+ *  - pesanannya sudah CANCELLED, atau
+ *  - barang pada item itu sudah keluar semua (`fulfilledQuantity >= quantity`),
+ *    atau
+ *  - fulfillment order-nya sudah selesai (HANDED_OVER / COMPLETED).
+ *
+ * Fungsi ini hanya melepas reservasi dan mengembalikan angka `reserved`. Ia TIDAK
+ * mengubah `onHand` — hasil hitung fisik gudang tidak pernah diganggu oleh
+ * operasi sistem.
+ */
+export async function reconcileOrphanReservations(
+  tenantId: string,
+  actorId?: string,
+): Promise<{ released: number; units: number }> {
+  const candidates = await prisma.stockReservation.findMany({
+    where: {
+      status: 'ACTIVE',
+      orderItem: { order: { tenantId } },
+    },
+    select: {
+      id: true,
+      quantity: true,
+      warehouseId: true,
+      variantId: true,
+      orderItem: {
+        select: {
+          orderId: true,
+          quantity: true,
+          fulfilledQuantity: true,
+          order: { select: { status: true } },
+        },
+      },
+    },
+    take: 2000,
+  });
+
+  // Yatim kalau: pesanan dibatalkan, barang sudah keluar semua, atau
+  // fulfillment order-nya sudah selesai. Ketiganya dibaca langsung dari
+  // database supaya tidak bergantung pada denormalisasi yang bisa basi.
+  const orphanIds = new Set<string>();
+  const byOrder = new Map<string, string[]>();
+  for (const c of candidates) {
+    if (c.orderItem.order.status === 'CANCELLED') { orphanIds.add(c.id); continue; }
+    if (c.orderItem.fulfilledQuantity >= c.orderItem.quantity) { orphanIds.add(c.id); continue; }
+    const list = byOrder.get(c.orderItem.orderId) ?? [];
+    list.push(c.id);
+    byOrder.set(c.orderItem.orderId, list);
+  }
+
+  // Pesanan yang fulfillment-nya sudah selesai: tidak ada lagi pekerjaan
+  // picking/packing untuknya, jadi reservasinya tidak mungkin dipakai.
+  for (const orderId of byOrder.keys()) {
+    const done = await prisma.fulfillmentOrder.findFirst({
+      where: { orderId, status: { in: ['HANDED_OVER', 'COMPLETED'] } },
+      select: { id: true },
+    });
+    if (done) for (const id of byOrder.get(orderId) ?? []) orphanIds.add(id);
+  }
+
+  const toRelease = candidates.filter((c) => orphanIds.has(c.id));
+  if (toRelease.length === 0) return { released: 0, units: 0 };
+
+  const validActorId = actorId ? await resolveValidActorId(prisma, actorId) : null;
+
+  await prisma.$transaction(async (tx) => {
+    for (const r of toRelease) {
+      await tx.stockReservation.update({
+        where: { id: r.id },
+        data: { status: 'RELEASED', releasedAt: new Date() },
+      });
+      const key = { warehouseId: r.warehouseId, variantId: r.variantId };
+      const bal = await tx.inventoryBalance.findUnique({
+        where: { warehouseId_variantId: key },
+        select: { reserved: true },
+      });
+      if (bal) {
+        // Jepit ke 0: `decrement` bisa membuat kolom negatif bila angka
+        // `reserved` sudah lebih kecil dari jumlah yang dilepas, dan
+        // kolom negatif akan merusak perhitungan `available` selamanya.
+        const next = Math.max(0, bal.reserved - r.quantity);
+        await tx.inventoryBalance.update({
+          where: { warehouseId_variantId: key },
+          data: { reserved: next, version: { increment: 1 } },
+        });
+      }
+      await tx.inventoryMovement.create({
+        data: {
+          tenantId,
+          warehouseId: r.warehouseId,
+          variantId: r.variantId,
+          movementType: 'RESERVE_RELEASE',
+          quantityDelta: r.quantity,
+          referenceType: 'order',
+          referenceId: r.orderItem.orderId,
+          reason: 'Reservasi yatim dilepas: pesanan sudah tidak butuh stok lagi.',
+          actorId: validActorId,
+        },
+      });
+    }
+  });
+
+  const units = toRelease.reduce((sum, r) => sum + r.quantity, 0);
+  logger.warn('Reservasi yatim direkonsiliasi', { tenantId, released: toRelease.length, units });
+  return { released: toRelease.length, units };
+}
+
+/**
  * Release a stock reservation.
  * FR-RES-003 — explicit and auditable.
  */

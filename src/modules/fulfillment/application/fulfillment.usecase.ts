@@ -15,6 +15,7 @@ import {
   getAvailabilityMap,
 } from '@/modules/inventory/application/inventory.usecase';
 import { consumeStockLotsFifo } from '@/modules/inventory/application/stock-lot.service';
+import { reconcileOrphanReservations } from '@/modules/inventory/application/inventory.usecase';
 import { recalculateOrderPriority } from '@/modules/orders/application/order.usecase';
 import { logger } from '@/shared/observability/logger';
 
@@ -472,6 +473,15 @@ export async function retryWaitingStockOrders(
   warehouseId: string,
   actorId: string,
 ): Promise<{ advanced: string[]; stillWaiting: string[] }> {
+  // Rekonsiliasi dulu. Reservasi yatim membuat `reserved` lebih besar dari
+  // `onHand`, sehingga `available` bernilai 0 walau gudang jelas punya barang.
+  // Tanpa langkah ini pesanan macet selamanya dan operator tidak bisa
+  // memperbaikinya karena pesanannya sudah tidak aktif.
+  // Bukti produksi 2026-09-27: onHand=0, reserved=3.
+  await reconcileOrphanReservations(tenantId, actorId).catch((err) => {
+    logger.warn('Rekonsiliasi reservasi yatim gagal', { error: (err as Error).message });
+  });
+
   const waiting = await prisma.fulfillmentOrder.findMany({
     where: { order: { tenantId }, warehouseId, status: 'WAITING_STOCK' },
     include: { order: { include: { items: true } } },
