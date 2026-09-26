@@ -82,12 +82,9 @@ export async function processOrderForFulfillment(
     );
   }
 
-  const existing = await prisma.fulfillmentOrder.findFirst({
-    where: { orderId, status: { notIn: ['COMPLETED', 'EXCEPTION'] } },
-  });
-  if (existing) return { fulfillmentOrderId: existing.id, success: existing.status !== 'WAITING_STOCK', failedSkus: [] };
-
-  // Reserve each item (idempotent per order item).
+  // Reserve each item (idempotent per order item). Dilakukan DI LUAR transaksi
+  // penguncian karena reserveStock memakai transaksinya sendiri untuk mengunci
+  // baris stok.
   const failedSkus: string[] = [];
   for (const item of order.items) {
     try {
@@ -99,14 +96,30 @@ export async function processOrderForFulfillment(
 
   const status: FulfillmentStatus = failedSkus.length > 0 ? 'WAITING_STOCK' : 'READY_TO_PICK';
 
-  // Pembuatan fulfillment order harus idempoten terhadap klik ganda / dua
-  // operator yang memproses pesanan sama bersamaan. Dua permintaan bisa sama
-  // sama lolos pemeriksaan `existing` di atas dan masing-masing membuat
-  // fulfillmentOrder + pickingTask, sehingga paket ter-scan dua kali.
+  // Pembuatan fulfillment order WAJIB idempoten terhadap klik ganda dan
+  // terhadap dua operator yang memproses pesanan sama bersamaan.
   //
-  // Diperbaiki dengan membuat di dalam transaksi lalu, bila `existing` ternyata
-  // sudah ada, devolvusi ke record itu alih-alih record baru.
-  const fo = await prisma.$transaction(async (tx) => {
+  // Versi sebelumnya mengecek "sudah ada?" lalu membuat record, lalu mengecek
+  // lagi dan menghapus bila kembar. Cek-tambah-hapus itu tidak atomik: dua
+  // permintaan bisa sama-sama membaca "belum ada", sama-sama membuat record,
+  // lalu sama-sama tidak melihat kembar milik satu sama lain pada pengecekan
+  // terakhir — sehingga dua fulfillment order + dua picking task tetap berdiri
+  // dan paket bisa diproses dua kali.
+  //
+  // Fix: kunci baris pesanan dengan `SELECT ... FOR UPDATE` lalu periksa dan
+  // buat dalam SATU transaksi. Baris pesanan hanya terkunci sebentar, dan
+  // setiap pesanan punya barisnya sendiri sehingga antrean antar-pesanan lain
+  // tidak terhalang.
+  const created = await prisma.$transaction(async (tx) => {
+    // Kunci baris pesanan. Semua pemanggil lain untuk pesanan yang sama
+    // menunggu di sini sampai transaksi selesai.
+    await tx.$queryRawUnsafe('SELECT id FROM orders WHERE id = ? AND tenant_id = ? FOR UPDATE', orderId, tenantId);
+
+    const current = await tx.fulfillmentOrder.findFirst({
+      where: { orderId, status: { notIn: ['COMPLETED', 'EXCEPTION'] } },
+    });
+    if (current) return { fulfillmentOrder: current, created: false };
+
     const fulfillmentOrder = await tx.fulfillmentOrder.create({
       data: { orderId, warehouseId, status },
     });
@@ -125,21 +138,18 @@ export async function processOrderForFulfillment(
         },
       });
     }
-    return fulfillmentOrder;
+    return { fulfillmentOrder, created: true };
   });
 
-  // Kalau ada yang lebih dulu berhasil membuat fulfillment order untuk pesanan
-  // ini, hapus yang baru saja dibuat (beserta picking task-nya) dan pakai
-  // record yang sudah ada supaya tidak ada duplikat.
-  const raced = await prisma.fulfillmentOrder.findFirst({
-    where: { orderId, id: { not: fo.id }, status: { notIn: ['COMPLETED', 'EXCEPTION'] } },
-    orderBy: { createdAt: 'asc' },
-  });
-  if (raced) {
-    await prisma.pickingTask.deleteMany({ where: { fulfillmentOrderId: fo.id } });
-    await prisma.fulfillmentOrder.delete({ where: { id: fo.id } });
+  const fo = created.fulfillmentOrder;
+
+  if (!created.created) {
     await recalculateOrderPriority(tenantId, orderId);
-    return { fulfillmentOrderId: raced.id, success: raced.status !== 'WAITING_STOCK', failedSkus: [] };
+    return {
+      fulfillmentOrderId: fo.id,
+      success: fo.status !== 'WAITING_STOCK',
+      failedSkus: [],
+    };
   }
 
   await recalculateOrderPriority(tenantId, orderId);

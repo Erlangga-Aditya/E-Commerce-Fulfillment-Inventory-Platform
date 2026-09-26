@@ -1151,10 +1151,23 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         { shopId: creds.shopId, accessToken: creds.accessToken },
       );
 
-      // 3) Setelah `ship_order` diterima, ambil nomor resi. Resi WAJIB ada sebelum
-      // dianggap berhasil — kalau Shopee belum menerbitkannya, kembalikan
-      // kegagalan apa adanya supaya operator tahu harus mencoba lagi.
-      const trackingNumber = await this.getTrackingNumber(creds, input.orderSn);
+      // 3) Setelah `ship_order` diterima, ambil nomor resi.
+      //
+      // `package_number` WAJIB diteruskan. Tanpa itu Shopee menjawab
+      // `logistics.package_not_exist`, sehingga resi=null padahal ship_order
+      // sudah BERHASIL — paket lalu terkunci di Shopee tanpa bisa diulang
+      // (`logistics.package_already_shipped`). Bukti sandbox 2026-09-27.
+      //
+      // Shopee juga belum selalu menerbitkan resi seketika setelah
+      // ship_order, jadi beberapa percobaan dengan jeda singkat. Kalau tetap
+      // kosong, kembalikan kegagalan apa adanya supaya operator tahu harus
+      // mencoba lagi — JANGAN mengarang nomor resi.
+      let trackingNumber: string | null = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        trackingNumber = await this.getTrackingNumber(creds, input.orderSn, input.packageNumber);
+        if (trackingNumber) break;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+      }
       if (!trackingNumber) {
         const msg =
           'Shopee sudah menerima permintaan pengiriman, tetapi nomor resi belum terbit. Coba lagi beberapa saat lagi.';
