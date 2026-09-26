@@ -2,7 +2,7 @@ import { type NextRequest } from 'next/server';
 import { triggerOrderSync, listSyncRuns } from '@/modules/integrations/application/sync.service';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId, getQueryParam } from '@/shared/application/routeHelpers';
-import { ValidationError } from '@/shared/errors/AppError';
+import { resolveShopId } from '@/modules/integrations/application/resolveShopId';
 
 /**
  * GET  /api/v1/integrations/shopee/sync?shopId=...&operation=... — daftar sync run pesanan
@@ -29,9 +29,10 @@ export async function POST(request: NextRequest) {
   const requestId = getRequestId(request);
   try {
     const ctx = getAuthContext(request);
-    const body = (await request.json()) as { shopId?: string };
-    if (!body.shopId) throw new ValidationError('shopId wajib diisi.');
-    const result = await triggerOrderSync(ctx.tenantId, body.shopId, ctx.userId);
+    // Body boleh kosong: `resolveShopId` memakai toko tunggal yang terhubung.
+    const body = (await request.json().catch(() => ({}))) as { shopId?: string };
+    const shopId = await resolveShopId(ctx.tenantId, body.shopId);
+    const result = await triggerOrderSync(ctx.tenantId, shopId, ctx.userId);
     return successResponse(
       { message: 'Sinkronisasi pesanan selesai.', syncRun: result },
       { requestId },
