@@ -33,13 +33,38 @@ export async function mergePdfs(
   if (entries.length === 0) {
     throw new Error('Tidak ada label untuk digabungkan.');
   }
+  const { PDFDocument } = await import('pdf-lib');
+
   if (entries.length === 1) {
-    // Satu label: kirim apa adanya. Menyusun ulang satu PDF tanpa alasan
-    // hanya berisiko merusak barcode-nya.
-    return { bytes: entries[0]!.bytes, pages: 1, dropped: [] };
+    // Satu label: kirim apa adanya tanpa menyusun ulang (menyusun ulang satu
+    // PDF tanpa alasan hanya berisiko merusak barcode-nya). Tapi isinya tetap
+    // harus diperiksa dulu, supaya PDF rusak tidak terkirim sebagai 200 dan
+    // jumlah halamannya tidak nebak-nebak.
+    const only = entries[0]!;
+    try {
+      const src = await PDFDocument.load(only.bytes, { ignoreEncryption: true });
+      const pages = src.getPageCount();
+      if (pages === 0) {
+        return {
+          bytes: only.bytes,
+          pages: 0,
+          dropped: [
+            { orderId: only.orderId, externalOrderId: only.externalOrderId, reason: 'Label tidak punya halaman.' },
+          ],
+        };
+      }
+      return { bytes: only.bytes, pages, dropped: [] };
+    } catch (err) {
+      const reason = (err as Error).message;
+      logger.warn('Label PDF tidak bisa dibaca', { orderId: only.orderId, message: reason });
+      return {
+        bytes: only.bytes,
+        pages: 0,
+        dropped: [{ orderId: only.orderId, externalOrderId: only.externalOrderId, reason }],
+      };
+    }
   }
 
-  const { PDFDocument } = await import('pdf-lib');
   const merged = await PDFDocument.create();
   const dropped: MergeOutcome['dropped'] = [];
 

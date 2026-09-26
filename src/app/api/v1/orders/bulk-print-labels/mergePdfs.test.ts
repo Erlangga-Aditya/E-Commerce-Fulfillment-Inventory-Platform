@@ -38,6 +38,24 @@ describe('mergePdfs', () => {
     expect(out.dropped).toHaveLength(0);
   });
 
+  it('satu label multi-halaman: halamannya dihitung dari PDF, bukan diasumsikan 1', async () => {
+    // Label Shopee untuk pesanan yang dipecah beberapa paket bisa lebih dari
+    // satu halaman. Mengasumsikan 1 membuat angka di header berbohong.
+    const bytes = await makePdf(3, 'AWB-MULTI');
+    const out = await mergePdfs([entry('a', bytes)]);
+    expect(out.pages).toBe(3);
+    expect(out.dropped).toHaveLength(0);
+  });
+
+  it('satu label rusak dilaporkan dropped dengan pages 0, bukan dikirim apa adanya', async () => {
+    const rusak = new Uint8Array(Buffer.from('bukan PDF sama sekali'));
+    const out = await mergePdfs([entry('a', rusak)]);
+    // Caller memakai pages === 0 untuk menolak, jadi pages harus jujur 0.
+    expect(out.pages).toBe(0);
+    expect(out.dropped).toHaveLength(1);
+    expect(out.dropped[0]!.orderId).toBe('a');
+  });
+
   it('menggabungkan semua halaman dari semua label', async () => {
     const out = await mergePdfs([
       entry('a', await makePdf(1, 'AWB-1')),
@@ -70,8 +88,7 @@ describe('mergePdfs', () => {
     );
   });
 
-  it('PDF tanpa halaman diperlakukan sebagai gagal, bukan success diam-diam', async () => {
-    // pdf-lib minimal satu halaman, jadi disimulasikan dengan PDF kosong byte.
+  it('PDF rusak di tengah daftar tidak menggagalkan yang lain', async () => {
     const kosong = new Uint8Array(Buffer.from('%PDF-1.4\n%%EOF\n'));
     const out = await mergePdfs([entry('ok', await makePdf(1, 'AWB-1')), entry('kosong', kosong)]);
     expect(out.pages).toBe(1);

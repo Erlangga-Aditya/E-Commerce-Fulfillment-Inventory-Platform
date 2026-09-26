@@ -75,7 +75,9 @@ export async function GET(request: NextRequest) {
     const [members, total] = await Promise.all([
       prisma.tenantMembership.findMany({
         where: { tenantId: ctx.tenantId },
-        include: { user: { select: { id: true, name: true, email: true, createdAt: true } } },
+        // status wajib ikut: UI menentukan aktif/nonaktif dari sini. Tanpa
+        // kolom ini, akun yang sudah dinonaktifkan masih terlihat aktif di daftar.
+        include: { user: { select: { id: true, name: true, email: true, status: true, createdAt: true } } },
         orderBy: { createdAt: 'asc' },
         skip,
         take: pageSize,
@@ -94,6 +96,7 @@ export async function GET(request: NextRequest) {
           // OWNER selalu kosong: dia bebas, jadi daftar ini tidak berguna.
           permissions: m.role === 'OWNER' ? [...PERMISSION_KEYS] : normalize(m.permissions),
           isOwner: m.role === 'OWNER',
+          status: m.user.status,
           joinedAt: m.createdAt,
           userCreatedAt: m.user.createdAt,
         })),

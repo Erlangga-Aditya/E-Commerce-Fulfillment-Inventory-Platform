@@ -106,6 +106,14 @@ export async function POST(request: NextRequest) {
     const merged = await mergePdfs(okList);
     const allFailed = [...failed, ...merged.dropped];
 
+    // PDF tanpa halaman sama sekali tidak boleh dikirim sebagai 200: operator
+    // akan membuka berkas kosong dan mengira labelnya sudah tercetak.
+    if (merged.pages === 0) {
+      throw new ValidationError('Label yang dihasilkan tidak punya halaman yang bisa dicetak.', {
+        failed: allFailed.map((f) => `${f.externalOrderId}: ${f.reason}`),
+      });
+    }
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'inline; filename="label-shopee.pdf"',
