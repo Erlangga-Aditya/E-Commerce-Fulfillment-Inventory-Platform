@@ -13,9 +13,21 @@ import { auditLog } from '@/modules/audit/application/auditLog.service';
 // Return state machine
 // ────────────────────────────────────────────────────────────
 
+/**
+ * State machine retur.
+ *
+ * `ARRIVED` sengaja ada: itu artinya paket retur **benar-benar sudah sampai di
+ * gudang**, bukan sekadar status Shopee berubah. Retur belum tentu barangnya
+ * sudah sampai — jadi stok tidak boleh bertambah sebelum tahap ini.
+ *
+ * Alur: Shopee bilang retur → IN_TRANSIT → paket datang (scan/konfirmasi) →
+ * ARRIVED → operator terima → RECEIVED → inspeksi → RESTOCKED (stok naik di
+ * sini, bukan di ARRIVED).
+ */
 const RETURN_TRANSITIONS: Record<ReturnStatus, ReturnStatus[]> = {
-  REQUESTED: ['IN_TRANSIT', 'RECEIVED'],
-  IN_TRANSIT: ['RECEIVED'],
+  REQUESTED: ['IN_TRANSIT', 'ARRIVED'],
+  IN_TRANSIT: ['ARRIVED'],
+  ARRIVED: ['RECEIVED'],
   RECEIVED: ['INSPECTION'],
   INSPECTION: ['RESTOCKED', 'DAMAGED', 'REJECTED', 'CLOSED'],
   RESTOCKED: ['CLOSED'],
@@ -49,9 +61,33 @@ export const InspectReturnSchema = z.object({
     z.object({
       returnItemId: z.string().min(1),
       result: z.enum(['SELLABLE', 'DAMAGED', 'PARTIAL', 'REJECTED']),
+      /**
+       * Untuk `PARTIAL`: berapa unit yang benar-benar layak jual. Wajib diisi
+       * untuk `PARTIAL` supaya tidak perlu menebak angka.
+       */
+      sellableQuantity: z.number().int().min(0).optional(),
       notes: z.string().max(500).optional(),
     }),
   ).min(1),
+});
+
+/**
+ * Scan barang retur yang benar-benar sudah datang di gudang.
+ *
+ * Operator memindai per item (bisa bertahap: paket datang sebagian). Angka
+ * `scannedQuantity` adalah fakta fisik — inilah satu-satunya sumber kebenaran
+ * untuk menaikkan stok retur, bukan status Shopee.
+ */
+export const ScanReturnArrivalSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        returnItemId: z.string().min(1),
+        scannedQuantity: z.number().int().min(0, 'Jumlah hasil pindai tidak boleh negatif.'),
+      }),
+    )
+    .min(1),
+  notes: z.string().max(500).optional(),
 });
 
 // ────────────────────────────────────────────────────────────
@@ -115,7 +151,121 @@ export async function registerReturn(
 }
 
 /**
+ * Catat barang retur yang benar-benar sudah datang di gudang (hasil pindai).
+ *
+ * ATURAN PENTING
+ * --------------
+ * Fungsi ini TIDAK menambah stok. Stok naik hanya di `inspectReturn()` dan
+ * hanya sejumlah unit yang tercatat di sini. Jadi barang yang belum nyampe
+ * tidak akan pernah ikut menambah stok.
+ *
+ * Saat semua item sudah tercakup penuh, retur naik ke `ARRIVED` - inilah
+ * penanda bahwa paketnya benar-benar lengkap di gudang.
+ */
+export async function scanReturnArrival(
+  tenantId: string,
+  returnId: string,
+  input: z.infer<typeof ScanReturnArrivalSchema>,
+  actorId: string,
+): Promise<{
+  returnId: string;
+  status: ReturnStatus;
+  scannedTotal: number;
+  expectedTotal: number;
+  fullyArrived: boolean;
+  message: string;
+}> {
+  const parsed = ScanReturnArrivalSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ValidationError('Data hasil pindai retur tidak valid.', {
+      fields: parsed.error.flatten().fieldErrors,
+    });
+  }
+
+  const returnRecord = await prisma.return.findFirst({
+    where: { id: returnId, order: { tenantId } },
+    include: { items: true },
+  });
+  if (!returnRecord) throw new NotFoundError('Pengembalian', returnId);
+
+  if (returnRecord.status === 'CLOSED' || returnRecord.status === 'RESTOCKED') {
+    throw new BusinessRuleViolationError(
+      `Pengembalian ini sudah selesai diproses (status: ${returnRecord.status}).`,
+    );
+  }
+
+  const expectedTotal = returnRecord.items.reduce((s, i) => s + i.quantity, 0);
+  const touched: string[] = [];
+
+  for (const entry of parsed.data.items) {
+    const item = returnRecord.items.find((i) => i.id === entry.returnItemId);
+    if (!item) throw new NotFoundError('Item pengembalian', entry.returnItemId);
+
+    // Pindai tidak boleh melebihi jumlah yang Shopee bilang akan kembali.
+    // Kalau melebihi, itu salah input - bukan bukti barang lebih banyak.
+    if (entry.scannedQuantity > item.quantity) {
+      throw new BusinessRuleViolationError(
+        `Jumlah hasil pindai (${entry.scannedQuantity}) melebihi jumlah retur yang dijanjikan Shopee (${item.quantity}).`,
+        { returnItemId: item.id, scanned: entry.scannedQuantity, promised: item.quantity },
+      );
+    }
+
+    // Idempoten: pindai ulang dengan angka yang sama tidak mengetik apa pun,
+    // jadi tidak ada risiko stok bertambah dua kali.
+    if (entry.scannedQuantity === item.scannedQuantity) continue;
+
+    await prisma.returnItem.update({
+      where: { id: item.id },
+      data: {
+        scannedQuantity: entry.scannedQuantity,
+        scannedAt: new Date(),
+        notes: parsed.data.notes ?? item.notes,
+      },
+    });
+    touched.push(item.id);
+  }
+
+  const refreshed = await prisma.returnItem.findMany({ where: { returnId } });
+  const scannedTotal = refreshed.reduce((s, i) => s + i.scannedQuantity, 0);
+  const fullyArrived = scannedTotal >= expectedTotal;
+
+  // Retur baru ditandai "sampai" kalau seluruh isinya sudah tercatat.
+  if (fullyArrived && returnRecord.status !== 'ARRIVED') {
+    if (!isValidReturnTransition(returnRecord.status, 'ARRIVED')) {
+      throw new InvalidStateTransitionError('Pengembalian', returnRecord.status, 'ARRIVED');
+    }
+    await prisma.return.update({
+      where: { id: returnId },
+      data: { status: 'ARRIVED', arrivedAt: new Date() },
+    });
+  }
+
+  await auditLog({
+    tenantId,
+    actorId,
+    action: 'return_arrival_scanned',
+    entityType: 'Return',
+    entityId: returnId,
+    metadata: { scannedTotal, expectedTotal, fullyArrived, itemIds: touched },
+  });
+
+  return {
+    returnId,
+    status: fullyArrived ? 'ARRIVED' : returnRecord.status,
+    scannedTotal,
+    expectedTotal,
+    fullyArrived,
+    message: fullyArrived
+      ? `Semua barang retur sudah tercatat datang (${scannedTotal} unit). Lanjut ke penerimaan & inspeksi.`
+      : `Barang retur tercatat ${scannedTotal} dari ${expectedTotal} unit. Sisanya belum datang.`,
+  };
+}
+
+/**
  * Mark return as received at warehouse.
+ *
+ * WAJIB lewat `ARRIVED` dulu: tanpa itu, operator bisa menekan "Terima"
+ * padahal paketnya belum sampai, dan stok ikut bertambah terlalu awal.
  */
 export async function receiveReturn(
   tenantId: string,
@@ -202,8 +352,28 @@ export async function inspectReturn(
 
       // Create inventory movement for sellable items only
       if (inspection.result === 'SELLABLE' || inspection.result === 'PARTIAL') {
-        const restockQty =
-          inspection.result === 'SELLABLE' ? returnItem.quantity : Math.floor(returnItem.quantity / 2);
+        // Dasar perhitungan HANYA jumlah yang benar-benar tercatat sudah datang
+        // (`scannedQuantity`). `returnItem.quantity` adalah angka janji Shopee,
+        // bukan fakta di gudang - memakainya membuat stok bertambah untuk barang
+        // yang belum tiba.
+        //
+        // `PARTIAL` tidak lagi memakai `Math.floor(quantity / 2)` karena angka
+        // setengah tidak pernah berasal dari barang nyata; operator menulis
+        // jumlahnya sendiri saat inspeksi.
+        const availableToRestock = returnItem.scannedQuantity;
+        const restockQty = inspection.sellableQuantity ?? availableToRestock;
+
+        if (restockQty > availableToRestock) {
+          throw new BusinessRuleViolationError(
+            `Jumlah yang dinilai layak jual untuk item ${returnItem.variantId} (${restockQty}) melebihi ` +
+              `jumlah barang yang benar-benar tercatat datang (${availableToRestock}).`,
+            { returnItemId: returnItem.id, sellable: restockQty, arrived: availableToRestock },
+          );
+        }
+        if (restockQty <= 0) {
+          // Tidak ada barang yang benar-benar datang — tidak boleh ada stok baru.
+          continue;
+        }
 
         // Upsert inventory balance
         await tx.inventoryBalance.upsert({
@@ -320,6 +490,8 @@ export async function listReturns(
       status: r.status,
       reason: r.reason,
       receivedAt: r.receivedAt,
+      // Waktu paket benar-benar tiba di gudang (bukan sekadar status Shopee).
+      arrivedAt: r.arrivedAt,
       order: {
         externalOrderId: r.order.externalOrderId,
         shopName: r.order.shop.name,
@@ -329,6 +501,7 @@ export async function listReturns(
         sku: i.variant.sku,
         variantName: i.variant.name,
         quantity: i.quantity,
+        scannedQuantity: i.scannedQuantity,
         inspectionResult: i.inspectionResult,
       })),
     })),

@@ -64,6 +64,8 @@ const STATUS_LABELS: Record<string, { label: string; tone: Tone }> = {
   // Return
   REQUESTED: { label: 'Diajukan', tone: 'neutral' },
   IN_TRANSIT_RETURN: { label: 'Dalam Perjalanan', tone: 'secondary' },
+  /** Paket retur benar-benar sudah tiba di gudang (sudah dicatat barangnya). */
+  ARRIVED: { label: 'Sudah Sampai Gudang', tone: 'success' },
   RECEIVED: { label: 'Diterima', tone: 'secondary' },
   INSPECTION: { label: 'Inspeksi', tone: 'warning' },
   RESTOCKED: { label: 'Restok', tone: 'success' },

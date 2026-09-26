@@ -20,7 +20,10 @@ interface RetItem {
   id: string;
   sku: string;
   variantName: string;
+  /** Jumlah yang Shopee janjikan akan kembali. */
   quantity: number;
+  /** Jumlah yang benar-benar tercatat sudah datang di gudang (hasil pindai). */
+  scannedQuantity: number;
   inspectionResult: string | null;
 }
 
@@ -60,6 +63,8 @@ export default function PengembalianPage() {
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [arrivalModal, setArrivalModal] = useState<Ret | null>(null);
+  const [arrivalQty, setArrivalQty] = useState<Record<string, string>>({});
   const [qcModal, setQcModal] = useState<Ret | null>(null);
   const [qc, setQc] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -110,6 +115,45 @@ export default function PengembalianPage() {
       setNotice({ tone: 'danger', text: `Gagal sinkronkan retur: ${(e as Error).message}` });
     } finally {
       setSyncingReturns(false);
+    }
+  }
+
+  /**
+   * Catat barang retur yang benar-benar sudah datang di gudang.
+   *
+   * Stok BELUM bertambah di sini. Retur hanya ditandai "sampai" kalau seluruh
+   * isinya tercatat, dan baru setelah itu tombol "Terima Fisik" terbuka.
+   */
+  async function submitArrival(e: React.FormEvent) {
+    e.preventDefault();
+    if (!arrivalModal) return;
+    setNotice(null);
+    setSubmitting(true);
+    try {
+      const items = arrivalModal.items.map((i) => ({
+        returnItemId: i.id,
+        scannedQuantity: Number(arrivalQty[i.id] ?? 0),
+      }));
+      if (items.some((i) => !Number.isInteger(i.scannedQuantity) || i.scannedQuantity < 0)) {
+        setNotice({ tone: 'danger', text: 'Jumlah barang yang datang harus angka bulat 0 atau lebih.' });
+        return;
+      }
+      const res = await api<{ message: string; fullyArrived: boolean }>(
+        `/api/v1/returns/${arrivalModal.id}/arrival`,
+        { method: 'POST', body: { items } },
+      );
+      setNotice({
+        tone: 'success',
+        text: res.message +
+          (res.fullyArrived ? '' : ' Barang yang belum dicatat tidak menambah stok.'),
+      });
+      setArrivalModal(null);
+      setArrivalQty({});
+      load();
+    } catch (err) {
+      setNotice({ tone: 'danger', text: (err as Error).message });
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -298,6 +342,20 @@ export default function PengembalianPage() {
                           <button
                             type="button"
                             className="btn btn-primary btn-sm"
+                            onClick={() => {
+                              setArrivalModal(r);
+                              // Default: semua barang dianggap belum datang.
+                              setArrivalQty({});
+                            }}
+                          >
+                            <PackageCheck size={13} aria-hidden />
+                            <span>Catat Barang Datang</span>
+                          </button>
+                        )}
+                        {r.status === 'ARRIVED' && (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
                             onClick={() => receive(r.id)}
                           >
                             <PackageCheck size={13} aria-hidden />
@@ -347,7 +405,8 @@ export default function PengembalianPage() {
                                 <tr>
                                   <th>SKU</th>
                                   <th>Nama Varian</th>
-                                  <th className="num">Kuantitas</th>
+                                  <th className="num">Janji Shopee</th>
+                                  <th className="num">Sudah Datang</th>
                                   <th>Hasil Inspeksi QC</th>
                                 </tr>
                               </thead>
@@ -357,6 +416,11 @@ export default function PengembalianPage() {
                                     <td className="mono">{item.sku}</td>
                                     <td>{item.variantName}</td>
                                     <td className="num">{item.quantity} pcs</td>
+                                    <td className="num">
+                                      <strong style={{ color: item.scannedQuantity > 0 ? 'var(--success)' : 'var(--muted)' }}>
+                                        {item.scannedQuantity} pcs
+                                      </strong>
+                                    </td>
                                     <td>
                                       {item.inspectionResult ? (
                                         <span className="badge badge-neutral">{item.inspectionResult}</span>
@@ -381,6 +445,61 @@ export default function PengembalianPage() {
       )}
 
       {/* Accessible QC Inspection Modal */}
+      {/* Modal: catat barang retur yang benar-benar sudah datang di gudang */}
+      <Modal
+        isOpen={Boolean(arrivalModal)}
+        onClose={() => setArrivalModal(null)}
+        title={`Barang Retur yang Sudah Datang — ${arrivalModal?.externalReturnId ?? arrivalModal?.order.externalOrderId ?? ''}`}
+      >
+        <form onSubmit={submitArrival}>
+          <p className="small muted" style={{ margin: '0 0 14px', lineHeight: 1.55 }}>
+            Hitung barang yang benar-benar ada di gudang. Paket retur belum tentu semua isinya sudah
+            sampai. <strong>Stok belum bertambah di langkah ini</strong> — stok baru naik setelah
+            semua barang tercatat lalu Anda menekan &quot;Terima Fisik&quot; dan mengisi hasil inspeksi.
+          </p>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Barang</th>
+                  <th className="num">Janji Shopee</th>
+                  <th className="num">Sudah datang</th>
+                </tr>
+              </thead>
+              <tbody>
+                {arrivalModal?.items.map((i) => (
+                  <tr key={i.id}>
+                    <td>
+                      <div className="mono" style={{ fontWeight: 600 }}>{i.sku}</div>
+                      <div className="small muted">{i.variantName}</div>
+                    </td>
+                    <td className="num">{i.quantity}</td>
+                    <td className="num" style={{ width: 110 }}>
+                      <input
+                        className="input"
+                        inputMode="numeric"
+                        value={arrivalQty[i.id] ?? ''}
+                        onChange={(e) => setArrivalQty({ ...arrivalQty, [i.id]: e.target.value })}
+                        placeholder="0"
+                        max={i.quantity}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+            <button type="submit" className="btn btn-primary grow" disabled={submitting}>
+              {submitting ? 'Menyimpan...' : 'Simpan Barang yang Datang'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={() => setArrivalModal(null)}>
+              Batal
+            </button>
+          </div>
+        </form>
+      </Modal>
+
       <Modal
         isOpen={Boolean(qcModal)}
         onClose={() => setQcModal(null)}
