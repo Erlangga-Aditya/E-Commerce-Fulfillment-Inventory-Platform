@@ -37,8 +37,10 @@ export interface ShippingChannel {
   /**
    * `pickup_time_id` bila kanalnya pickup.
    *
-   * Nilainya timestamp (mis. `1790499600`), dikirim sebagai NUMBER karena
-   * Shopee menolak string untuk field ini.
+   * Nilainya bentuk TEKS seperti `1790499600_68` (timestamp slot + nomor slot)
+   * dan HARUS dikirim apa adanya. Mengubahnya menjadi angka menghapus bagian
+   * `_68` dan Shopee menjawab `field pickup.pickup_time_id type error`.
+   * Bandingkan `addressId` yang justru wajib number.
    */
   pickupTimeId?: string;
   /** `branch_id` bila kanalnya dropoff. */

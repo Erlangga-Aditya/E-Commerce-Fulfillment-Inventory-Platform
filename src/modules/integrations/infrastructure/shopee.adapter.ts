@@ -1124,21 +1124,26 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         // ["address_id","pickup_time_id"]` ketika alamat jemput belum dipilih
         // (respons sandbox 2026-09-26). Tanpa address_id, ship_order ditolak.
         //
-        // TIPE DATA PENTING (bukti sandbox 2026-09-27):
-        //   address_id     -> harus NUMBER. String ditolak dengan
-        //                     "field pickup.address_id type error".
-        //   pickup_time_id -> harus NUMBER. String ditolak dengan
-        //                     "field pickup.pickup_time_id type error".
-        // Nilai non-angka (mis. `1790499600_3`) dikirim apa adanya agar Shopee
-        // yang menolaknya dengan pesan yang jelas.
-        const num = (v: string | undefined): number | string | undefined => {
+        // TIPE DATA PENTING — dua-duanya sudah dibuktikan lewat respons Shopee
+        // (sandbox, order 26092747HSCR58, 2026-09-27):
+        //
+        //   address_id     = 290774            -> HARUS number
+        //                     string ditolak: "field pickup.address_id type error"
+        //
+        //   pickup_time_id = "1790499600_68"   -> HARUS string
+        //                     angka ditolak:  "field pickup.pickup_time_id type error"
+        //
+        // Perhatikan `pickup_time_id` memang BERBENTUK teks: `1790499600` adalah
+        // timestamp slot, `68` adalah nomor slot. Mengubahnya menjadi angka
+        // akan menghapus bagian `_68` dan Shopee menolaknya.
+        const asNumber = (v: string | undefined): number | undefined => {
           if (v === undefined) return undefined;
           const n = Number(v);
-          return Number.isFinite(n) ? n : v;
+          return Number.isFinite(n) ? n : undefined;
         };
         body.pickup = {
-          ...(channel.addressId ? { address_id: num(channel.addressId) } : {}),
-          pickup_time_id: num(channel.pickupTimeId),
+          ...(channel.addressId ? { address_id: asNumber(channel.addressId) } : {}),
+          pickup_time_id: channel.pickupTimeId,
         };
       } else {
         body.dropoff = channel.branchId ? { branch_id: channel.branchId } : {};

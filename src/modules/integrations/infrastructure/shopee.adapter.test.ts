@@ -186,6 +186,146 @@ describe('ShopeeAdapter', () => {
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Regresi: tipe data field pickup. Dua-duanya sudah ditolak Shopee kalau
+  // salah kirim, jadi harus dikunci di sini agar tidak berubah lagi.
+  //
+  // Bukti respons mentah sandbox 2026-09-27 (order 26092747HSCR58):
+  //   address_id     = 290774          -> wajib number
+  //   pickup_time_id = "1790499600_68" -> wajib string (timestamp + nomor slot)
+  // ─────────────────────────────────────────────────────────────────────
+  describe('arrangeShipment: tipe data field pickup', () => {
+    const RAW_PARAM_RESPONSE = {
+      error: '',
+      message: '',
+      response: {
+        info_needed: { pickup: ['address_id', 'pickup_time_id'] },
+        pickup: {
+          address_list: [
+            {
+              address_id: 290774,
+              region: 'ID',
+              address: 'Jalan Sudirman No. 10',
+              address_flag: ['default_address', 'pickup_address', 'return_address'],
+              time_slot_list: [
+                { date: 1790499600, time_text: 'Now', pickup_time_id: '1790499600_68', flags: ['recommended'] },
+                { date: 1790499600, time_text: '02:00 - 03:00', pickup_time_id: '1790499600_103', flags: [] },
+              ],
+            },
+          ],
+        },
+        dropoff: { branch_list: null },
+      },
+    };
+
+    // callShopee membaca respons lewat `res.text()`, jadi stub harus
+    // menyediakan `text()` — bukan `json()`.
+    function stubFetchSequence(handler: (url: URL, init?: RequestInit) => unknown) {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url = new URL(String(input));
+        const payload = handler(url, init);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify(payload),
+        } as unknown as Response);
+      });
+    }
+
+    const creds: ShopCredentials = { shopId, accessToken, refreshToken: 'r' };
+
+    it('kirim address_id sebagai number dan pickup_time_id sebagai string apa adanya', async () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      stubFetchSequence((url, init) => {
+        if (url.pathname.endsWith('get_shipping_parameter')) {
+          return RAW_PARAM_RESPONSE;
+        }
+        if (url.pathname.endsWith('ship_order')) {
+          bodies.push(JSON.parse(String(init?.body ?? '{}')));
+          return { error: '', message: '', response: {} };
+        }
+        if (url.pathname.endsWith('get_tracking_number')) {
+          return { error: '', response: { tracking_number: 'JP3697577588' } };
+        }
+        return {};
+      });
+
+      const result = await adapter.arrangeShipment(creds, {
+        orderSn: '26092747HSCR58',
+        packageNumber: 'OFG999999999999999999',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.trackingNumber).toBe('JP3697577588');
+      expect(bodies).toHaveLength(1);
+
+      const pickup = bodies[0].pickup as Record<string, unknown>;
+      // address_id WAJIB number — string ditolak "field pickup.address_id type error".
+      expect(typeof pickup.address_id).toBe('number');
+      expect(pickup.address_id).toBe(290774);
+      // pickup_time_id WAJIB string — angka ditolak "field pickup.pickup_time_id type error".
+      expect(typeof pickup.pickup_time_id).toBe('string');
+      expect(pickup.pickup_time_id).toBe('1790499600_68');
+    });
+
+    it('teruskan package_number saat mengambil resi setelah ship_order', async () => {
+      const urls: string[] = [];
+      stubFetchSequence((url) => {
+        urls.push(url.pathname + '?' + url.search);
+        if (url.pathname.endsWith('get_shipping_parameter')) {
+          return RAW_PARAM_RESPONSE;
+        }
+        if (url.pathname.endsWith('ship_order')) {
+          return { error: '', message: '', response: {} };
+        }
+        if (url.pathname.endsWith('get_tracking_number')) {
+          return { error: '', response: { tracking_number: '200003999531' } };
+        }
+        return {};
+      });
+
+      const result = await adapter.arrangeShipment(creds, {
+        orderSn: '26092747HSCR58',
+        packageNumber: 'OFG999999999999999999',
+      });
+
+      expect(result.trackingNumber).toBe('200003999531');
+      // Tanpa package_number Shopee menjawab logistics.package_not_exist,
+      // resi kosong, lalu percobaan berikutnya ditolak package_already_shipped.
+      const trackingCall = urls.find((u) => u.includes('get_tracking_number'));
+      expect(trackingCall).toBeDefined();
+      expect(trackingCall).toContain('package_number=OFG999999999999999999');
+    });
+
+    it('untuk pesanan satu paket tidak mengirim package_number sama sekali', async () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      const paramUrls: string[] = [];
+      stubFetchSequence((url, init) => {
+        if (url.pathname.endsWith('get_shipping_parameter')) {
+          paramUrls.push(url.search);
+          return RAW_PARAM_RESPONSE;
+        }
+        if (url.pathname.endsWith('ship_order')) {
+          bodies.push(JSON.parse(String(init?.body ?? '{}')));
+          return { error: '', message: '', response: {} };
+        }
+        if (url.pathname.endsWith('get_tracking_number')) {
+          return { error: '', response: { tracking_number: 'ID264473909543LU' } };
+        }
+        return {};
+      });
+
+      const result = await adapter.arrangeShipment(creds, { orderSn: '26092747HSCR58' });
+
+      expect(result.success).toBe(true);
+      expect(result.trackingNumber).toBe('ID264473909543LU');
+      // Shopee menolak dengan logistics.ship_order_not_need_pacakge_number
+      // bila package_number dikirim untuk pesanan yang belum dipecah.
+      expect(bodies[0].package_number).toBeUndefined();
+      expect(paramUrls[0]).not.toContain('package_number');
+    });
+  });
+
   describe('mapOrder', () => {
     it('correctly maps Shopee order detail response to MarketplaceOrder structure', async () => {
       const creds: ShopCredentials = {
