@@ -10,11 +10,11 @@ Berbeda dari remote_deploy.py (yang memasang dari nol), skrip ini hanya:
 Jalankan:
   SSHPASS='...' VPS_HOST=103.178.174.224 uv run --with paramiko python deploy/update-vps.py
 
-Tambahkan INSTALL=1 kalau ada perubahan paket di package.json (menjalankan npm ci).
+Dependensi dipasang ulang otomatis bila package-lock.json berubah.
+Tambahkan INSTALL=1 untuk memaksa memasang ulang tanpa perubahan apa pun.
 """
 from __future__ import annotations
 
-import io
 import hashlib
 import os
 import sys
@@ -28,7 +28,7 @@ HOST = os.environ.get("VPS_HOST", "103.178.174.224")
 USER = os.environ.get("VPS_USER", "root")
 PASSWORD = os.environ.get("SSHPASS")
 PORT = int(os.environ.get("VPS_PORT", "22"))
-LOCK_PATH = ROOT / "package-lock.json"
+LOCK_PATH = REPO / "package-lock.json"
 APP_DIR = "/opt/efulfill/app"
 DO_INSTALL = os.environ.get("INSTALL") == "1"
 
