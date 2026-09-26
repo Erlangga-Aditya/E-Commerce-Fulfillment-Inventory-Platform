@@ -1053,30 +1053,51 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     const cfg = await this.cfg();
     try {
       // 1) Tanya Shopee channel apa yang didukung pesanan ini.
-      const paramRes = await callShopee<unknown>(
-        cfg,
-        '/api/v2/logistics/get_shipping_parameter',
-        {
-          // WAJIB GET + query param, bukan POST + body.
-          // Dikonfirmasi langsung di Shopee API Test Tool
-          // (Partner 1245182 -> Logistics -> v2.logistics.get_shipping_parameter):
-          //   "Http Method: GET" dengan Request Parameters `order_sn` dan
-          //   `package_number` (keduanya bertanda wajib `*`).
-          //
-          // Bentuk POST + body `{ order_list: [...] }` dijawab sandbox
-          // dengan `HTTP 404 page not found`, bukan error Shopee yang jelas.
-          // Karena itu aplikasi diam-diam jatuh ke `dropoff: {}` dan gagal dengan
-          // `ship_order_unsupport_dropoff`.
-          method: 'GET',
-          params: {
-            order_sn: input.orderSn,
-            // Tanpa `package_number`, Shopee menjawab
-            // `logistics.package_not_exist` karena paketnya tidak bisa ditemukan.
-            ...(input.packageNumber ? { package_number: input.packageNumber } : {}),
-          },
-        },
-        { shopId: creds.shopId, accessToken: creds.accessToken },
-      );
+      // 1) Tanya Shopee channel apa yang didukung pesanan ini.
+      //
+      // WAJIB GET + query param (bukan POST + body) — dikonfirmasi langsung di
+      // Shopee API Test Tool. Bentuk POST dijawab sandbox dengan
+      // `HTTP 404 page not found`, bukan error Shopee yang jelas.
+      //
+      // `package_number` yang dikirim HANYA untuk pesanan multi-paket. Untuk
+      // pesanan satu paket Shopee menjawab:
+      //   `logistics.ship_order_not_need_pacakge_number`
+      // dan `get_shipping_parameter` menolak paket yang pernah di-ship_order
+      // dengan `Package ... not eligible for rescheduling` — keduanya membuat
+      // operator terjebak tanpa jalan keluar.
+      const paramArgs = {
+        shopId: creds.shopId,
+        accessToken: creds.accessToken,
+      } as const;
+
+      let paramRes: unknown;
+      if (input.packageNumber) {
+        paramRes = await callShopee<unknown>(
+          cfg,
+          '/api/v2/logistics/get_shipping_parameter',
+          { method: 'GET', params: { order_sn: input.orderSn, package_number: input.packageNumber } },
+          paramArgs,
+        );
+        // Kalau paket tidak bisa dijadwalkan ulang, Shopee menolak di tahap ini.
+        // Coba lagi TANPA `package_number` — untuk pesanan satu paket itu justru
+        // bentuk yang benar, dan channel tetap bisa ditemukan.
+        if (extractSupportedChannels(paramRes).length === 0) {
+          const retry = await callShopee<unknown>(
+            cfg,
+            '/api/v2/logistics/get_shipping_parameter',
+            { method: 'GET', params: { order_sn: input.orderSn } },
+            paramArgs,
+          );
+          if (extractSupportedChannels(retry).length > 0) paramRes = retry;
+        }
+      } else {
+        paramRes = await callShopee<unknown>(
+          cfg,
+          '/api/v2/logistics/get_shipping_parameter',
+          { method: 'GET', params: { order_sn: input.orderSn } },
+          paramArgs,
+        );
+      }
       const channels = extractSupportedChannels(paramRes);
       if (channels.length === 0) {
         logger.warn(`Tidak ada kanal pengiriman yang didukung untuk order ${input.orderSn}`, {
