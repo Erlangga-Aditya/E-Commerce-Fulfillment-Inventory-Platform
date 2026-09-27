@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExternalIntegrationError } from '@/shared/errors/AppError';
 import {
   createDocument,
@@ -145,5 +145,78 @@ describe('Shopee shipping document client — file label harus benar-benar file'
     expect(result.contentType).toBe('application/pdf');
     expect(result.fileName).toBe('label-ORDER-1-PKG-1.pdf');
     expect(Array.from(result.bytes)).toEqual(Array.from(pdf));
+  });
+});
+
+// Kegagalan sementara dari Shopee ("Number of response is less than expected")
+// muncul saat Shopee menyelesaikan sebagian batch lalu potongan jawabannya
+// hilang. Permintaan yang sama hampir selalu berhasil bila diulang, jadi klien
+// mencoba lagi beberapa kali sebelum menyerah. Tanpa ini, operator harus
+// menekan tombol cetak ulang sendiri padahal tidak ada yang salah dari sisi
+// pemesanan.
+describe('Shopee shipping document client — kegagalan sementara diulang', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const batchFailure = (failMessage: string): Response =>
+    jsonResponse({
+      error: 'common.batch_api_all_failed',
+      message: 'All failed, please check result_list for detail',
+      response: {
+        result_list: [{ order_sn: target.orderSn, package_number: target.packageNumber, fail_message: failMessage }],
+      },
+    });
+
+  const success = (): Response =>
+    jsonResponse({
+      response: {
+        result_list: [{ order_sn: target.orderSn, package_number: target.packageNumber }],
+      },
+    });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('mengulang saat Shopee bilang "Number of response is less than expected"', async () => {
+    fetchMock
+      .mockResolvedValueOnce(batchFailure('Number of response is less than expected'))
+      .mockResolvedValueOnce(batchFailure('Number of response is less than expected'))
+      .mockResolvedValueOnce(success());
+
+    const p = createDocument(cfg, creds, target, 'NORMAL_AIR_WAYBILL');
+    // Dorong waktu supaya seluruh jeda retry (1,5 dtk + 3 dtk) terlewati.
+    for (let i = 0; i < 10; i += 1) await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(p).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('TIDAK mengulang kalau alasan sebenarnya milik pemesanan', async () => {
+    // "Channel does not support" adalah keputusan final Shopee. Mengulangnya
+    // hanya membuang kuota API dan menunda pesan yang berguna.
+    fetchMock.mockImplementation(() => Promise.resolve(batchFailure('Channel does not support this shipping document type')));
+
+    const p = createDocument(cfg, creds, target, 'NORMAL_AIR_WAYBILL');
+    for (let i = 0; i < 10; i += 1) await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(p).rejects.toBeInstanceOf(ExternalIntegrationError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('menyerah setelah batas percobaan dengan pesan alasan asli, bukan "All failed"', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(batchFailure('Number of response is less than expected')));
+
+    const p = createDocument(cfg, creds, target, 'NORMAL_AIR_WAYBILL');
+    for (let i = 0; i < 20; i += 1) await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(p).rejects.toThrow(/Number of response is less than expected/);
+    // 1 + 2 retry = 3 percobaan, lalu berhenti.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

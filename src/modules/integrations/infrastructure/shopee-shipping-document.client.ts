@@ -30,6 +30,39 @@ import { logger } from '@/shared/observability/logger';
 /** Batas official: order_list 1–50 per panggilan. */
 const BATCH_LIMIT = 50;
 
+/**
+ * Batas percobaan ulang untuk kegagalan sementara dari Shopee.
+ *
+ * Kegagalan ini datang dari sisi Shopee, bukan dari data pemesanan kita, jadi
+ * mencoba lagi beberapa saat kemudian adalah tindakan yang benar - bukan
+ * menutupi kesalahan.
+ */
+const MAX_ATTEMPTS = 3;
+
+/** Jeda antar percobaan. Bertambah linier supaya tidak membanjiri Shopee. */
+const RETRY_DELAY_MS = 1_500;
+
+/**
+ * Pesan yang menandakan kegagalan sementara, bukan keputusan final Shopee.
+ *
+ * `Number of response is less than expected` muncul ketika Shopee selesai
+ * memproses sebagian batch lalu potongan jawabannya hilang. Permintaan yang
+ * sama hampir selalu berhasil bila diulang.
+ */
+const TRANSIENT_BATCH_FAILURES = [
+  'number of response is less than expected',
+  'system error',
+  'request timeout',
+  'too many request',
+] as const;
+
+function isTransientBatchFailure(detail: string): boolean {
+  const lower = detail.toLowerCase();
+  return TRANSIENT_BATCH_FAILURES.some((needle) => lower.includes(needle));
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Signing (identik dengan aturan Shopee v2; dipisah agar unit-test mudah)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +96,7 @@ async function postJson(
   apiPath: string,
   body: Record<string, unknown>,
   creds: ShopCredentials,
+  attempt = 1,
 ): Promise<RawShopeeResponse> {
   const timestamp = Math.floor(Date.now() / 1000);
   const sign = signShopeeRequest(cfg, apiPath, timestamp, creds.accessToken, creds.shopId);
@@ -113,6 +147,21 @@ async function postJson(
     // sementara alasan sebenarnya (mis. kanal tidak mendukung tipe label itu)
     // ada di dalam result_list.
     const detail = describeBatchFailure(json);
+
+    // Kegtigaan dari Shopee, bukan kesalahan data kita. "Number of response is
+    // less than expected" muncul saat Shopee menyelesaikan sebagian batch lalu
+    // potongannya hilang - retry beberapa saat kemudian hampir selalu berhasil.
+    // Tanpa retry, operator harus menekan ulang sendiri padahal tidak ada yang
+    // salah dari sisi pemesanan.
+    if (isTransientBatchFailure(detail) && attempt < MAX_ATTEMPTS) {
+      logger.warn('Shopee gagal sementara saat membuat label, mencoba lagi', {
+        apiPath,
+        attempt,
+        detail: detail.slice(0, 160),
+      });
+      await sleep(RETRY_DELAY_MS * attempt);
+      return postJson(cfg, apiPath, body, creds, attempt + 1);
+    }
     const msg = `Shopee API error [${json.error}] pada ${apiPath}: ${detail}`;
     logger.error(msg, { apiPath, request_id: json.request_id, error: json.error });
     throw new ExternalIntegrationError('shopee', msg, {
