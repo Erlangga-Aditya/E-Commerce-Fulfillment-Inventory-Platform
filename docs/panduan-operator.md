@@ -25,6 +25,12 @@ urutannya mengikuti alur kerja:
 
 ---
 
+> **Tidak ada tombol "tarik data" di sistem ini.** Pesanan baru, nomor resi, dan
+> status pengiriman masuk sendiri. Menu **Integrasi** hanya untuk menghubungkan
+> toko dan memeriksa keadaannya.
+
+---
+
 ## 2. Ambil resi
 
 Resi harus ada lebih dulu sebelum paket bisa diproses.
@@ -54,8 +60,9 @@ mengulang semuanya.
 
 > **Resi kadang terbit terlambat.** Pada beberapa kanal, Shopee menerima
 > permintaan pengiriman lebih dulu dan baru menerbitkan nomornya puluhan detik
-> kemudian. Kalau muncul pesan _"nomor resi belum tersedia"_, tunggu sebentar
-> lalu sinkronkan ulang — resinya biasanya muncul sendiri.
+> kemudian. Kalau muncul pesan _"nomor resi belum tersedia"_, **tidak perlu
+> melakukan apa pun** — sistem mengambil resinya sendiri saat pemeriksaan
+> otomatis berjalan, biasanya dalam satu menit.
 
 ---
 
@@ -155,7 +162,7 @@ Hanya **owner** yang bisa membuka menu **Kelola Tim**.
 |---|---|---|
 | Pesanan ada di **Perlu Diproses**, stok cukup, tapi tidak lanjut | Alokasi stok belum berjalan | Tambahkan stok lewat menu Persediaan; sistem otomatis mencoba lagi |
 | Muncul _"Stok gudang belum cukup"_ | Barang kurang di gudang | Terima barang masuk lewat Persediaan, lalu tunggu |
-| Muncul _"nomor resi belum tersedia"_ | Shopee belum menerbitkan resi | Tunggu sebentar, lalu sinkronkan ulang |
+| Muncul _"nomor resi belum tersedia"_ | Shopee belum menerbitkan resi | Diamkan saja; resinya terambil sendiri dalam sekitar satu menit |
 | Muncul _"Paket belum siap dilabeli"_ | Kanal belum mengizinkan label dicetak | Tunggu beberapa menit, lalu coba lagi |
 | Label ditolak _"tidak cocok dengan pesanan ini"_ | Barcode label bukan milik pesanan itu | Jangan dicetak; cetak ulang, kalau tetap gagal cetak dari Seller Centre |
 | Nomor resi tidak terlihat di label | Normal untuk kanal seperti Sameday | Tidak ada yang perlu dilakukan |
