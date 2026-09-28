@@ -31,6 +31,9 @@ PASSWORD = os.environ.get("SSHPASS")
 PORT = int(os.environ.get("VPS_PORT", "22"))
 LOCK_PATH = REPO / "package-lock.json"
 APP_DIR = "/opt/efulfill/app"
+# Penanda hash package-lock.json yang terakhir benar-benar dipasang.
+# Dipakai untuk memutuskan perlu-tidaknya npm ci; lihat komentar di main().
+INSTALLED_MARKER = "/opt/efulfill/.installed-lock-hash"
 DO_INSTALL = os.environ.get("INSTALL") == "1"
 
 if not PASSWORD:
@@ -126,29 +129,42 @@ def main() -> None:
     )
     run(client, sync_cmd, "1/5 Berkas diperbarui")
 
-    # Deteksi perubahan package.json / package-lock.json di server. Tanpa ini,
-    # tambah satu dependency baru (mis. pdf-lib) lolos ke server tapi tidak
-    # terpasang, dan build gagal dengan "Cannot find module" yang jauh dari
-    #jelas penyebabnya. Perbandingan dilakukan lewat hash, bukan isi
-    # berkas, supaya cepat dan tidak bocor ke log.
+    # Deteksi perubahan package.json / package-lock.json. Tanpa ini, tambah
+    # satu dependency baru (mis. pdf-lib) lolos ke server tapi tidak terpasang,
+    # dan build gagal dengan "Cannot find module" yang jauh dari penyebabnya.
+    #
+    # Pembandingnya adalah PENANDA yang ditulis setiap kali npm ci selesai,
+    # bukan berkas package-lock.json itu sendiri. Alasannya: tarball sudah
+    # diekstrak di langkah sebelumnya, jadi package-lock.json di server sudah
+    # identik dengan yang lokal - membandingkan keduanya SELALU cocok dan
+    # dependensi baru tidak pernah terpasang. Penanda menyimpan hash berkas yang
+    # benar-benar dipakai saat pemasangan terakhir, sehingga perbandingannya
+    # tetap sahih walau urutan unggah berubah.
     local_lock_hash = hashlib.sha256(LOCK_PATH.read_bytes()).hexdigest()
-    remote_hash = run(
+    installed_hash = run(
         client,
-        f"test -f {APP_DIR}/package-lock.json "
-        f"&& sha256sum {APP_DIR}/package-lock.json | cut -d' ' -f1 || echo tidak-ada",
+        f"cat {INSTALLED_MARKER} 2>/dev/null || echo belum-pernah",
         "",
     ).strip()
-    deps_changed = remote_hash != local_lock_hash
+    deps_changed = installed_hash != local_lock_hash
     if deps_changed:
-        print("   package-lock.json berubah -> dependensi akan dipasang ulang")
+        reason = "pertama kali" if installed_hash == "belum-pernah" else "package-lock.json berubah"
+        print(f"   {reason} -> dependensi akan dipasang ulang")
     elif DO_INSTALL:
         deps_changed = True
         print("   INSTALL=1 diminta -> dependensi dipasang ulang")
 
     if deps_changed:
         run(client, f"cd {APP_DIR} && npm ci --no-audit --no-fund", "2/5 Memasang dependensi (npm ci)")
+        # Penanda ditulis hanya SETELAH pemasangan berhasil, supaya kegagalan
+        # tidak tercatat sebagai "sudah terpasang".
+        run(
+            client,
+            f"echo {local_lock_hash} > {INSTALLED_MARKER}",
+            "",
+        )
     else:
-        print("\n── 2/5 Memasang dependensi dilewati (package-lock.json tidak berubah) ──")
+        print("\n── 2/5 Memasang dependensi dilewati (dependensi sudah sesuai) ──")
 
     run(client, f"cd {APP_DIR} && npx prisma generate", "3/5 Menyiapkan Prisma")
     run(client, f"cd {APP_DIR} && npx prisma migrate deploy", "   migrasi database")
