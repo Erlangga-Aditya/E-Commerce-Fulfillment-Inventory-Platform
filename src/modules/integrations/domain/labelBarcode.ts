@@ -23,7 +23,6 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import {
   BinaryBitmap,
   Code128Reader,
@@ -34,6 +33,7 @@ import {
   RGBLuminanceSource,
 } from '@zxing/library';
 import { PNG } from 'pngjs';
+import { EXTRACT_LABEL_IMAGES_PY, READ_LABEL_TEXT_PY } from './labelScripts';
 
 /**
  * Bagian API ZXing yang dipakai. Ditulis eksplisit supaya jelas dan terperiksa,
@@ -81,6 +81,15 @@ const MIN_BARCODE_HEIGHT = 40;
 
 /** Batas ukuran PDF label, supaya satu label rakus tidak menghabiskan memori. */
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
+
+/** Batas keluaran skrip Python. Label 50 halaman tetap jauh di bawah ini. */
+const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Cara menjalankan Python yang sudah terbukti berhasil di mesin ini.
+ * Diisi saat percobaan pertama berhasil, lalu dipakai terus.
+ */
+let cachedRunner: [string, string[]] | null = null;
 
 /**
  * Format barcode yang dicoba, berurutan dari yang paling sering dipakai kurir.
@@ -153,11 +162,10 @@ export async function readLabelBarcodes(pdf: Buffer, workDir: string): Promise<L
   await mkdir(workDir, { recursive: true });
   await writeFile(pdfPath, pdf);
 
-  const raw = await execFileAsync('uv', ['run', '--with', 'pymupdf', 'python', pythonScript('extract-label-images.py'), pdfPath], {
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  const extractScript = await writeScript(workDir, 'extract-images.py', EXTRACT_LABEL_IMAGES_PY);
+  const raw = await runPython(extractScript, [pdfPath]);
   const { images } = parseJsonOutput<{ images: Array<{ page: number; path: string; width: number; height: number }> }>(
-    raw.stdout,
+    raw,
     'daftar gambar label',
   );
 
@@ -206,10 +214,9 @@ export async function readLabelText(pdf: Buffer, workDir: string): Promise<Label
   await mkdir(workDir, { recursive: true });
   await writeFile(pdfPath, pdf);
 
-  const raw = await execFileAsync('uv', ['run', '--with', 'pymupdf', 'python', pythonScript('read-label-text.py'), pdfPath], {
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  return parseJsonOutput<{ pages: LabelPageInfo[] }>(raw.stdout, 'teks label').pages;
+  const textScript = await writeScript(workDir, 'read-text.py', READ_LABEL_TEXT_PY);
+  const raw = await runPython(textScript, [pdfPath]);
+  return parseJsonOutput<{ pages: LabelPageInfo[] }>(raw, 'teks label').pages;
 }
 
 // ── Verifikasi ───────────────────────────────────────────────────────────────
@@ -264,15 +271,66 @@ export async function verifyShippingLabel(
   return { ok: problems.length === 0, problems, notes, barcodes, pages: pages.length };
 }
 
-// ── Lokasi skrip Python ──────────────────────────────────────────────────────
+// ── Menjalankan skrip Python ─────────────────────────────────────────────────
 
 /**
- * Skrip Python diletakkan di sebelah modul ini, bukan di skrip sementara.
+ * Tulis isi skrip ke direktori kerja lalu kembalikan path-nya.
  *
- * Label PDF adalah binary; membacanya dari Node butuh pustaka gambar. Dua
- * skrip kecil di `scripts/` menjalankan PyMuPDF lewat `uv` supaya aplikasi
- * tidak perlu memasang apa pun dan tidak perlu tahu detail format PDF.
+ * Skrip ditulis saat dipakai, bukan dibaca dari berkas di repositori, karena
+ * di build produksi `import.meta.url` menunjuk ke berkas hasil bundel sehingga
+ * path berkas `.py` tidak lagi menunjuk ke tempat yang benar.
  */
-function pythonScript(name: string): string {
-  return fileURLToPath(new URL(`./scripts/${name}`, import.meta.url));
+async function writeScript(workDir: string, name: string, source: string): Promise<string> {
+  const path = `${workDir}/${name}`;
+  await writeFile(path, source, 'utf8');
+  return path;
+}
+
+/**
+ * Jalankan skrip Python dan kembalikan stdout-nya.
+ *
+ * Beberapa cara dicoba berurutan karena mesin pengembang dan server produksi
+ * menyediakan Python dengan cara berbeda: `uv` membuat lingkungan sementara
+ * yang selalu punya PyMuPDF, sedangkan server memakai `python3` sistem dengan
+ * paket `python3-pymupdf` yang dipasang skrip deploy. Yang gagal karena tidak
+ * ada tidak masalah; yang penting ada satu yang berhasil.
+ */
+async function runPython(script: string, args: string[]): Promise<string> {
+  // Cara yang sudah terbukti dipakai lagi tanpa mencoba yang lain. Tanpa ini,
+  // setiap pembacaan label mengulang percobaan `uv` yang di mesin ini butuh
+  // beberapa detik untuk menyiapkan lingkungan sementara - padahal `python3`
+  // biasa sudah cukup. Biayanya berulang berkali-kali dan membuat pemeriksaan
+  // label lambat tanpa alasan.
+  if (cachedRunner) {
+    const out = await execFileAsync(cachedRunner[0], [...cachedRunner[1], script, ...args], {
+      maxBuffer: MAX_OUTPUT_BYTES,
+    });
+    return out.stdout;
+  }
+
+  const runners: Array<[string, string[]]> = [
+    ['uv', ['run', '--with', 'pymupdf', 'python']],
+    ['python3', []],
+    ['python', []],
+  ];
+
+  const kegagalan: string[] = [];
+  for (const [cmd, prefix] of runners) {
+    try {
+      const out = await execFileAsync(cmd, [...prefix, script, ...args], { maxBuffer: MAX_OUTPUT_BYTES });
+      cachedRunner = [cmd, prefix];
+      return out.stdout;
+    } catch (err) {
+      const e = err as { code?: string; stderr?: string; message?: string };
+      // ENOENT = perintah tidak ada di mesin ini; wajar, coba cara berikutnya.
+      if (e.code === 'ENOENT') continue;
+      kegagalan.push(`${cmd}: ${(e.stderr || e.message || '').toString().trim().slice(0, 200)}`);
+    }
+  }
+
+  throw new Error(
+    kegagalan.length > 0
+      ? `Penerjemah PDF gagal dijalankan. ${kegagalan.join(' | ')}`
+      : 'Tidak ada Python yang bisa dipakai untuk membaca label (uv, python3, python semuanya tidak ada).',
+  );
 }
