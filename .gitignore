@@ -40,9 +40,13 @@ coverage/
 scratch_*.ts
 scratch_*.js
 scratch_*.mjs
-tmp-*.ts
-tmp-*.js
-tmp-*.cjs
+# Berkas kerja sementara. Sengaja dibuat SELUAS MUNGKIN (semua awalan tmp-*,
+# bukan hanya .cjs/.ts/.js) karena skrip sementara sering memuat kredensial
+# asli - token Shopee, kata sandi basis data - dan pernah satu kali ikut
+# ter-commit. Pola per-ekstensi selalu ketinggalan saat bahasa baru dipakai
+# untuk skrip sementara (.py, .sh).
+tmp-*
+tmp-labels/
 *.jfif
 # Artefak uji lokal: cookie jar, duplikat bukti, skrip probe, screenshot QA
 lt.txt
