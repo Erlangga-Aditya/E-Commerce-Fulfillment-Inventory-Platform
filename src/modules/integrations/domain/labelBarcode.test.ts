@@ -92,11 +92,16 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
     expect(res.problems.join(' ')).toMatch(/tidak memuat nomor pesanan/i);
   }, BATAS_MS);
 
-  it('menolak AWB yang tidak ada di label', async () => {
+  it('resi yang tidak tercetak di label TIDAK dianggap masalah', async () => {
+    // Label Sameday Instant yang resmi dari Shopee memang tidak mencetak AWB.
+    // Menjadikannya syarat membuat semua label kanal itu ditolak walaupun
+    // aslinya benar - dan itu benar-benar terjadi di produksi. Yang dituntut
+    // hanya penjelasan, bukan penolakan.
     const res = await verifyShippingLabel(pdf, { orderSn, awb: '3278361526652928297' }, workDir);
 
-    expect(res.ok).toBe(false);
-    expect(res.problems.join(' ')).toMatch(/tidak ditemukan di teks maupun barcode/i);
+    expect(res.ok).toBe(true);
+    expect(res.problems).toEqual([]);
+    expect(res.notes.join(' ')).toMatch(/tidak tercetak di label ini/i);
   }, BATAS_MS);
 
   it('menolak berkas yang bukan PDF', async () => {

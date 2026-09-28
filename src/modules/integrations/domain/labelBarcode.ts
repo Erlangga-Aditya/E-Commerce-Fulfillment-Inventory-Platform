@@ -254,18 +254,28 @@ export async function verifyShippingLabel(
     notes.push(`barcode label memuat nomor pesanan (${barcodes.length} barcode terbaca)`);
   }
 
+  // Resi TIDAK dijadikan syarat. Label Sameday Instant yang resmi dari Shopee
+  // memang tidak mencetak AWB sama sekali - yang ada hanya nomor pesanan,
+  // kode pengambilan, dan logo. Menjadikannya syarat membuat SEMUA label
+  // kanal itu ditolak walaupun aslinya benar; itu pernah terjadi dan terbukti
+  // dari pengujian hitam di produksi.
+  //
+  // Jadi ketiadaan resi dicatat sebagai keterangan, bukan masalah. Yang tetap
+  // dianggap masalah hanya bukti nyata: barcode-nya milik pesanan lain.
   const awb = expected.awb;
-  if (awb) {
+  if (!awb) {
+    notes.push('kanal ini tidak mencantumkan AWB di label, jadi resi tidak diperiksa di sini');
+  } else {
     const allText = pages.map((p) => p.text).join('').replace(/\s+/g, '');
     if (allText.includes(awb)) {
       notes.push(`resi ${awb} tercetak sebagai teks di label`);
     } else if (texts.some((t) => t.includes(awb))) {
       notes.push(`resi ${awb} ada di barcode label`);
     } else {
-      problems.push(`Resi ${awb} tidak ditemukan di teks maupun barcode label.`);
+      // Normal untuk kanal seperti Sameday Instant. Dicatat supaya operator
+      // tahu resi tidak akan terbaca dari label ini, tetapi tidak menghalangi.
+      notes.push(`resi ${awb} tidak tercetak di label ini; sebagian kanal memang tidak mencetaknya`);
     }
-  } else {
-    notes.push('kanal ini tidak mencantumkan AWB di label, jadi resi tidak diperiksa di sini');
   }
 
   return { ok: problems.length === 0, problems, notes, barcodes, pages: pages.length };
