@@ -20,8 +20,28 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import {
+  BinaryBitmap,
+  Code128Reader,
+  Code39Reader,
+  DataMatrixReader,
+  HybridBinarizer,
+  QRCodeReader,
+  RGBLuminanceSource,
+} from '@zxing/library';
+import { PNG } from 'pngjs';
+
+/**
+ * Bagian API ZXing yang dipakai. Ditulis eksplisit supaya jelas dan terperiksa,
+ * dan supaya penambahan format baru harus disengaja.
+ */
+interface BarcodeReader {
+  decode(image: BinaryBitmap): { getText(): string };
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +49,9 @@ const execFileAsync = promisify(execFile);
 
 export interface LabelBarcode {
   page: number;
-  /** Format menurut ZXing, mis. "4" untuk CODE_128. */
+  /** Nama format barcode, mis. "CODE_128". Angka enum ZXing tidak dipakai
+   *  karena nilainya mudah tertukar dan pernah menyebabkan decoder yang salah
+   *  (MaxiCode) dipanggil. */
   format: string;
   text: string;
   width: number;
@@ -61,10 +83,23 @@ const MIN_BARCODE_HEIGHT = 40;
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 
 /**
- * Format barcode yang dicoba, berurutan dari yang paling sering dipakai
- * kurir. Nilai diambil dari enum `BarcodeFormat` ZXing.
+ * Format barcode yang dicoba, berurutan dari yang paling sering dipakai kurir.
+ *
+ * Sengaja memakai kelas reader satu per satu, BUKAN `MultiFormatReader`.
+ * `MultiFormatReader` menyapu seluruh format yang dikenal ZXing, termasuk
+ * MaxiCode, dan decoder MaxiCode di ZXing rekursi tanpa henti pada gambar yang
+ * bukan MaxiCode. Akibatnya `RangeError: Maximum call stack size exceeded` -
+ * proses yang memanggilnya mati, bukan sekadar gagal membaca.
+ *
+ * Bukti: label Shopee yang gambar logonya ikut diproses membuat test timeout
+ * karena stack overflow di `maxicode/decoder/Decoder.correctErrors`.
  */
-const BARCODE_FORMATS = [4, 2, 13, 9, 1] as const; // CODE_128, QR, DATA_MATRIX, CODE_39, EAN_13
+const BARCODE_READERS: ReadonlyArray<{ format: string; make: () => BarcodeReader }> = [
+  { format: 'CODE_128', make: () => new Code128Reader() },
+  { format: 'QR_CODE', make: () => new QRCodeReader() },
+  { format: 'DATA_MATRIX', make: () => new DataMatrixReader() },
+  { format: 'CODE_39', make: () => new Code39Reader() },
+];
 
 // ── Bantu ────────────────────────────────────────────────────────────────────
 
@@ -115,17 +150,8 @@ export async function readLabelBarcodes(pdf: Buffer, workDir: string): Promise<L
   }
 
   const pdfPath = `${workDir}/label.pdf`;
-  const { writeFile, mkdir } = await import('node:fs/promises');
   await mkdir(workDir, { recursive: true });
   await writeFile(pdfPath, pdf);
-
-  // Pustaka dekoder barcode dimuat dinamis: hanya perlu saat label benar-benar
-  // diperiksa, bukan setiap kali modul ini diimpor.
-  const [{ default: fs }, zx, { PNG }] = await Promise.all([
-    import('node:fs'),
-    import('@zxing/library'),
-    import('pngjs'),
-  ]);
 
   const raw = await execFileAsync('uv', ['run', '--with', 'pymupdf', 'python', pythonScript('extract-label-images.py'), pdfPath], {
     maxBuffer: 32 * 1024 * 1024,
@@ -138,11 +164,11 @@ export async function readLabelBarcodes(pdf: Buffer, workDir: string): Promise<L
   const found: LabelBarcode[] = [];
   for (const meta of images) {
     if (meta.width < MIN_BARCODE_WIDTH || meta.height < MIN_BARCODE_HEIGHT) continue;
-    if (!fs.existsSync(meta.path)) continue;
+    if (!existsSync(meta.path)) continue;
 
     let png;
     try {
-      png = PNG.sync.read(fs.readFileSync(meta.path));
+      png = PNG.sync.read(readFileSync(meta.path));
     } catch {
       continue;
     }
@@ -150,22 +176,17 @@ export async function readLabelBarcodes(pdf: Buffer, workDir: string): Promise<L
     const lum = new Uint8ClampedArray(png.width * png.height);
     for (let i = 0, p = 0; i < lum.length; i += 1, p += 4) lum[i] = png.data[p] ?? 255;
 
-    // Format diuji satu per satu. MultiFormatReader sering gagal pada
-    // barcode tertentu yang justru berhasil dibaca format spesifiknya.
-    for (const format of BARCODE_FORMATS) {
-      const reader = new zx.MultiFormatReader();
-      const hints = new Map<number, unknown>();
-      hints.set(zx.DecodeHintType.TRY_HARDER, true);
-      hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [format]);
-      reader.setHints(hints);
-      const bitmap = new zx.BinaryBitmap(
-        new zx.HybridBinarizer(new zx.RGBLuminanceSource(lum, png.width, png.height)),
-      );
+    // Format diuji satu per satu memakai reader khusus. MultiFormatReader
+    // tidak dipakai karena ia menyapu semua format yang dikenal ZXing,
+    // termasuk MaxiCode, dan decoder MaxiCode rekursi sampai stack overflow
+    // pada gambar yang bukan MaxiCode - prosesnya mati, bukan cuma gagal.
+    const bitmap = new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(lum, png.width, png.height)));
+    for (const { format, make } of BARCODE_READERS) {
       try {
-        const res = reader.decode(bitmap);
+        const res = make().decode(bitmap);
         found.push({
           page: meta.page,
-          format: String(res.getBarcodeFormat()),
+          format,
           text: res.getText(),
           width: meta.width,
           height: meta.height,
@@ -182,7 +203,6 @@ export async function readLabelBarcodes(pdf: Buffer, workDir: string): Promise<L
 /** Teks label per halaman. */
 export async function readLabelText(pdf: Buffer, workDir: string): Promise<LabelPageInfo[]> {
   const pdfPath = `${workDir}/label-text.pdf`;
-  const { writeFile, mkdir } = await import('node:fs/promises');
   await mkdir(workDir, { recursive: true });
   await writeFile(pdfPath, pdf);
 

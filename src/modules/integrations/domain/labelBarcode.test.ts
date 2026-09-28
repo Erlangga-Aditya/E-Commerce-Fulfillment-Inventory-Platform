@@ -37,6 +37,12 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
   const pdf = readFileSync(LABEL_PDF);
   const workDir = mkdtempSync(join(tmpdir(), 'label-test-'));
 
+  // Membaca barcode menjalankan proses Python (uv + PyMuPDF). Default vitest
+  // 5 detik terlalu ketat: satu pembacaan butuh sekitar 3-4 detik sendiri, dan
+  // lebih lama lagi saat suite berjalan paralel. Tanpa ini, test gagal karena
+  // kehabisan waktu, bukan karena kodenya salah.
+  const BATAS_MS = 30_000;
+
   it('menemukan barcode yang memuat nomor pesanan', async () => {
     const barcodes = await readLabelBarcodes(pdf, workDir);
 
@@ -46,13 +52,26 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
       texts.some((t) => t.includes(orderSn)),
       `barcode yang terbaca: ${JSON.stringify(texts)}`,
     ).toBe(true);
-  });
+  }, BATAS_MS);
 
   it('format barcode yang terbaca adalah Code 128 atau QR', async () => {
     const barcodes = await readLabelBarcodes(pdf, workDir);
-    // ZXing: 4 = CODE_128, 2 = QR_CODE
     const format = barcodes.find((b) => b.text.includes(orderSn))?.format;
-    expect(['4', '2']).toContain(format);
+    expect(['CODE_128', 'QR_CODE']).toContain(format);
+  }, BATAS_MS);
+
+  it('tidak pernah menyentuh decoder MaxiCode yang rekursi sampai stack overflow', async () => {
+    // Label Shopee memuat logo yang ukurannya mirip barcode. Saat pembaca
+    // menyapu semua format (MultiFormatReader), decoder MaxiCode ZXing
+    // rekursi tanpa henti pada gambar seperti itu dan prosesnya mati.
+    // Test ini menjaga supaya pembaca tetap memakai reader khusus.
+    //
+    // Yang diperiksa adalah PEMAKAIANNYA (`new zx.X`), bukan penyebutan di
+    // komentar - penjelasan kenapa cara itu dihindari justru perlu tetap ada.
+    const src = readFileSync(join(__dirname, 'labelBarcode.ts'), 'utf8');
+    expect(src).not.toMatch(/new (zx\.)?MultiFormatReader/);
+    expect(src).not.toMatch(/new (zx\.)?MaxiCodeReader/);
+    expect(src).toMatch(/new Code128Reader\(\)/);
   });
 
   it('label dinyatakan sah untuk kanal yang tidak mencantumkan AWB', async () => {
@@ -62,7 +81,7 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
     expect(res.problems).toEqual([]);
     expect(res.ok).toBe(true);
     expect(res.pages).toBe(1);
-  });
+  }, BATAS_MS);
 
   it('menolak label yang bukan milik pesanan itu', async () => {
     // Nomor pesanan lain harus dianggap gagal, inilah yang mencegah label
@@ -71,17 +90,17 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
 
     expect(res.ok).toBe(false);
     expect(res.problems.join(' ')).toMatch(/tidak memuat nomor pesanan/i);
-  });
+  }, BATAS_MS);
 
   it('menolak AWB yang tidak ada di label', async () => {
     const res = await verifyShippingLabel(pdf, { orderSn, awb: '3278361526652928297' }, workDir);
 
     expect(res.ok).toBe(false);
     expect(res.problems.join(' ')).toMatch(/tidak ditemukan di teks maupun barcode/i);
-  });
+  }, BATAS_MS);
 
   it('menolak berkas yang bukan PDF', async () => {
     const bukanPdf = Buffer.from('ini jelas bukan PDF sama sekali');
     await expect(readLabelBarcodes(bukanPdf, workDir)).rejects.toThrow(/bukan PDF/i);
-  });
+  }, BATAS_MS);
 });

@@ -47,10 +47,17 @@ describe('Crypto Service (AES-256-GCM)', () => {
   it('should throw when tampered ciphertext is provided', () => {
     const enc = encryptSecret('sensitive_data');
     const [iv, tag, data] = enc.split(':');
-    // Alter ciphertext
-    const tamperedData = 'ff' + (data ?? '').slice(2);
+    // Ubah byte pertama menjadi nilai yang PASTI berbeda, bukan ditimpa
+    // konstanta 'ff'. Menimpa dengan 'ff' gagal sesekali (sekitar 1 dari 256
+    // kali) ketika byte pertama ciphertext kebetulan memang sudah ff: isinya
+    // tidak berubah, dekripsi berhasil, dan test gagal padahal kodenya benar.
+    const asli = (data ?? '').slice(0, 2);
+    const berbeda = ((parseInt(asli, 16) ^ 0x01) & 0xff).toString(16).padStart(2, '0');
+    const tamperedData = berbeda + (data ?? '').slice(2);
     const tampered = [iv, tag, tamperedData].join(':');
 
+    // Pastikan prasyaratnya benar-benar terpenuhi: byte memang berubah.
+    expect(tamperedData).not.toBe(data);
     expect(() => decryptSecret(tampered)).toThrow();
   });
 
