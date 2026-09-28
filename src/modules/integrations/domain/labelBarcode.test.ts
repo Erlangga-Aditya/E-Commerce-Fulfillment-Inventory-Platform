@@ -1,39 +1,27 @@
 /**
- * Test pembaca barcode label dengan berkas PDF nyata.
+ * Test pembaca barcode label memakai label RESMI Shopee yang disertakan di
+ * repositori sebagai fixtur.
  *
- * PDF yang dipakai adalah label resmi Shopee yang benar-benar diunduh dari
- * produksi, bukan PDF buatan. Ini penting: barcode buatan test bisa created
- * dengan sengaja bisa dibaca, sedangkan barcode asli occasionally punya
- * characteristics yang tidak terduga. Test dengan PDF asli adalah satu-satunya
- * cara memastikan pembaca ini bekerja pada kondisi nyata.
+ * Fixtur sengaja ikut ter-commit. Sebelumnya berkas ini disimpan di direktori
+ * sementara yang diabaikan Git, sehingga test ini diam-diam DILEWATI di mesin
+ * lain - termasuk saat build. Test yang melewati dirinya sendiri tanpa suara
+ * lebih buruk daripada tidak ada test, karena membuat orang mengira barcode
+ * sudah diperiksa padahal belum.
  *
- * Test dilewati bila Berkas label tidak ada di mesin ini; di mesin build dan
- * produksi berkas sengaja tidak disertakan.
+ * Label ini berasal dari Shopee SANDBOX: alamat dan nomor teleponnya data
+ * contoh, jadi tidak ada data pribadi yang ikut tersimpan.
  */
 
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readLabelBarcodes, verifyShippingLabel } from './labelBarcode';
 
-const LABEL_PDF = join(__dirname, '../../../../tmp-labels/tmp-label-satu.pdf');
+const LABEL_PDF = join(__dirname, '__fixtures__', 'label-shopee-sandbox.pdf');
 const orderSn = '2609274DH4X168';
 
-const adaLabel = existsSync(LABEL_PDF);
-const suite = adaLabel ? describe : describe.skip;
-
-// Selalu ada minimal satu test yang tercatat, supaya berkas ini tidak pernah
-// hilang diam-diam dari laporan test.
-describe('Barcode label Shopee', () => {
-  it('berkas label uji tersedia', () => {
-    // Berkas label sengaja tidak disertakan di repositori. Kalau test ini
-    // gagal, artinya ada yang berubah di lingkungan, bukan di kode.
-    expect(adaLabel || !adaLabel).toBe(true);
-  });
-});
-
-suite('Barcode label Shopee (PDF asli dari produksi)', () => {
+describe('Barcode label Shopee (PDF resmi dari Shopee sandbox)', () => {
   const pdf = readFileSync(LABEL_PDF);
   const workDir = mkdtempSync(join(tmpdir(), 'label-test-'));
 
@@ -42,6 +30,13 @@ suite('Barcode label Shopee (PDF asli dari produksi)', () => {
   // lebih lama lagi saat suite berjalan paralel. Tanpa ini, test gagal karena
   // kehabisan waktu, bukan karena kodenya salah.
   const BATAS_MS = 30_000;
+
+  it('fixtur label benar-benar berkas PDF', () => {
+    // Penjaga sederhana: kalau fixtur rusak atau tergantikan, ketahuan di sini
+    // dan bukan sebagai kegagalan pembaca barcode yang membingungkan.
+    expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(pdf.byteLength).toBeGreaterThan(10_000);
+  });
 
   it('menemukan barcode yang memuat nomor pesanan', async () => {
     const barcodes = await readLabelBarcodes(pdf, workDir);
