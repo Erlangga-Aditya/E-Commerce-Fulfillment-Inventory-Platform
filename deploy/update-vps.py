@@ -168,6 +168,17 @@ def main() -> None:
 
     run(client, f"cd {APP_DIR} && npx prisma generate", "3/5 Menyiapkan Prisma")
     run(client, f"cd {APP_DIR} && npx prisma migrate deploy", "   migrasi database")
+
+    # Pemeriksaan barcode label membaca PDF memakai PyMuPDF lewat python3.
+    # Pustaka itu milik sistem, bukan npm, jadi `npm ci` tidak memasangnya dan
+    # tanpa baris ini pemeriksaan barcode diam-diam selalu gagal di server
+    # (ditandai "gagal-diperiksa") tanpa ada yang menyadari.
+    run(
+        client,
+        "python3 -c 'import pymupdf' 2>/dev/null || "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pymupdf",
+        "   memastikan PyMuPDF tersedia",
+    )
     # .next dibersihkan sebelum build: Turbopack menyimpan cache transformasi
     # di dalam .next, dan cache lama pernah referencing modul yang sudah
     # tidak ada sehingga build gagal padahal dependensinya sudah benar.
