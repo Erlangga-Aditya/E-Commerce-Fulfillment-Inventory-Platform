@@ -6,8 +6,6 @@ import {
   Truck,
   RefreshCw,
   Printer,
-  ChevronDown,
-  ChevronUp,
   Copy,
   Check,
   Clock,
@@ -261,12 +259,16 @@ export default function PengirimanPage() {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: 36 }}></th>
                 <th>No. Resi (AWB)</th>
                 <th>No. Pesanan</th>
                 <th>Toko & Pembeli</th>
                 <th>Ekspedisi</th>
-                <th>Status Terkini</th>
+                <th>
+                  Status Terkini
+                  <div className="small muted" style={{ fontWeight: 400, marginTop: 2 }}>
+                    klik baris untuk riwayat
+                  </div>
+                </th>
                 <th>Waktu Kirim</th>
                 <th style={{ textAlign: 'center' }}>Aksi</th>
               </tr>
@@ -279,18 +281,14 @@ export default function PengirimanPage() {
 
                 return (
                   <>
-                    <tr key={s.id} style={{ background: isExpanded ? 'var(--subtle)' : undefined }}>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-icon btn-sm"
-                          title="Lihat Timeline Tracking"
-                          onClick={() => toggleExpand(s)}
-                          style={{ padding: 4 }}
-                        >
-                          {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                        </button>
-                      </td>
+                    <tr
+                      key={s.id}
+                      onClick={() => toggleExpand(s)}
+                      style={{
+                        background: isExpanded ? 'var(--subtle)' : undefined,
+                        cursor: 'pointer',
+                      }}
+                    >
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <Truck size={15} style={{ color: 'var(--primary)', flexShrink: 0 }} aria-hidden />
@@ -365,7 +363,7 @@ export default function PengirimanPage() {
                     {/* Collapsible Tracking Timeline */}
                     {isExpanded && (
                       <tr key={`${s.id}-timeline`} style={{ background: 'var(--subtle)' }}>
-                        <td colSpan={8} style={{ padding: '16px 24px' }}>
+                        <td colSpan={7} style={{ padding: '16px 24px' }}>
                           <div
                             style={{
                               background: 'var(--surface)',
