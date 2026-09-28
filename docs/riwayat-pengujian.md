@@ -208,3 +208,102 @@ curl -s  https://103-178-174-224.sslip.io/manifest.webmanifest
 
 Server uji memakai gudang khusus `E2E-WH-01` supaya tidak berebut stok dengan
 pesanan asli yang sedang berjalan. Jangan `prisma migrate reset` — data klien hilang.
+
+---
+
+## 12. Siklus penuh per 2026-09-28 (hak akses, massal, barcode)
+
+Bagian ini mencatat pengujian yang **benar-benar dijalankan** pada siklus ini.
+Tidak ada baris di bawah yang ditulis tanpa perintahnya dijalankan lebih dulu.
+
+### 12.1 Ringkasan
+
+| Lapisan | Perintah | Hasil |
+|---|---|---|
+| Tipe | `npm run typecheck` | 0 error |
+| Lint | `npm run lint` | 0 error, 0 warning |
+| Unit + regresi | `npm test` | **273 lulus**, 11 dilewati, 0 gagal |
+| E2E fulfillment 4 pesanan | skrip `tmp-e2e3.cjs` di server (HTTP publik) | 4/4 `HANDED_OVER` |
+| Hak akses (uji hitam) | skrip `tmp-role.cjs` di server (HTTP publik) | **31 lulus, 0 gagal** |
+| Label massal | `POST /api/v1/orders/bulk-print-labels` | 3 label, 0 gagal, PDF 273.754 byte, 3 halaman |
+| Barcode label | modul `labelBarcode` | 6/6 label produksi `cocok` |
+| Deploy | `deploy/update-vps.py` | selesai, aplikasi lokal 200 |
+
+### 12.2 E2E fulfillment — empat pesanan, satu siklus penuh
+
+Alur yang dijalankan lewat HTTP publik: stok masuk -> ambil resi -> alokasi ->
+pindai resi (picking + packing) -> tandai siap kirim -> serah terima kurir.
+
+| Pesanan | Resi | Stok terpotong | Tahap akhir |
+|---|---|---|---|
+| `2609274DGA7MGV` | `200003421325` | 1 | `HANDED_OVER` |
+| `2609274DH4X168` | `3278361526652928297` | 1 | `HANDED_OVER` |
+| `2609274DHVS0DT` | `JP9389220129` | **2** | `HANDED_OVER` |
+| `2609274DJJQ2KX` | `3278362215763968297` | 1 | `HANDED_OVER` |
+
+`DHVS0DT` adalah pesanan dua SKU; pemotongan stok 2 unit membuktikan jalur
+multi-item ikut benar.
+
+**Verifikasi dari sisi Shopee.** Sinkronisasi Shopee membaca 25 pesanan dan
+event pengiriman yang tersimpan berasal dari Shopee sendiri:
+_"Pengirim telah mengatur pengiriman. Menunggu paket diserahkan ke pihak jasa
+kirim"_. Ini membuktikan `ship_order` benar-benar terkirim, bukan hanya status
+lokal.
+
+### 12.3 Hak akses — 31 uji hitam lulus
+
+Diuji lewat HTTP publik, bukan unit test. Yang dibuktikan antara lain:
+
+- Staff tidak dapat membuka halaman keuangan, kelola tim, dan integrasi
+  (dialihkan), dan API-nya dijawab 403.
+- Kredensial Shopee ditolak untuk staff (403).
+- Setelah owner mencabut izin, halaman yang tadinya boleh langsung dialihkan
+  dan API-nya langsung ditolak - tanpa menunggu token kedaluwarsa.
+- Akun yang dinonaktifkan tidak bisa masuk lagi.
+- Staff tidak bisa menaikkan dirinya menjadi OWNER (403).
+- Owner tidak bisa menurunkan dirinya sendiri.
+
+### 12.4 Label massal dan barcode
+
+- Label massal memakai PDF resmi Shopee lalu digabung dengan `pdf-lib`.
+  Hasil: 273.754 byte, 3 halaman, 0 gagal, `Content-Type: application/pdf`.
+- Barcode dibaca dari gambar di dalam PDF resmi, bukan dari teks.
+  Terbaca: `2609288432HC4A`, `2609274DJJQ2KX`, `2609274DHVS0DT`,
+  `2609274DH4X168`, `2609274DGA7MGV`, `26092747HSCR58` - semuanya cocok
+  dengan nomor pesanan masing-masing.
+
+**Temuan penting tentang resi (AWB).** Label kanal Sameday Instant yang resmi
+dari Shopee **tidak mencetak AWB sama sekali**. Yang tercetak: nomor pesanan
+(Code 128 dan QR), kode pengambilan (mis. `83ZE`), dan logo kanal. Karena itu
+aturan "barcode PDF harus sama dengan AWB" **tidak berlaku** untuk semua kanal;
+menerapkannya ke semua kanal akan menolak label yang sebenarnya benar. Yang
+dijadikan syarat adalah barcode harus milik **nomor pesanan** yang sedang
+dicetak.
+
+### 12.5 Cacat nyata yang ditemukan dan diperbaiki pada siklus ini
+
+Setiap butir di bawah ditemukan dari pengujian nyata, bukan dugaan.
+
+| Cacat | Akibat | Perbaikan |
+|---|---|---|
+| Nomor format ZXing ditulis dari ingatan (QR=2, DATA_MATRIX=13, CODE_39=9) | Pembaca memanggil decoder **MaxiCode** yang rekursi sampai stack overflow; proses bisa mati | Memakai kelas reader langsung (`Code128Reader` dll.) |
+| Deploy membandingkan hash `package-lock.json` setelah berkas itu ikut terunggah | `npm ci` tidak pernah jalan; dependency baru tidak terpasang, build gagal jauh dari penyebabnya | Memakai penanda hash yang ditulis setelah `npm ci` berhasil |
+| `import.meta.url` dipakai untuk mencari skrip `.py` | Di build produksi menunjuk ke berkas bundel; pemeriksaan label selalu gagal diam-diam di server | Isi skrip ditanam di modul lalu ditulis ke direktori sementara |
+| Resi dijadikan syarat kelulusan label | **Semua** label Sameday ditolak (HTTP 400) walaupun benar | Resi menjadi keterangan, bukan syarat; syaratnya nomor pesanan |
+| Test enkripsi menimpa byte ciphertext dengan `'ff'` | Gagal sekitar 1 dari 256 kali karena byte aslinya sudah `ff` (test flaky) | Byte diubah dengan XOR agar dipastikan berbeda |
+| Daftar gagal label dikirim seluruhnya di satu header | 50 pesanan gagal menembus batas header dan responsnya ditolak proxy | Sepuluh alasan pertama; jumlah total tetap jujur |
+
+Tiga cacat pertama tidak terlihat dari test lokal: yang pertama hanya muncul
+saat gambar logo ikut diproses, yang kedua hanya di jalur deploy, dan yang
+ketiga hanya di build produksi. Semuanya tertangkap karena diuji ke sistem
+nyata, bukan karena test bertambah.
+
+### 12.6 Yang BELUM diuji (jangan ditulis lulus)
+
+- **Shopee API Test Tool** di `open.shopee.com/console/tools/api-test`:
+  halaman memerlukan login dan kata sandi konsol tidak tersedia di sesi ini.
+- **Perpindahan sandbox -> live**: sengaja masih sandbox.
+- **QA visual** (desktop dan ponsel) untuk halaman Kelola Tim dan panel massal.
+- **Uji request paralel** untuk memastikan dua operator yang memindai bersamaan
+  tidak menghasilkan pekerjaan ganda.
+- **Kamera di perangkat nyata**.
