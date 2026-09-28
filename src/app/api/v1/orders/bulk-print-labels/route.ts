@@ -12,6 +12,15 @@ import { generateShippingLabel } from '@/modules/integrations/application/sync.s
 import { mergePdfs } from './mergePdfs';
 import { logger } from '@/shared/observability/logger';
 
+/**
+ * Jumlah alasan gagal terbanyak yang dikirim lewat header.
+ *
+ * Header HTTP punya batas panjang dan proxy menolaknya bila terlalu panjang.
+ * Sepuluh alasan sudah cukup untuk menuntun operator memperbaiki masalah yang
+ * paling sering muncul; sisanya dibaca dari log server.
+ */
+const MAX_HEADER_REASONS = 10;
+
 export const dynamic = 'force-dynamic';
 
 const BulkSchema = z.object({
@@ -126,10 +135,19 @@ export async function POST(request: NextRequest) {
       'X-Label-Halaman': String(merged.pages),
     };
     if (allFailed.length > 0) {
-      // URL-encode supaya aman di header HTTP.
-      headers['X-Label-Gagal-Daftar'] = encodeURIComponent(
-        allFailed.map((f) => `${f.externalOrderId}: ${f.reason}`).join(' | '),
-      );
+      // Header HTTP punya batas panjang (nginx menolak sekitar 8 KB). Dengan
+      // 50 pesanan yang semuanya gagal, daftar penuh bisa melewati batas itu
+      // dan responsnya ditolak proxy - justru saat operator paling butuh
+      // penjelasan. Jadi yang dikirim hanya beberapa alasan pertama, sementara
+      // jumlah totalnya tetap dilaporkan apa adanya di X-Label-Gagal.
+      //
+      // Rincian lengkap setiap kegagalan tetap tercatat di log server.
+      const ringkas = allFailed.slice(0, MAX_HEADER_REASONS);
+      const sisa = allFailed.length - ringkas.length;
+      const teks =
+        ringkas.map((f) => `${f.externalOrderId}: ${f.reason}`).join(' | ') +
+        (sisa > 0 ? ` | ... dan ${sisa} lagi (lihat X-Label-Gagal)` : '');
+      headers['X-Label-Gagal-Daftar'] = encodeURIComponent(teks);
     }
 
     if (allFailed.length > 0) {
