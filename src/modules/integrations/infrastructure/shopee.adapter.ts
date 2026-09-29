@@ -409,7 +409,20 @@ export class ShopeeAdapter implements MarketplaceAdapter {
         time_to: to,
         page_size: 50,
         response_optional_fields: 'order_status',
-        request_order_status_pending: true,
+        // `order_status` sengaja TIDAK dikirim, dan `request_order_status_pending`
+        // sudah dibuang.
+        //
+        // Sebelumnya di sini tertulis `request_order_status_pending: true`, yang
+        // hanya meminta pesanan yang BELUM dikirim. Akibatnya begitu paket
+        // dikirim, Shopee tidak mengembalikan pesanan itu lagi - sehingga status
+        // pesanan dan status pengiriman membeku selamanya di "siap dikirim".
+        // Aplikasi tidak pernah bisa menampilkan paket yang sedang di perjalanan
+        // maupun yang sudah diterima pembeli, walaupun datanya ada di Shopee.
+        //
+        // `order_status` bersifat opsional: bila tidak dikirim, Shopee
+        // mengembalikan pesanan pada SEMUA status dalam rentang waktu ini. Itu
+        // yang kita perlukan, dan sekaligus menghindari masalah format karena
+        // parameter berulang tidak diserialisasi sebagai daftar JSON.
       };
       if (cursor) {
         params.cursor = cursor;
