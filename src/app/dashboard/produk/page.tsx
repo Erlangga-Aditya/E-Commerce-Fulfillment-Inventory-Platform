@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, useMemo } from 'react';
+import { Pagination, type PaginationInfo } from '@/components/pagination';
 import {
   Package,
   Plus,
@@ -48,6 +49,8 @@ interface Product {
 
 export default function ProdukPage() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationInfo | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
@@ -110,18 +113,47 @@ export default function ProdukPage() {
       .catch(() => undefined);
   }, []);
 
+  /**
+   * Kembali ke halaman 1 saat penyaring berubah.
+   *
+   * Dilakukan di dalam penangan perubahan, bukan di dalam effect: menyetel
+   * keadaan di dalam effect memicu render berantai (satu render untuk nilai
+   * lama, satu lagi untuk nilai baru). Di sini keduanya berubah bersamaan.
+   *
+   * Tanpa ini, operator yang sedang di halaman 5 lalu mencari sesuatu akan
+   * mendarat di halaman 5 hasil pencarian baru - sering kali kosong, dan
+   * tampak seperti pencariannya tidak menemukan apa pun.
+   */
+  const ubahPencarian = (v: string) => {
+    setSearch(v);
+    setPage(1);
+  };
+  const ubahStatus = (v: string) => {
+    setStatusFilter(v);
+    setPage(1);
+  };
+
   const load = useCallback(() => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ page: String(page) });
     if (statusFilter !== 'ALL') q.set('status', statusFilter);
     if (search) q.set('search', search);
 
-    api<{ items: Product[] }>(`/api/v1/catalog/products?${q.toString()}`)
-      .then((d) => setProducts(d.items ?? []))
+    api<{ items: Product[]; pagination: PaginationInfo }>(`/api/v1/catalog/products?${q.toString()}`)
+      .then((d) => {
+        setProducts(d.items ?? []);
+        setPagination(d.pagination ?? null);
+        // Server bisa menjepit halaman yang diminta (mis. halaman terakhir
+        // menjadi kosong setelah produk dihapus). Ikuti halaman yang benar-benar
+        // tampil supaya penanda halaman tidak berbohong.
+        if (d.pagination?.page) setPage(d.pagination.page);
+      })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
-  }, [statusFilter, search]);
+  }, [statusFilter, search, page]);
 
   useEffect(load, [load]);
+
+
 
   // Realtime auto-update whenever background auto-sync completes
   useEffect(() => {
@@ -341,7 +373,7 @@ export default function ProdukPage() {
               className="search-input"
               placeholder="Cari nama produk, SKU varian, kategori, barcode..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => ubahPencarian(e.target.value)}
             />
           </div>
         </div>
@@ -358,7 +390,7 @@ export default function ProdukPage() {
               type="button"
               className={`btn btn-sm ${statusFilter === f.value ? 'btn-primary' : 'btn-secondary'}`}
               style={{ borderRadius: 20, fontSize: 12, padding: '4px 12px' }}
-              onClick={() => setStatusFilter(f.value)}
+              onClick={() => ubahStatus(f.value)}
             >
               {f.label}
             </button>
@@ -530,6 +562,9 @@ export default function ProdukPage() {
               })}
             </tbody>
           </table>
+          {pagination && (
+            <Pagination info={pagination} onChange={setPage} label="produk" disabled={loading} />
+          )}
         </div>
       )}
 

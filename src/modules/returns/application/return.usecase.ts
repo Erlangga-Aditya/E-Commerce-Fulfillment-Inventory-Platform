@@ -450,14 +450,40 @@ export async function inspectReturn(
  */
 export async function listReturns(
   tenantId: string,
-  options: { status?: ReturnStatus; page?: number; pageSize?: number } = {},
+  options: { status?: ReturnStatus; search?: string; page?: number; pageSize?: number } = {},
 ) {
-  const { status, page = 1, pageSize = 50 } = options;
+  const { status, search, page = 1, pageSize = 50 } = options;
   const skip = (page - 1) * pageSize;
+  const keyword = search?.trim();
 
+  // Pencarian dilakukan di DATABASE, bukan di browser.
+  //
+  // Sebelumnya penyaringan dijalankan di browser atas daftar yang sudah dipotong
+  // per halaman. Akibatnya pencarian hanya menelusuri halaman yang sedang
+  // tampil: pengguna mencari sesuatu yang jelas ada, tetapi tidak ditemukan
+  // karena barisnya ada di halaman lain. Pencarian yang tidak lengkap lebih
+  // berbahaya daripada tidak ada pencarian sama sekali.
   const where = {
     order: { tenantId },
     ...(status ? { status } : {}),
+    ...(keyword
+      ? {
+          OR: [
+            { externalReturnId: { contains: keyword } },
+            { reason: { contains: keyword } },
+            { order: { tenantId, externalOrderId: { contains: keyword } } },
+            {
+              items: {
+                some: {
+                  variant: {
+                    OR: [{ sku: { contains: keyword } }, { name: { contains: keyword } }],
+                  },
+                },
+              },
+            },
+          ],
+        }
+      : {}),
   };
 
   const [returns, total] = await Promise.all([

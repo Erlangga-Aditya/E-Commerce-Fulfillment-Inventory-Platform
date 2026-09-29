@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Pagination } from '@/components/pagination';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -861,44 +862,6 @@ export default function PesananPengirimanPage() {
         </div>
       )}
 
-      {totalPesanan > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            flexWrap: 'wrap',
-            marginBottom: 12,
-          }}
-        >
-          <span className="small muted">
-            Menampilkan {filtered.length} dari {totalPesanan} pesanan · halaman {data?.page ?? 1} dari{' '}
-            {totalHalaman}
-          </span>
-          {totalHalaman > 1 && (
-            <div className="filter-chips">
-              <button
-                type="button"
-                className="btn btn-sm btn-secondary"
-                disabled={(data?.page ?? 1) <= 1}
-                onClick={() => setPage(Math.max(1, (data?.page ?? 1) - 1))}
-              >
-                Sebelumnya
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-secondary"
-                disabled={(data?.page ?? 1) >= totalHalaman}
-                onClick={() => setPage(Math.min(totalHalaman, (data?.page ?? 1) + 1))}
-              >
-                Berikutnya
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
       {filtered.length === 0 ? (
         <div className="card">
           <EmptyState title="Tidak ada pesanan di tahap ini" description="Pilih filter lain, atau tunggu pesanan baru masuk dari Shopee." />
@@ -1133,6 +1096,18 @@ export default function PesananPengirimanPage() {
               </div>
             );
           })}
+
+          <Pagination
+            info={{
+              total: totalPesanan,
+              page: data?.page ?? 1,
+              pageSize: data?.pageSize ?? 20,
+              totalPages: totalHalaman,
+            }}
+            onChange={setPage}
+            label="pesanan"
+            disabled={loading}
+          />
         </div>
       )}
     </div>

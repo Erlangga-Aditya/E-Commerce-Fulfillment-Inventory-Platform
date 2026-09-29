@@ -17,7 +17,12 @@ export async function GET(request: NextRequest) {
     assertPermission(ctx, 'page.returns');
     const { page, pageSize } = parsePagination(request);
     const status = getQueryParam(request, 'status') as ReturnStatus | undefined;
-    const result = await listReturns(ctx.tenantId, { status, page, pageSize });
+    const result = await listReturns(ctx.tenantId, {
+      status,
+      search: getQueryParam(request, 'search'),
+      page,
+      pageSize,
+    });
     return successResponse(result, { requestId });
   } catch (error) { return handleRouteError(error, requestId, request); }
 }

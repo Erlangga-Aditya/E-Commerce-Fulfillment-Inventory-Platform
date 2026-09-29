@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { Pagination, type PaginationInfo } from '@/components/pagination';
 import { RefreshCw, Pencil, Search, Warehouse, Boxes } from 'lucide-react';
 import { api } from '@/lib/api';
 import { PageHeader, LoadingState, ErrorState, EmptyState, Alert } from '@/components/ui';
@@ -21,6 +22,8 @@ interface InvItem {
 
 export default function InventoriPage() {
   const [items, setItems] = useState<InvItem[]>([]);
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationInfo | null>(null);
   const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([]);
   const [warehouseId, setWarehouseId] = useState('');
   const [search, setSearch] = useState('');
@@ -33,15 +36,31 @@ export default function InventoriPage() {
   // masuk/koreksi berada di satu komponen `StockPanel` supaya tidak ada dua
   // implementasi untuk aksi bisnis yang sama (duplikasi = sumber bug).
 
+  // Kembali ke halaman 1 saat penyaring berubah. Disetel di dalam penangan
+  // perubahan (bukan di dalam effect) supaya tidak memicu render berantai.
+  const ubahGudang = (v: string) => {
+    setWarehouseId(v);
+    setPage(1);
+  };
+  const ubahPencarian = (v: string) => {
+    setSearch(v);
+    setPage(1);
+  };
+
   const load = useCallback(() => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ page: String(page) });
     if (warehouseId) q.set('warehouseId', warehouseId);
     if (search) q.set('search', search);
-    api<{ items: InvItem[] }>(`/api/v1/inventory?${q.toString()}`)
-      .then((d) => setItems(d.items ?? []))
+    api<{ items: InvItem[]; pagination: PaginationInfo }>(`/api/v1/inventory?${q.toString()}`)
+      .then((d) => {
+        setItems(d.items ?? []);
+        setPagination(d.pagination ?? null);
+        // Ikuti halaman yang benar-benar dikirim server (bisa dijepit).
+        if (d.pagination?.page) setPage(d.pagination.page);
+      })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
-  }, [warehouseId, search]);
+  }, [warehouseId, search, page]);
 
   useEffect(() => {
     api<Array<{ id: string; name: string }>>('/api/v1/warehouses')
@@ -53,6 +72,8 @@ export default function InventoriPage() {
   }, []);
 
   useEffect(load, [load]);
+
+
 
   // Realtime auto-update whenever background auto-sync completes
   useEffect(() => {
@@ -113,7 +134,7 @@ export default function InventoriPage() {
             className="input"
             style={{ width: '100%', maxWidth: 220, height: 38 }}
             value={warehouseId}
-            onChange={(e) => setWarehouseId(e.target.value)}
+            onChange={(e) => ubahGudang(e.target.value)}
           >
             {warehouses.map((w) => (
               <option key={w.id} value={w.id}>
@@ -130,7 +151,7 @@ export default function InventoriPage() {
             className="search-input"
             placeholder="Cari SKU / nama produk..."
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => ubahPencarian(e.target.value)}
           />
         </div>
       </div>
@@ -220,6 +241,9 @@ export default function InventoriPage() {
               ))}
             </tbody>
           </table>
+          {pagination && (
+            <Pagination info={pagination} onChange={setPage} label="item stok" disabled={loading} />
+          )}
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Pagination, type PaginationInfo } from '@/components/pagination';
 import {
   PackageCheck,
   ClipboardCheck,
@@ -55,6 +56,8 @@ const STATUS_FILTERS = [
 
 export default function PengembalianPage() {
   const [returns, setReturns] = useState<Ret[]>([]);
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationInfo | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
@@ -69,14 +72,35 @@ export default function PengembalianPage() {
   const [qc, setQc] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
+  // Kembali ke halaman 1 saat penyaring berubah. Disetel di dalam penangan
+  // perubahan (bukan di dalam effect) supaya tidak memicu render berantai.
+  const ubahPencarian = (v: string) => {
+    setSearch(v);
+    setPage(1);
+  };
+  const ubahStatus = (v: string) => {
+    setStatusFilter(v);
+    setPage(1);
+  };
+
   const load = useCallback(() => {
-    api<{ items: Ret[] }>('/api/v1/returns')
-      .then((d) => setReturns(d.items ?? []))
+    const q = new URLSearchParams({ page: String(page) });
+    if (statusFilter !== 'ALL') q.set('status', statusFilter);
+    if (search.trim()) q.set('search', search.trim());
+    api<{ items: Ret[]; pagination: PaginationInfo }>(`/api/v1/returns?${q.toString()}`)
+      .then((d) => {
+        setReturns(d.items ?? []);
+        setPagination(d.pagination ?? null);
+        // Ikuti halaman yang benar-benar dikirim server (bisa dijepit).
+        if (d.pagination?.page) setPage(d.pagination.page);
+      })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [page, statusFilter, search]);
 
   useEffect(load, [load]);
+
+
 
   // Realtime auto-update whenever background auto-sync completes
   useEffect(() => {
@@ -85,19 +109,13 @@ export default function PengembalianPage() {
     return () => window.removeEventListener('shopee:synced', handleSync);
   }, [load]);
 
-  const filteredReturns = useMemo(() => {
-    return returns.filter((r) => {
-      if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;
-      if (!search.trim()) return true;
-      const q = search.toLowerCase();
-      return (
-        (r.externalReturnId && r.externalReturnId.toLowerCase().includes(q)) ||
-        r.order.externalOrderId.toLowerCase().includes(q) ||
-        (r.reason && r.reason.toLowerCase().includes(q)) ||
-        r.items.some((i) => i.sku.toLowerCase().includes(q) || i.variantName.toLowerCase().includes(q))
-      );
-    });
-  }, [returns, search, statusFilter]);
+  // Tahap dan pencarian disaring di SERVER.
+  //
+  // Sebelumnya keduanya disaring di browser atas daftar yang sudah dipotong per
+  // halaman, sehingga pencarian hanya menelusuri halaman yang sedang tampil -
+  // data yang jelas ada bisa tidak ditemukan. Sekarang yang tampil persis apa
+  // yang dikirim server.
+  const filteredReturns = returns;
 
   async function handleSyncReturns() {
     setSyncingReturns(true);
@@ -240,7 +258,7 @@ export default function PengembalianPage() {
               className="search-input"
               placeholder="Cari No. Retur, No. Pesanan, SKU produk, atau alasan..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => ubahPencarian(e.target.value)}
             />
           </div>
         </div>
@@ -252,7 +270,7 @@ export default function PengembalianPage() {
               type="button"
               className={`btn btn-sm ${statusFilter === f.value ? 'btn-primary' : 'btn-secondary'}`}
               style={{ borderRadius: 20, fontSize: 12, padding: '4px 12px' }}
-              onClick={() => setStatusFilter(f.value)}
+              onClick={() => ubahStatus(f.value)}
             >
               {f.label}
             </button>
@@ -441,6 +459,9 @@ export default function PengembalianPage() {
               })}
             </tbody>
           </table>
+          {pagination && (
+            <Pagination info={pagination} onChange={setPage} label="retur" disabled={loading} />
+          )}
         </div>
       )}
 
