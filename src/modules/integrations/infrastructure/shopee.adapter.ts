@@ -1145,8 +1145,18 @@ export class ShopeeAdapter implements MarketplaceAdapter {
           ...(channel.addressId ? { address_id: asNumber(channel.addressId) } : {}),
           pickup_time_id: channel.pickupTimeId,
         };
-      } else {
+      } else if (channel.kind === 'dropoff') {
         body.dropoff = channel.branchId ? { branch_id: channel.branchId } : {};
+      } else {
+        // Kanal non-integrasi (kurir bawaan Shopee). Dokumentasi resmi
+        // `ship_order`: field yang muncul di `info_needed` WAJIB disertakan
+        // walau isinya kosong, dan `dropoff` TIDAK boleh dipakai di sini.
+        //
+        // Sebelumnya cabang ini tidak ada dan semua kanal non-pickup dikirim
+        // sebagai dropoff, sehingga Shopee menjawab
+        // `logistics.ship_order_unsupport_dropoff` dan resi tidak pernah
+        // terbit walaupun pesanannya bisa dikirim.
+        body.non_integrated = {};
       }
 
       await callShopee<Record<string, unknown>>(

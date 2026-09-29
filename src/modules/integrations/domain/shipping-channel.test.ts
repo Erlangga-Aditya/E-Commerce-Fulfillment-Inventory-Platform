@@ -204,3 +204,64 @@ describe('pemilihan kanal pengiriman (anti ship_order_unsupport_dropoff)', () =>
     });
   });
 });
+
+/**
+ * Regresi untuk `logistics.ship_order_unsupport_dropoff`.
+ *
+ * Bukti produksi: pesanan yang kanalnya non-integrasi (kurir bawaan Shopee)
+ * ditolak dengan pesan "This order does not support ship with dropoff".
+ * Penyebabnya hanya ada dua jenis kanal yang dikenali (pickup/dropoff),
+ * sehingga kanal non-integrasi ikut dikirim sebagai `dropoff`.
+ *
+ * Dokumentasi resmi `ship_order` menyatakan field wajib mengikuti
+ * `info_needed`: `pickup`, `dropoff`, ATAU `non_integrated`.
+ */
+const NON_INTEGRATED_RESPONSE = {
+  error: '',
+  message: '',
+  response: {
+    info_needed: { non_integrated: [] },
+    dropoff: { branch_list: null },
+  },
+  warning: '',
+};
+
+describe('kanal non-integrasi (info_needed.non_integrated)', () => {
+  it('mengenali kanal non-integrasi dari info_needed walau tidak ada daftar cabang', () => {
+    const channels = extractSupportedChannels(NON_INTEGRATED_RESPONSE);
+
+    // Sebelum perbaikan, di sini nol kanal dan operator mendapat pesan
+    // "belum punya kanal pengiriman yang didukung Shopee" - padahal Shopee
+    // jelas menyebut kanalnya.
+    expect(channels.length).toBeGreaterThan(0);
+    expect(channels.some((c) => c.kind === 'non_integrated')).toBe(true);
+  });
+
+  it('kanal non-integrasi dipilih saat hanya itu yang tersedia', () => {
+    const channels = extractSupportedChannels(NON_INTEGRATED_RESPONSE);
+    const dipilih = pickChannel(channels);
+
+    expect(dipilih?.kind).toBe('non_integrated');
+  });
+
+  it('kanal pickup tetap diutamakan bila Shopee menawarkannya juga', () => {
+    // `info_needed` bisa memuat lebih dari satu jenis. Yang punya slot jemput
+    // nyata harus menang, karena hanya kanal itu yang bisa langsung dikirim
+    // tanpa operator memilih apa pun.
+    const campuran = {
+      response: {
+        info_needed: { pickup: ['address_id', 'pickup_time_id'], non_integrated: [] },
+        pickup: {
+          address_list: [
+            {
+              address_id: 290774,
+              time_slot_list: [{ pickup_time_id: '1790499600', flags: ['recommended'] }],
+            },
+          ],
+        },
+      },
+    };
+    const channels = extractSupportedChannels(campuran);
+    expect(pickChannel(channels)?.kind).toBe('pickup');
+  });
+});

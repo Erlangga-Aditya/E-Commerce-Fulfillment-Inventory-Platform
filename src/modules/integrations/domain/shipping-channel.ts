@@ -23,8 +23,21 @@ import { ExternalIntegrationError } from '@/shared/errors/AppError';
 
 /** Channel yang pernah didukung Shopee. `null` = Shopee tidak punya channel ini. */
 export interface ShippingChannel {
-  /** Kanal yang harus dikirim ke `ship_order`. */
-  kind: 'pickup' | 'dropoff';
+  /**
+   * Kanal yang harus dikirim ke `ship_order`.
+   *
+   * ADA TIGA, bukan dua. Dokumentasi resmi (`ship_order`, API Reference)
+   * menyatakan: field yang wajib disertakan adalah yang muncul di
+   * `info_needed` dari `get_shipping_parameter` — `pickup`, `dropoff`, ATAU
+   * `non_integrated`. Jenis ketiga ini dipakai kurir non-integrasi (mis.
+   * kanal bawaan Shopee) dan tidak menerima `dropoff`.
+   *
+   * Sebelumnya jenis ini tidak ada, sehingga setiap kanal non-pickup dikirim
+   * sebagai `dropoff` dan Shopee menolak dengan
+   * `logistics.ship_order_unsupport_dropoff` — resi tidak pernah terbit
+   * walaupun pesanannya sebenarnya bisa dikirim.
+   */
+  kind: 'pickup' | 'dropoff' | 'non_integrated';
   /**
    * `address_id` bila kanalnya pickup (wajib shopee: `info_needed.pickup`).
    *
@@ -56,6 +69,35 @@ function asString(value: unknown): string | null {
   if (typeof value === 'string' && value.trim() !== '') return value.trim();
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return null;
+}
+
+/**
+ * Ambil `info_needed` dari respons `get_shipping_parameter`.
+ *
+ * Bentuk resminya objek berisi kunci kanal yang didukung, misalnya:
+ *   {"pickup": ["address_id", "pickup_time_id"]}
+ *   {"dropoff": []}
+ *   {"non_integrated": []}
+ *
+ * Nilai kuncinya bisa berupa daftar field atau nilai lain; yang penting di
+ * sini HANYA kunci mana yang hadir, karena itulah yang menentukan field mana
+ * yang wajib dikirim ke `ship_order`.
+ */
+function readInfoNeeded(
+  root: Record<string, unknown> | null,
+  inner: Record<string, unknown> | null,
+): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  for (const scope of [inner, root]) {
+    if (!scope) continue;
+    const value = scope.info_needed;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (!out.has(k)) out.set(k, v);
+      }
+    }
+  }
+  return out;
 }
 
 function toArray(value: unknown): Array<Record<string, unknown>> {
@@ -187,6 +229,21 @@ export function extractSupportedChannels(res: unknown): ShippingChannel[] {
     if (single) {
       channels.push({ kind: 'dropoff', branchId: single });
     }
+  }
+
+  // 3) Kanal non-integrasi.
+  //
+  // `info_needed` adalah penentu resminya: kalau Shopee menuliskan
+  // `non_integrated` di sana, `ship_order` WAJIB memakai field itu dan TIDAK
+  // boleh memakai `dropoff`. Tanpa cabang ini, pesanan seperti itu selalu
+  // ditolak Shopee walaupun kanalnya jelas tersedia.
+  const infoNeeded = readInfoNeeded(root, inner);
+  if (infoNeeded.has('non_integrated')) {
+    channels.push({
+      kind: 'non_integrated',
+      label: asString(infoNeeded.get('non_integrated')) ?? undefined,
+      recommended: true,
+    });
   }
 
   // Buang duplikat supaya pilihan operator tidak ganda.
