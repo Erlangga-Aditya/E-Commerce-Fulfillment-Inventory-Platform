@@ -616,7 +616,20 @@ export default function IntegrasiPage() {
        </div>
       </li>
       <li>
-       <strong>Mode Environment:</strong> Jika app Anda sudah live di <code>open.shopee.com</code> (Production), setel <code className="mono">SHOPEE_SANDBOX=&quot;false&quot;</code> di <code className="mono">.env</code>. Jika masih di sandbox console, setel <code className="mono">SHOPEE_SANDBOX=&quot;true&quot;</code>.
+       <strong>Cara pindah Sandbox ke Live:</strong> buka bagian{' '}
+       <strong>Pengaturan Lanjutan</strong> di halaman ini, lalu pilih{' '}
+       <strong>Mode Produksi</strong> pada kolom Kredensial Aplikasi Shopee —
+       sekaligus ganti <strong>Partner ID</strong> dan <strong>Partner Key</strong> dengan
+       milik aplikasi live Anda. Mode tersimpan di database dan berlaku seketika.
+       <br />
+       <span className="small muted">
+        Mengubah <code className="mono">.env</code> TIDAK berpengaruh selama kredensial
+        sudah pernah disimpan di halaman ini — pengaturan database selalu diutamakan.
+        Petunjuk lama menyuruh mengubah <code className="mono">.env</code>, dan itu
+        membuat aplikasi tetap berjalan di sandbox walaupun dikira sudah live.
+        <code className="mono"> .env</code> hanya dipakai sebagai cadangan bila belum
+        ada kredensial tersimpan sama sekali.
+       </span>
       </li>
      </ol>
      <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#166534' }}>
