@@ -51,6 +51,31 @@ async function loadConnection(tenantId: string, shopId: string) {
     );
   }
   const creds = JSON.parse(decryptSecret(conn.encryptedCredentials)) as StoredCredentials;
+
+  // Tolak lebih awal bila mode aplikasi TIDAK cocok dengan lingkungan toko yang
+  // tersambung.
+  //
+  // Tanpa penjaga ini, berpindah dari Sandbox ke Produksi tanpa otorisasi ulang
+  // membuat token SANDBOX dikirim ke host LIVE. Shopee menjawab dengan galat
+  // tanda tangan atau izin yang tidak menyebut sebabnya, sehingga operator
+  // menduga kredensialnya salah - padahal tokonya cuma belum dihubungkan ulang.
+  // Kesalahan itu mahal waktu karena tidak menunjuk ke langkah yang harus
+  // dilakukan.
+  //
+  // Hanya ditegakkan bila penanda lingkungan tersimpan dengan jelas (boolean),
+  // supaya baris koneksi lama tidak mendadak ditolak.
+  const appConfig = await getShopeeAppConfig();
+  if (typeof conn.sandbox === 'boolean' && conn.sandbox !== appConfig.sandbox) {
+    const modeAplikasi = appConfig.sandbox ? 'Sandbox' : 'Produksi';
+    const modeToko = conn.sandbox ? 'Sandbox' : 'Produksi';
+    throw new ExternalIntegrationError(
+      'shopee',
+      `Mode aplikasi sekarang ${modeAplikasi}, tetapi toko yang tersambung terdaftar pada mode ${modeToko}. ` +
+        'Hubungkan ulang toko lewat menu Integrasi supaya token yang dipakai sesuai dengan mode yang aktif ' +
+        '(tombol Hubungkan/Riwayat, lalu otorisasi ulang di Shopee).',
+    );
+  }
+
   return { shop, conn, creds };
 }
 
