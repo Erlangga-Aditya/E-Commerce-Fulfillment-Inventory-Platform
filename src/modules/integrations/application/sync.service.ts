@@ -307,6 +307,43 @@ export async function triggerOrderSync(tenantId: string, shopId: string, actorId
         await upsertShipment(tenantId, result.orderId, mOrder.trackingNumber, mOrder.carrier, mOrder.rawStatus);
       }
 
+      // Status pengiriman yang SUDAH ada ikut naik dari `order_status` pesanan.
+      //
+      // Sebelumnya pembaruan status hanya terjadi di dalam blok di atas, yang
+      // bergantung pada `mOrder.trackingNumber`. Bila Shopee tidak mengirim
+      // ulang nomor resi pada respons ini - padahal resinya sudah tersimpan di
+      // sisi kita - blok itu dilewati seluruhnya dan status paket tidak pernah
+      // bergerak. Akibatnya paket yang sudah dijemput kurir selamanya tampak
+      // "siap dikirim", dan pesanan yang sudah diterima tidak pernah selesai.
+      //
+      // Diurutkan dengan `shouldAdvanceShipmentStatus` supaya tidak bisa mundur,
+      // dan tidak membuat baris pengiriman baru.
+      const pengirimanLama = await prisma.shipment.findFirst({
+        where: { orderId: result.orderId },
+        select: { id: true, status: true },
+      });
+      if (pengirimanLama) {
+        const statusDariPesanan = mapLogisticsStatus(mOrder.rawStatus);
+        if (shouldAdvanceShipmentStatus(pengirimanLama.status, statusDariPesanan)) {
+          await prisma.shipment.update({
+            where: { id: pengirimanLama.id },
+            data: {
+              status: statusDariPesanan,
+              ...(statusDariPesanan === 'DELIVERED' ? { deliveredAt: new Date() } : {}),
+              ...(statusDariPesanan !== 'PENDING' && statusDariPesanan !== 'READY_TO_SHIP'
+                ? { shippedAt: new Date() }
+                : {}),
+            },
+          });
+          logger.info('Status pengiriman naik dari status pesanan', {
+            orderSn: mOrder.externalOrderId,
+            rawStatus: mOrder.rawStatus,
+            dari: pengirimanLama.status,
+            ke: statusDariPesanan,
+          });
+        }
+      }
+
       // Auto-process newly imported CONFIRMED orders
       if (result.created && warehouse && mapShopeeStatusToInternal(mOrder.rawStatus) === 'CONFIRMED') {
         try {
