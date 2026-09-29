@@ -324,7 +324,14 @@ export async function triggerOrderSync(tenantId: string, shopId: string, actorId
       });
       if (pengirimanLama) {
         const statusDariPesanan = mapLogisticsStatus(mOrder.rawStatus);
-        if (shouldAdvanceShipmentStatus(pengirimanLama.status, statusDariPesanan)) {
+        // Hanya bertindak bila statusnya MEMANG berbeda. Tanpa syarat ini,
+        // pesanan yang sudah gagal akan ditulis ulang setiap putaran tanpa
+        // perubahan apa pun - dan log kenaikan terisi baris "FAILED -> FAILED"
+        // yang membuat pemeriksaan produksi jadi menyesatkan.
+        if (
+          statusDariPesanan !== pengirimanLama.status &&
+          shouldAdvanceShipmentStatus(pengirimanLama.status, statusDariPesanan)
+        ) {
           await prisma.shipment.update({
             where: { id: pengirimanLama.id },
             data: {
