@@ -6,6 +6,8 @@
  * dan respons batch harus dibaca per paket (bukan dianggap sukses begitu saja).
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   mapDocumentParameter,
   mapDocumentTask,
@@ -207,5 +209,43 @@ describe('shipping document — pesan error jujur', () => {
     const param = mapDocumentParameter({ order_sn: 'X' });
     const msg = describeLabelFailure(param, { orderSn: 'X', packageNumber: null, trackingNumber: null });
     expect(msg).toMatch(/resi belum terbit|paket belum siap/i);
+  });
+});
+
+
+describe('label tanpa kemasan (THERMAL_UNPACKAGED_LABEL) tidak boleh ditolak', () => {
+  /**
+   * Regresi untuk keluhan nyata: label resmi Shopee yang MEMUAT BARCODE RESI
+   * tidak pernah bisa dicetak, sedangkan label yang keluar justru hanya memuat
+   * barcode nomor pesanan.
+   *
+   * Penyebabnya sebuah guard di adapter yang melempar error untuk tipe
+   * `THERMAL_UNPACKAGED_LABEL` dengan alasan "butuh alur job khusus Shopee".
+   * Alasan itu keliru. Panduan resmi Shopee Xpress - Package-free
+   * (developer-guide/677) bagian 5.2 menyatakan label ini diambil lewat EMPAT
+   * API yang sama seperti tipe lain; alur job hanya dipakai untuk PRA-CETAK
+   * (bagian 6.1), yaitu sebelum pesanan dibuat.
+   *
+   * Karena hanya kanal itu yang mendukung tipe ini, guard tersebut membuat
+   * seluruh label kanal bersangkutan gagal - bukan gagal jelas, tapi jatuh ke
+   * tipe lain yang labelnya tidak memuat resi.
+   */
+  const sumber = readFileSync(
+    join(__dirname, '..', 'infrastructure', 'shopee.adapter.ts'),
+    'utf8',
+  );
+
+  it('adapter tidak lagi menolak THERMAL_UNPACKAGED_LABEL', () => {
+    // Penolakan lama berbentuk `if (documentType === 'THERMAL_UNPACKAGED_LABEL')`
+    // yang langsung melempar error. Yang diperiksa PEMAKAIANNYA, bukan
+    // penyebutan di komentar - sebab penjelasan kenapa hal itu keliru justru
+    // perlu tetap ada di kode.
+    expect(sumber).not.toMatch(/if\s*\(\s*documentType\s*===\s*'THERMAL_UNPACKAGED_LABEL'\s*\)/);
+  });
+
+  it('alur label tetap memakai rantai empat API yang sama', () => {
+    // Kalau kelak ada yang mengganti alur ini, test ini menandai bahwa
+    // keputusan tipe label berada di satu tempat saja.
+    expect(sumber).toMatch(/suggestedType\s*\?\?\s*param\.selectableTypes\[0\]/);
   });
 });

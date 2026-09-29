@@ -1296,19 +1296,26 @@ export class ShopeeAdapter implements MarketplaceAdapter {
     if (!documentType) {
       throw new ExternalIntegrationError('shopee', describeLabelFailure(param, target));
     }
-    // `THERMAL_UNPACKAGED_LABEL` memakai alur job khusus Shopee
-    // (create job → status job → download job), bukan rantai 549→547→561→548.
-    // Mengirimnya lewat rantai normal akan gagal diam-diam, jadi tolong dengan
-    // pesan yang bisa ditindaklanjuti, bukan diamkan.
-    if (documentType === 'THERMAL_UNPACKAGED_LABEL') {
-      throw new ExternalIntegrationError(
-        'shopee',
-        `Kanal untuk pesanan ${target.orderSn} memakai label tanpa kemasan (THERMAL_UNPACKAGED_LABEL), ` +
-          'yang membutuhkan alur job khusus Shopee dan belum didukung aplikasi ini. ' +
-          'Selesaikan Pencetakan dari Seller Centre atau hubungi Shopee.',
-        { target, documentType },
-      );
-    }
+    // `THERMAL_UNPACKAGED_LABEL` diambil lewat RANTAI YANG SAMA, bukan alur job.
+    //
+    // Sebelumnya di sini ada guard yang MELEMPAR ERROR untuk tipe ini, dengan
+    // alasan "membutuhkan alur job khusus Shopee (create job -> status job ->
+    // download job) dan belum didukung aplikasi ini". Alasan itu keliru, dan
+    // akibatnya nyata: label resmi yang memuat BARCODE RESI ikut ditolak.
+    //
+    // Panduan resmi Shopee Xpress - Package-free (developer-guide/677):
+    //   5.2 "Obtain Unpackage shipment label call flow" memakai EMPAT API yang
+    //       sudah kita pakai, dengan urutan yang sama:
+    //         get_shipping_document_parameter -> create_shipping_document ->
+    //         get_shipping_document_result    -> download_shipping_document
+    //       dan menyatakan: "The order for this logistics channel only supports
+    //       THERMAL_UNPACKAGED_LABEL as the shipping_document_type."
+    //   6.1 alur JOB (create_shipping_document_job dst.) hanya untuk PRA-CETAK,
+    //       yaitu mencetak label SEBELUM pesanan dibuat - kasus yang tidak kita
+    //       perlukan.
+    //
+    // Jadi tipe ini tidak butuh perlakuan khusus; ia harus diteruskan seperti
+    // tipe lain. `assertHasTrackingNumber` di bawah tetap berlaku.
     assertHasTrackingNumber(target);
     await this.createShippingDocument(creds, target, documentType);
     const task = await pollUntilReady(() => this.getShippingDocumentResult(creds, target, documentType));
