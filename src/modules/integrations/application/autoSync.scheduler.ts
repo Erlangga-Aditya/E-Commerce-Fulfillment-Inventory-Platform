@@ -109,6 +109,33 @@ async function listConnectedShopeeShops() {
  * Satu putaran sinkronisasi ringan (pesanan + nomor resi) untuk semua toko Shopee.
  * Aman dipanggil berulang: putaran yang masih berjalan tidak akan ditumpuk.
  */
+/**
+ * Buang catatan sinkronisasi otomatis yang tidak membawa perubahan apa pun.
+ *
+ * Auto-sync berjalan setiap 60 detik. Tanpa ini setiap putaran menulis satu
+ * baris riwayat - sekitar 1.440 baris per hari - sehingga riwayat yang benar-
+ * benar penting (ada pesanan masuk, ada kegagalan) tenggelam di antara baris
+ * kosong. Akibatnya operator berhenti membacanya sama sekali.
+ *
+ * Sikap AMAN: kalau jumlah tulisan tidak diketahui (bukan angka), catatan
+ * TIDAK dihapus. Lebih baik menyimpan satu baris berlebih daripada menghapus
+ * catatan yang sebenarnya berisi perubahan hanya karena bentuk datanya tidak
+ * terduga.
+ */
+async function dropQuietRun(runId: unknown, recordsWritten: unknown): Promise<void> {
+  if (typeof runId !== 'string' || runId === '') return;
+  if (typeof recordsWritten !== 'number') return;
+  if (recordsWritten > 0) return;
+  try {
+    await prisma.syncRun.delete({ where: { id: runId } });
+  } catch (err) {
+    logger.warn('Gagal menghapus catatan sinkronisasi kosong', {
+      runId,
+      message: (err as Error).message,
+    });
+  }
+}
+
 export async function runAutoSyncTick(): Promise<AutoSyncTickResult> {
   if (ticking) {
     return autoSyncState.lastResult ?? { shops: 0, imported: 0, failed: 0, finishedAt: new Date() };
@@ -126,9 +153,13 @@ export async function runAutoSyncTick(): Promise<AutoSyncTickResult> {
       shops += 1;
       try {
         const res = (await triggerOrderSync(target.tenantId, target.shopId, target.actorId)) as {
+          id?: string;
           recordsWritten?: number;
         };
         imported += Number(res?.recordsWritten ?? 0);
+        // Putaran otomatis yang tidak menarik apa pun tidak perlu meninggalkan
+        // jejak di riwayat; yang penting hanya perubahan dan kegagalan.
+        await dropQuietRun(res?.id, res?.recordsWritten);
       } catch (err) {
         failed += 1;
         const message = (err as Error).message;
@@ -142,7 +173,11 @@ export async function runAutoSyncTick(): Promise<AutoSyncTickResult> {
       // (yang sekarang sudah dihapus). Lacak Kiriman hanya menampilkan data
       // Shopee — jadi tanpa sync tracking, halaman itu statis.
       try {
-        await triggerTrackingSync(target.tenantId, target.shopId, target.actorId);
+        const trk = (await triggerTrackingSync(target.tenantId, target.shopId, target.actorId)) as {
+          id?: string;
+          recordsWritten?: number;
+        };
+        await dropQuietRun(trk?.id, trk?.recordsWritten);
       } catch (err) {
         // Kegagalan tracking tidak boleh menggagalkan sync pesanan: pesanan
         // tetap penting, status pengiriman akan dicoba lagi pada putar
