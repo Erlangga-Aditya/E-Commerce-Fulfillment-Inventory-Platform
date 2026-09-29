@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -80,9 +80,19 @@ interface StationResponse {
     dikirim: number;
     dibatalkan: number;
   };
+  stage: Stage | null;
   orders: StationOrder[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  /** true bila kandidat terpotong pagar pengaman server; WAJIB diberitahukan. */
+  truncated: boolean;
   generatedAt: string;
 }
+
+/** Batas operasi massal di sisi server. Disamakan supaya operator diberi tahu sebelum menekan tombol, bukan gagal setelahnya. */
+const BATAS_MASSAL = 50;
 
 interface ScanOutcome {
   code:
@@ -236,6 +246,7 @@ export default function PesananPengirimanPage() {
   const [printingLabelId, setPrintingLabelId] = useState<string | null>(null);
   const [sort, setSort] = useState<'oldest' | 'newest'>('oldest');
   const [stageFilter, setStageFilter] = useState<'SEMUA' | Stage>('SEMUA');
+  const [page, setPage] = useState(1);
   const [outcome, setOutcome] = useState<ScanOutcome | null>(null);
   const [stockOpen, setStockOpen] = useState(false);
   const [stockVariantId, setStockVariantId] = useState<string | null>(null);
@@ -257,29 +268,42 @@ export default function PesananPengirimanPage() {
   const [negativeStockApproved, setNegativeStockApproved] = useState(false);
   const scannerRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async (sortMode: 'oldest' | 'newest' = sort) => {
-    try {
-      const res = await api<StationResponse>(`/api/v1/fulfillment/station?sort=${sortMode}`);
-      setData(res);
-      setError('');
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [sort]);
+  const load = useCallback(
+    async (
+      sortMode: 'oldest' | 'newest' = sort,
+      pageArg: number = page,
+      stageArg: 'SEMUA' | Stage = stageFilter,
+    ) => {
+      try {
+        const params = new URLSearchParams({ sort: sortMode, page: String(pageArg) });
+        if (stageArg !== 'SEMUA') params.set('stage', stageArg);
+        const res = await api<StationResponse>(`/api/v1/fulfillment/station?${params.toString()}`);
+        setData(res);
+        // Server bisa menjepit halaman yang diminta (misalnya halaman terakhir
+        // menjadi kosong setelah pesanan diselesaikan). Halaman yang benar-benar
+        // tampil diikuti supaya penanda halaman tidak berbohong.
+        setPage(res.page);
+        setError('');
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [sort, page, stageFilter],
+  );
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       await Promise.resolve();
       if (cancelled) return;
-      await load(sort);
+      await load(sort, page, stageFilter);
     })();
-    const onRealtime = () => void load(sort);
+    const onRealtime = () => void load(sort, page, stageFilter);
     window.addEventListener('shopee:synced', onRealtime);
     window.addEventListener('fulfillment:updated', onRealtime);
-    const refresh = setInterval(() => void load(sort), 30000);
+    const refresh = setInterval(() => void load(sort, page, stageFilter), 30000);
     const clock = setInterval(() => setNow(new Date()), 60000);
     return () => {
       cancelled = true;
@@ -288,7 +312,7 @@ export default function PesananPengirimanPage() {
       clearInterval(refresh);
       clearInterval(clock);
     };
-  }, [load, sort]);
+  }, [load, sort, page, stageFilter]);
 
   /**
    * Ambil resi untuk semua pesanan yang dicentang sekaligus.
@@ -370,10 +394,42 @@ export default function PesananPengirimanPage() {
   const togglePick = (orderId: string) =>
     setPicked((prev) => (prev.includes(orderId) ? prev.filter((x) => x !== orderId) : [...prev, orderId]));
 
-  const filtered = useMemo(() => {
-    const list = data?.orders ?? [];
-    return stageFilter === 'SEMUA' ? list : list.filter((o) => o.stage === stageFilter);
-  }, [data, stageFilter]);
+  // Penyaringan TAHAP dilakukan di server, bukan di sini.
+  //
+  // Kalau tahap disaring di browser sementara daftarnya sudah dipotong per
+  // halaman oleh server, tiap tab hanya akan menampilkan sebagian halaman -
+  // tab "Dibatalkan" bisa tampak kosong padahal pesanannya ada di halaman lain.
+  // Jadi yang tampil di sini persis apa yang dikirim server.
+  const filtered = data?.orders ?? [];
+  const totalPesanan = data?.total ?? 0;
+  const totalHalaman = data?.totalPages ?? 1;
+
+  /** Menandai bahwa operator sedang melihat hasil yang terpotong pagar pengaman. */
+  const terpotong = data?.truncated === true;
+
+  const idDiHalaman = filtered.map((o) => o.orderId);
+  const semuaTerpilih = idDiHalaman.length > 0 && idDiHalaman.every((id) => picked.includes(id));
+  const sebagianTerpilih = !semuaTerpilih && idDiHalaman.some((id) => picked.includes(id));
+
+  /**
+   * Centang/hapus-centang SEMUA pesanan di halaman yang sedang tampil.
+   *
+   * Sengaja hanya berlaku untuk halaman ini, bukan seluruh hasil: operator harus
+   * melihat sendiri apa yang akan diproses. Operasi massal dibatasi server
+   * (BATAS_MASSAL), jadi bila pilihannya melewati batas itu, operator diberi
+   * tahu LEBIH DULU - bukan gagal setelah menekan tombol.
+   */
+  const toggleSemuaDiHalaman = () =>
+    setPicked((prev) =>
+      semuaTerpilih
+        ? prev.filter((id) => !idDiHalaman.includes(id))
+        : [...new Set([...prev, ...idDiHalaman])],
+    );
+
+  const gantiTahap = (tahap: 'SEMUA' | Stage) => {
+    setStageFilter(tahap);
+    setPage(1); // halaman 1 untuk tahap baru: nomor halaman lama tidak berlaku lagi
+  };
 
   // Cetak label RESMI Shopee: unduh file dari Shopee, lalu buka di tab baru.
  // Tidak pernah memakai label buatan — kalau Shopee menolak, tampilkan pesan errornya.
@@ -737,7 +793,26 @@ export default function PesananPengirimanPage() {
           marginBottom: 12,
         }}
       >
-        <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>Daftar Pesanan ({filtered.length})</h2>
+        <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>
+          Daftar Pesanan ({totalPesanan})
+        </h2>
+        {idDiHalaman.length > 0 && (
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}
+            title="Centang semua pesanan di halaman ini"
+          >
+            <input
+              type="checkbox"
+              checked={semuaTerpilih}
+              ref={(el) => {
+                if (el) el.indeterminate = sebagianTerpilih;
+              }}
+              onChange={toggleSemuaDiHalaman}
+              style={{ width: 16, height: 16 }}
+            />
+            <span>Pilih semua di halaman ini</span>
+          </label>
+        )}
         <div className="filter-chips">
           <button
             type="button"
@@ -766,7 +841,7 @@ export default function PesananPengirimanPage() {
             key={f.key}
             type="button"
             className={`btn btn-sm ${stageFilter === f.key ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setStageFilter(f.key)}
+            onClick={() => gantiTahap(f.key)}
           >
             <span>
               {f.label} ({f.count})
@@ -774,6 +849,55 @@ export default function PesananPengirimanPage() {
           </button>
         ))}
       </div>
+
+      {terpotong && (
+        <div
+          className="card mb16"
+          style={{ borderLeft: '4px solid #f59e0b', background: '#fffbeb', padding: '10px 14px' }}
+        >
+          <strong>Daftar ini dipotong.</strong> Terlalu banyak pesanan untuk ditampilkan sekaligus,
+          jadi hanya sebagian yang dihitung. Selesaikan atau batalkan pesanan lama, lalu muat ulang
+          halaman ini — jangan menganggap semua pesanan sudah tampil.
+        </div>
+      )}
+
+      {totalPesanan > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            flexWrap: 'wrap',
+            marginBottom: 12,
+          }}
+        >
+          <span className="small muted">
+            Menampilkan {filtered.length} dari {totalPesanan} pesanan · halaman {data?.page ?? 1} dari{' '}
+            {totalHalaman}
+          </span>
+          {totalHalaman > 1 && (
+            <div className="filter-chips">
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                disabled={(data?.page ?? 1) <= 1}
+                onClick={() => setPage(Math.max(1, (data?.page ?? 1) - 1))}
+              >
+                Sebelumnya
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                disabled={(data?.page ?? 1) >= totalHalaman}
+                onClick={() => setPage(Math.min(totalHalaman, (data?.page ?? 1) + 1))}
+              >
+                Berikutnya
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {filtered.length === 0 ? (
         <div className="card">
@@ -797,6 +921,12 @@ export default function PesananPengirimanPage() {
             >
               <strong>
                 {picked.length} pesanan dipilih
+                {picked.length > BATAS_MASSAL ? (
+                  <span style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+                    Maksimal {BATAS_MASSAL} pesanan sekali proses. Kurangi pilihan menjadi{' '}
+                    {BATAS_MASSAL} atau kurang.
+                  </span>
+                ) : null}
               </strong>
               {can('order.prepare_shipment') ? (
                 <button

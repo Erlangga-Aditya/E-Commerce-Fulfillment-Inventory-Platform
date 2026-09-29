@@ -852,16 +852,54 @@ export type StationStage =
   | 'DIBATALKAN';
 
 /**
+ * Urutan resmi tahap stasiun kerja.
+ *
+ * Dipakai untuk memvalidasi nilai `stage` yang datang dari luar (permintaan HTTP
+ * tidak boleh memasukkan nilai sembarang ke dalam penyaringan) dan sekaligus
+ * sebagai satu-satunya daftar urutan tahap. Ditulis dengan `satisfies` supaya
+ * menambah tahap baru pada tipe di atas tanpa menambahkannya di sini langsung
+ * ditolak oleh pemeriksa tipe.
+ */
+export const STATION_STAGES = [
+  'BARU',
+  'MENUNGGU_STOK',
+  'SIAP_DIKEMAS',
+  'SIAP_KIRIM',
+  'DIKIRIM',
+  'DIBATALKAN',
+] as const satisfies readonly StationStage[];
+
+/**
  * Data untuk SATU halaman kerja: pesanan masuk → ambil resi → scan resi → serahkan ke kurir.
  * Tidak ada lagi halaman terpisah untuk "picking/packing": alurnya scan resi saja.
  *
  * @param sort 'oldest' = pesanan terlama diproses dulu (default), 'newest' = terbaru dulu.
  */
+/**
+ * Batas jumlah pesanan yang dihitung dalam satu permintaan stasiun kerja.
+ *
+ * Ini BUKAN pagination - ini pagar pengaman supaya satu permintaan tidak pernah
+ * menghabiskan memori tanpa batas. Bila batas ini tercapai, jawabannya membawa
+ * penanda `truncated: true` dan antarmuka WAJIB memberitahukannya. Dipotong
+ * diam-diam adalah cacat yang justru sedang diperbaiki di sini: sebelumnya
+ * daftar dibatasi 200 tanpa tanda apa pun, sehingga pesanan ke-201 dan
+ * seterusnya lenyap dari layar operator tanpa mereka sadari.
+ */
+export const STATION_CANDIDATE_CEILING = 5000;
+
 export async function getFulfillmentStation(
   tenantId: string,
-  options: { sort?: 'oldest' | 'newest' } = {},
+  options: {
+    sort?: 'oldest' | 'newest';
+    /** Batasi ke satu tahap saja; null berarti semua tahap. */
+    stage?: StationStage | null;
+    page?: number;
+    pageSize?: number;
+  } = {},
 ) {
   const sortDir: 'asc' | 'desc' = options.sort === 'newest' ? 'desc' : 'asc';
+  const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 20));
+  const requestedPage = Math.max(1, options.page ?? 1);
 
   const warehouse = await prisma.warehouse.findFirst({
     where: { tenantId, status: 'ACTIVE' },
@@ -891,21 +929,27 @@ export async function getFulfillmentStation(
       },
     },
     orderBy: [{ shipByAt: sortDir }, { placedAt: sortDir }],
-    take: 200,
+    // Satu baris LEBIH dari batas, supaya pemotongan bisa dideteksi dengan pasti
+    // (kalau jumlahnya pas sama dengan batas, kita tidak tahu apakah masih ada
+    // sisanya).
+    take: STATION_CANDIDATE_CEILING + 1,
   });
+
+  const truncated = orders.length > STATION_CANDIDATE_CEILING;
+  const candidates = truncated ? orders.slice(0, STATION_CANDIDATE_CEILING) : orders;
 
   const warehouseIds = [
     ...new Set([
       ...(warehouse ? [warehouse.id] : []),
-      ...orders.map((o) => o.fulfillmentOrders[0]?.warehouseId).filter((v): v is string => Boolean(v)),
+      ...candidates.map((o) => o.fulfillmentOrders[0]?.warehouseId).filter((v): v is string => Boolean(v)),
     ]),
   ];
   const availability = await getAvailabilityMap(
     warehouseIds,
-    [...new Set(orders.flatMap((o) => o.items.map((i) => i.variantId)))],
+    [...new Set(candidates.flatMap((o) => o.items.map((i) => i.variantId)))],
   );
 
-  const unified = orders.map((o) => {
+  const unified = candidates.map((o) => {
     const fo = o.fulfillmentOrders[0] ?? null;
     const shipment = o.shipments[0] ?? null;
     const warehouseId = fo?.warehouseId ?? warehouse?.id ?? '';
@@ -975,18 +1019,39 @@ export async function getFulfillmentStation(
     };
   });
 
+  // Jumlah per tahap dihitung dari SELURUH kandidat, bukan dari halaman yang
+  // sedang tampil - kalau dihitung dari halaman, angka di tab akan berubah
+  // setiap kali operator berpindah halaman dan itu menyesatkan.
+  const stages = {
+    baru: unified.filter((u) => u.stage === 'BARU').length,
+    menungguStok: unified.filter((u) => u.stage === 'MENUNGGU_STOK').length,
+    siapDikemas: unified.filter((u) => u.stage === 'SIAP_DIKEMAS').length,
+    siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
+    dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
+    dibatalkan: unified.filter((u) => u.stage === 'DIBATALKAN').length,
+  };
+
+  const filtered = options.stage ? unified.filter((u) => u.stage === options.stage) : unified;
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  // Halaman yang diminta bisa berada di luar rentang, misalnya setelah operator
+  // menyelesaikan pesanan terakhir di halaman terakhir. Dijepit ke halaman sah
+  // terakhir supaya layar tidak pernah tampil kosong tanpa penjelasan.
+  const page = Math.min(requestedPage, totalPages);
+  const mulai = (page - 1) * pageSize;
+
   return {
     warehouse,
     sort: options.sort ?? 'oldest',
-    stages: {
-      baru: unified.filter((u) => u.stage === 'BARU').length,
-      menungguStok: unified.filter((u) => u.stage === 'MENUNGGU_STOK').length,
-      siapDikemas: unified.filter((u) => u.stage === 'SIAP_DIKEMAS').length,
-      siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
-      dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
-      dibatalkan: unified.filter((u) => u.stage === 'DIBATALKAN').length,
-    },
-    orders: unified,
+    stage: options.stage ?? null,
+    stages,
+    orders: filtered.slice(mulai, mulai + pageSize),
+    page,
+    pageSize,
+    total,
+    totalPages,
+    /** true bila kandidat terpotong pagar pengaman; antarmuka WAJIB memberitahukan. */
+    truncated,
     generatedAt: new Date().toISOString(),
   };
 }
