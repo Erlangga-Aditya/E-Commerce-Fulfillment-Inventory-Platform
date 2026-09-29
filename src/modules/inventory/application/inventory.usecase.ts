@@ -842,7 +842,19 @@ export async function listShopeeSourcedVariants(
   const variants = await prisma.productVariant.findMany({
     where: {
       product: { tenantId },
-      externalMappings: { some: { shop: { provider: 'shopee' } } },
+      // SEMUA varian milik tenant, bukan hanya yang berasal dari Shopee.
+      //
+      // Sebelumnya di sini ada saringan
+      //   externalMappings: { some: { shop: { provider: 'shopee' } } }
+      // yang membuat kotak "Tambah Stok" hanya memuat produk hasil sinkronisasi
+      // Shopee. Akibatnya produk yang ditambahkan sendiri oleh penjual TIDAK
+      // PERNAH muncul di daftar itu - penjual bisa membuat produk, tetapi tidak
+      // bisa menyetel stoknya, dan yang terlihat hanya produk lama. Keluhan itu
+      // nyata dan bukan disebabkan mode sandbox.
+      //
+      // Stok gudang berlaku untuk semua barang, jadi daftarnya pun harus memuat
+      // semua barang. Pemetaan Shopee tetap ditampilkan bila ada (lihat include
+      // di bawah), tetapi tidak lagi menjadi syarat muncul.
       ...(keyword
         ? {
             OR: [
@@ -863,7 +875,11 @@ export async function listShopeeSourcedVariants(
       },
     },
     orderBy: [{ product: { name: 'asc' } }, { sku: 'asc' }],
-    take: 40,
+    // Daftar ini dipakai sebagai pemilih dengan kotak pencarian, jadi yang
+    // dibatasi adalah hasil yang BELUM disaring. Angkanya dinaikkan dari 40
+    // supaya produk ke-41 dan seterusnya tidak hilang diam-diam, dan jumlah
+    // totalnya dikembalikan ke pemanggil agar pemotongan tidak tersembunyi.
+    take: 500,
   });
 
   if (variants.length === 0) return [];
