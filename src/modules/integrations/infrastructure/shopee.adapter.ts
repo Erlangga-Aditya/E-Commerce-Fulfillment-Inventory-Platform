@@ -1293,6 +1293,16 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       });
     }
     const documentType = param.suggestedType ?? param.selectableTypes[0] ?? null;
+    // Dicatat supaya bisa diperiksa: tipe mana yang Shopee TAWARKAN, dan mana
+    // yang akhirnya dipakai. Tanpa catatan ini, pertanyaan "apakah kita meminta
+    // jenis label yang salah" tidak bisa dijawab dari produksi - hanya bisa
+    // ditebak. Berguna juga saat menangani keluhan label dari penjual.
+    logger.info('Tipe dokumen label dari Shopee', {
+      orderSn: target.orderSn,
+      ditawarkan: param.selectableTypes,
+      disarankan: param.suggestedType,
+      dipakai: documentType,
+    });
     if (!documentType) {
       throw new ExternalIntegrationError('shopee', describeLabelFailure(param, target));
     }
