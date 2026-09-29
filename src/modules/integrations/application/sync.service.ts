@@ -700,25 +700,63 @@ async function recordTrackEvent(
   shipmentId: string,
   ev: { externalEventId: string; status: string; description: string | null; occurredAt: Date },
 ): Promise<boolean> {
-  try {
-    await prisma.shipmentEvent.create({
-      data: {
-        shipmentId,
-        externalEventId: ev.externalEventId,
-        status: ev.status,
-        description: ev.description,
-        occurredAt: ev.occurredAt,
-      },
-    });
-    return true;
-  } catch (err) {
-    if ((err as { code?: string }).code !== 'P2002') throw err;
+  const kunci = { shipmentId_externalEventId: { shipmentId, externalEventId: ev.externalEventId } };
+  // Diperiksa lebih dulu, bukan create-lalu-tangkap: Prisma mencatat pelanggaran
+  // unique (P2002) sebagai error ke stderr walaupun ditangkap, sehingga log
+  // produksi terisi "prisma:error" yang terlihat seperti kerusakan padahal bukan.
+  const sudahAda = await prisma.shipmentEvent.findUnique({ where: kunci, select: { id: true } });
+  if (sudahAda) {
     await prisma.shipmentEvent.update({
-      where: { shipmentId_externalEventId: { shipmentId, externalEventId: ev.externalEventId } },
+      where: kunci,
       data: { status: ev.status, description: ev.description },
     });
     return false;
   }
+  await prisma.shipmentEvent.create({
+    data: {
+      shipmentId,
+      externalEventId: ev.externalEventId,
+      status: ev.status,
+      description: ev.description,
+      occurredAt: ev.occurredAt,
+    },
+  });
+  return true;
+}
+
+/**
+ * Urutan maju status pengiriman. Semakin besar semakin jauh perjalanannya.
+ *
+ * Dipakai untuk mencegah status MUNDUR. Dua sumber memberi kabar status:
+ *   1. sinkron pesanan  - `order_status` pesanan (mis. `SHIPPED`, `COMPLETED`)
+ *   2. sinkron pelacakan - `logistics_status` dari get_tracking_info
+ *
+ * Sumber kedua sering tertinggal, terutama di sandbox yang tidak pernah
+ * menaikkan `LOGISTICS_REQUEST_CREATED`. Karena pelacakan dijalankan SESUDAH
+ * sinkron pesanan pada setiap putaran, kabar maju dari pesanan langsung
+ * ditimpa kembali ke "siap dikirim" - paket yang sudah dijemput kurir selamanya
+ * tampak belum dikirim, dan pesanan yang sudah diterima tidak pernah selesai.
+ *
+ * Karena itu status hanya boleh maju, kecuali keadaan luar biasa yang memang
+ * harus selalu berlaku: gagal dan dikembalikan.
+ */
+const SHIPMENT_RANK: Record<string, number> = {
+  PENDING: 0,
+  READY_TO_SHIP: 1,
+  PICKED_UP: 2,
+  IN_TRANSIT: 3,
+  DELIVERED: 4,
+};
+
+export function shouldAdvanceShipmentStatus(current: string, next: string): boolean {
+  // Keadaan luar biasa selalu boleh berlaku, dari mana pun asalnya.
+  if (next === 'FAILED' || next === 'RETURNED') return true;
+  // Sekali gagal/dikembalikan, jangan digeser mundur oleh kabar yang tertinggal.
+  if (current === 'FAILED' || current === 'RETURNED') return false;
+  const a = SHIPMENT_RANK[current];
+  const b = SHIPMENT_RANK[next];
+  if (a === undefined || b === undefined) return true;
+  return b >= a;
 }
 
 export async function triggerTrackingSync(tenantId: string, shopId: string, actorId: string) {
@@ -753,23 +791,27 @@ export async function triggerTrackingSync(tenantId: string, shopId: string, acto
       // Apakah paket ini benar-benar berubah? Hanya perubahan yang dihitung,
       // supaya putaran otomatis yang tidak membawa kabar baru tidak tercatat
       // sebagai "ada yang ditulis" (lihat catatan recordTrackEvent).
-      const statusBerubah = newStatus !== shipment.status;
       const awbBaru =
         Boolean(tracking.awb) && tracking.awb !== orderSn && tracking.awb !== shipment.awb;
       const kurirBaru = Boolean(tracking.carrier) && tracking.carrier !== shipment.carrier;
+
+      // Kabar yang tertinggal tidak boleh menarik status mundur (lihat SHIPMENT_RANK).
+      const statusDipakai = shouldAdvanceShipmentStatus(shipment.status, newStatus)
+        ? newStatus
+        : shipment.status;
 
       await prisma.shipment.update({
         where: { id: shipment.id },
         data: {
           awb: tracking.awb && tracking.awb !== orderSn ? tracking.awb : (shipment.awb ?? undefined),
           carrier: tracking.carrier || shipment.carrier,
-          status: newStatus,
-          ...(newStatus === 'DELIVERED' && !shipment.deliveredAt ? { deliveredAt: new Date() } : {}),
-          ...(newStatus !== 'PENDING' && newStatus !== 'READY_TO_SHIP' && !shipment.shippedAt ? { shippedAt: new Date() } : {}),
+          status: statusDipakai,
+          ...(statusDipakai === 'DELIVERED' && !shipment.deliveredAt ? { deliveredAt: new Date() } : {}),
+          ...(statusDipakai !== 'PENDING' && statusDipakai !== 'READY_TO_SHIP' && !shipment.shippedAt ? { shippedAt: new Date() } : {}),
         },
       });
 
-      let changed = statusBerubah || awbBaru || kurirBaru;
+      let changed = statusDipakai !== shipment.status || awbBaru || kurirBaru;
 
       // Peristiwa pelacakan: yang baru menandai perubahan, yang lama hanya
       // diperbarui isinya.
