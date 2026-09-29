@@ -1632,8 +1632,14 @@ export function mapLogisticsStatus(
     case 'LOGISTICS_PICKUP_DONE':
       return 'PICKED_UP';
     case 'SHIPPED':
-    case 'TO_CONFIRM_RECEIVE':
       return 'IN_TRANSIT';
+    // `TO_CONFIRM_RECEIVE` BUKAN "masih di jalan". Status ini diberikan Shopee
+    // setelah paket SUDAH SAMPAI ke pembeli dan tinggal menunggu konfirmasi
+    // penerimaan. Sebelumnya status ini disamakan dengan SHIPPED, sehingga paket
+    // yang sudah sampai tetap terlihat sedang di perjalanan - dan operator
+    // tidak pernah bisa melihat pesanan yang sudah diterima pembeli.
+    case 'TO_CONFIRM_RECEIVE':
+      return 'DELIVERED';
     case 'LOGISTICS_DELIVERY_DONE':
     case 'COMPLETED':
       return 'DELIVERED';
