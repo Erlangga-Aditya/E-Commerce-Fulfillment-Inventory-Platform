@@ -683,6 +683,44 @@ export async function triggerReturnSync(tenantId: string, shopId: string, actorI
  *   auto-creates Shipment + ShipmentEvents.
  * - For orders with existing Shipment not yet DELIVERED/FAILED, updates status and events.
  */
+/**
+ * Tulis satu peristiwa pelacakan; laporkan apakah barisnya BENAR-BENAR baru.
+ *
+ * Dipakai supaya `recordsWritten` berarti "ada yang berubah", bukan "ada yang
+ * diperiksa". Sebelumnya penghitung ini bertambah untuk SETIAP paket yang
+ * dilewati, sehingga sinkronisasi otomatis yang tidak membawa perubahan apa
+ * pun tetap tercatat seolah menulis sesuatu. Akibatnya riwayat sinkronisasi -
+ * yang berjalan tiap 60 detik - terisi ribuan baris kosong dan riwayat yang
+ * penting tenggelam di antaranya.
+ *
+ * Caranya: coba `create`. Bila peristiwa itu sudah ada, Prisma melempar P2002
+ * (pelanggaran unique) - artinya bukan perubahan, jadi cukup perbarui isinya.
+ */
+async function recordTrackEvent(
+  shipmentId: string,
+  ev: { externalEventId: string; status: string; description: string | null; occurredAt: Date },
+): Promise<boolean> {
+  try {
+    await prisma.shipmentEvent.create({
+      data: {
+        shipmentId,
+        externalEventId: ev.externalEventId,
+        status: ev.status,
+        description: ev.description,
+        occurredAt: ev.occurredAt,
+      },
+    });
+    return true;
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'P2002') throw err;
+    await prisma.shipmentEvent.update({
+      where: { shipmentId_externalEventId: { shipmentId, externalEventId: ev.externalEventId } },
+      data: { status: ev.status, description: ev.description },
+    });
+    return false;
+  }
+}
+
 export async function triggerTrackingSync(tenantId: string, shopId: string, actorId: string) {
   const { conn, creds } = await loadConnection(tenantId, shopId);
   const fresh = await ensureFreshToken(conn.id, creds);
@@ -711,6 +749,15 @@ export async function triggerTrackingSync(tenantId: string, shopId: string, acto
       if (!tracking) continue;
 
       const newStatus = mapLogisticsStatus(tracking.status);
+
+      // Apakah paket ini benar-benar berubah? Hanya perubahan yang dihitung,
+      // supaya putaran otomatis yang tidak membawa kabar baru tidak tercatat
+      // sebagai "ada yang ditulis" (lihat catatan recordTrackEvent).
+      const statusBerubah = newStatus !== shipment.status;
+      const awbBaru =
+        Boolean(tracking.awb) && tracking.awb !== orderSn && tracking.awb !== shipment.awb;
+      const kurirBaru = Boolean(tracking.carrier) && tracking.carrier !== shipment.carrier;
+
       await prisma.shipment.update({
         where: { id: shipment.id },
         data: {
@@ -722,22 +769,22 @@ export async function triggerTrackingSync(tenantId: string, shopId: string, acto
         },
       });
 
-      // Upsert tracking events (use update_time as surrogate key)
+      let changed = statusBerubah || awbBaru || kurirBaru;
+
+      // Peristiwa pelacakan: yang baru menandai perubahan, yang lama hanya
+      // diperbarui isinya.
       for (const ev of tracking.events) {
         if (!ev.externalEventId) continue;
-        await prisma.shipmentEvent.upsert({
-          where: { shipmentId_externalEventId: { shipmentId: shipment.id, externalEventId: ev.externalEventId } },
-          create: {
-            shipmentId: shipment.id,
-            externalEventId: ev.externalEventId,
-            status: ev.status,
-            description: ev.description,
-            occurredAt: ev.occurredAt,
-          },
-          update: { status: ev.status, description: ev.description },
+        const baru = await recordTrackEvent(shipment.id, {
+          externalEventId: ev.externalEventId,
+          status: ev.status,
+          description: ev.description,
+          occurredAt: ev.occurredAt,
         });
+        if (baru) changed = true;
       }
-      recordsWritten++;
+
+      if (changed) recordsWritten++;
     }
 
     // ── 2. CONFIRMED orders without local Shipment — check if Shopee has AWB ─
