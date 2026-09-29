@@ -76,7 +76,14 @@ describe('Sync Service Status Mappings', () => {
 
     it('maps in-transit statuses', () => {
       expect(mapLogisticsStatus('SHIPPED')).toBe('IN_TRANSIT');
-      expect(mapLogisticsStatus('TO_CONFIRM_RECEIVE')).toBe('IN_TRANSIT');
+    });
+
+    it('paket yang sudah sampai pembeli dianggap terkirim, bukan masih di jalan', () => {
+      // `TO_CONFIRM_RECEIVE` diberikan Shopee setelah paket SUDAH SAMPAI dan
+      // tinggal menunggu konfirmasi penerimaan. Sebelumnya status ini disamakan
+      // dengan SHIPPED, sehingga paket yang sudah sampai tetap terlihat sedang
+      // di perjalanan dan pesanan yang diterima pembeli tidak pernah muncul.
+      expect(mapLogisticsStatus('TO_CONFIRM_RECEIVE')).toBe('DELIVERED');
     });
 
     it('maps terminal delivery statuses', () => {
