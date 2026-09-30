@@ -579,21 +579,36 @@ export async function triggerProductSync(tenantId: string, shopId: string, actor
           },
         });
 
-        // Initialize InventoryBalance for new variant (stock = Shopee stock or 0)
+        // Sediakan baris saldo stok gudang untuk varian baru - TANPA mengisi
+        // angkanya dari Shopee.
+        //
+        // Sebelumnya angka stok dari Shopee ditulis ke saldo gudang, dan
+        // setiap sinkronisasi menimpanya lagi. Dua akibatnya serius:
+        //
+        //   1. Angka stok gudang bukan hasil hitungan gudang, melainkan angka
+        //      yang penjual isi sendiri di Seller Center - dan angka itu boleh
+        //      diisi apa saja, tidak pernah diverifikasi.
+        //   2. Setiap sinkronisasi produk MENIMPA hitungan gudang yang sudah
+        //      benar. Hasil opname hilang tanpa jejak, dan stok yang muncul di
+        //      layar tidak bisa dipertanggungjawabkan.
+        //
+        // Stok gudang hanya boleh berubah lewat jalur yang tercatat di mutasi
+        // stok: penerimaan barang, penyesuaian, dan pengurangan karena pesanan.
+        // Karena itu barisnya dibuat bernilai nol dan TIDAK pernah diperbarui
+        // dari sini. `skipDuplicates` membuat baris yang sudah ada dibiarkan
+        // apa adanya, termasuk saat dua sinkronisasi berjalan bersamaan.
         if (warehouse) {
-          const stockQty = mv.stock ?? 0;
-          await prisma.inventoryBalance.upsert({
-            where: { warehouseId_variantId: { warehouseId: warehouse.id, variantId: localVariant.id } },
-            create: {
-              warehouseId: warehouse.id,
-              variantId: localVariant.id,
-              onHand: stockQty,
-              reserved: 0,
-              blocked: 0,
-            },
-            update: {
-              onHand: stockQty, // sync with Shopee stock
-            },
+          await prisma.inventoryBalance.createMany({
+            data: [
+              {
+                warehouseId: warehouse.id,
+                variantId: localVariant.id,
+                onHand: 0,
+                reserved: 0,
+                blocked: 0,
+              },
+            ],
+            skipDuplicates: true,
           });
         }
       }

@@ -61,6 +61,8 @@ interface StationOrder {
   fulfillmentStatus: string | null;
   awb: string | null;
   carrier: string | null;
+  /** Keadaan paket menurut catatan kita, untuk penyaring dan kartu ringkasan. */
+  shipmentStatus: string | null;
   canArrangeShipment: boolean;
   /** Barang hanya boleh dinyatakan siap kirim setelah nomor resi terbit. */
   canPack: boolean;
@@ -80,8 +82,22 @@ interface StationResponse {
     siapKirim: number;
     dikirim: number;
     dibatalkan: number;
+    selesai: number;
   };
   stage: Stage | null;
+  /** Jumlah per keadaan nyata, dihitung server dari SELURUH data. */
+  ringkasan: {
+    perluDiproses: number;
+    belumResi: number;
+    sudahResi: number;
+    belumDijemput: number;
+    diPerjalanan: number;
+    sudahSampai: number;
+    gagalKirim: number;
+    selesai: number;
+    dibatalkan: number;
+    retur: number;
+  };
   orders: StationOrder[];
   page: number;
   pageSize: number;
@@ -122,7 +138,14 @@ interface ScanOutcome {
 // Bagian tampilan yang dipakai berulang
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Stage = 'BARU' | 'MENUNGGU_STOK' | 'SIAP_DIKEMAS' | 'SIAP_KIRIM' | 'DIKIRIM' | 'DIBATALKAN';
+type Stage =
+  | 'BARU'
+  | 'MENUNGGU_STOK'
+  | 'SIAP_DIKEMAS'
+  | 'SIAP_KIRIM'
+  | 'DIKIRIM'
+  | 'DIBATALKAN'
+  | 'SELESAI';
 
 const STAGE_LABEL: Record<Stage, string> = {
   BARU: 'Perlu Diproses',
@@ -131,6 +154,7 @@ const STAGE_LABEL: Record<Stage, string> = {
   SIAP_KIRIM: 'Siap Kirim',
   DIKIRIM: 'Sudah Dikirim',
   DIBATALKAN: 'Dibatalkan',
+  SELESAI: 'Selesai',
 };
 
 const STAGE_TONE: Record<Stage, string> = {
@@ -140,6 +164,7 @@ const STAGE_TONE: Record<Stage, string> = {
   SIAP_KIRIM: 'var(--success, #10b981)',
   DIKIRIM: 'var(--muted)',
   DIBATALKAN: 'var(--danger, #ef4444)',
+  SELESAI: 'var(--success, #10b981)',
 };
 
 /** Panduan 4 langkah supaya operator baru langsung paham alurnya. */
@@ -248,6 +273,8 @@ export default function PesananPengirimanPage() {
   const [sort, setSort] = useState<'oldest' | 'newest'>('oldest');
   const [stageFilter, setStageFilter] = useState<'SEMUA' | Stage>('SEMUA');
   const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const [resiFilter, setResiFilter] = useState<'SEMUA' | 'sudah' | 'belum'>('SEMUA');
   const [outcome, setOutcome] = useState<ScanOutcome | null>(null);
   const [stockOpen, setStockOpen] = useState(false);
   const [stockVariantId, setStockVariantId] = useState<string | null>(null);
@@ -274,10 +301,14 @@ export default function PesananPengirimanPage() {
       sortMode: 'oldest' | 'newest' = sort,
       pageArg: number = page,
       stageArg: 'SEMUA' | Stage = stageFilter,
+      kataKunci: string = search,
+      resiArg: 'SEMUA' | 'sudah' | 'belum' = resiFilter,
     ) => {
       try {
         const params = new URLSearchParams({ sort: sortMode, page: String(pageArg) });
         if (stageArg !== 'SEMUA') params.set('stage', stageArg);
+        if (kataKunci.trim()) params.set('search', kataKunci.trim());
+        if (resiArg !== 'SEMUA') params.set('resi', resiArg);
         const res = await api<StationResponse>(`/api/v1/fulfillment/station?${params.toString()}`);
         setData(res);
         // Server bisa menjepit halaman yang diminta (misalnya halaman terakhir
@@ -291,7 +322,7 @@ export default function PesananPengirimanPage() {
         setLoading(false);
       }
     },
-    [sort, page, stageFilter],
+    [sort, page, stageFilter, search, resiFilter],
   );
 
   useEffect(() => {
@@ -299,12 +330,12 @@ export default function PesananPengirimanPage() {
     void (async () => {
       await Promise.resolve();
       if (cancelled) return;
-      await load(sort, page, stageFilter);
+      await load(sort, page, stageFilter, search, resiFilter);
     })();
-    const onRealtime = () => void load(sort, page, stageFilter);
+    const onRealtime = () => void load(sort, page, stageFilter, search, resiFilter);
     window.addEventListener('shopee:synced', onRealtime);
     window.addEventListener('fulfillment:updated', onRealtime);
-    const refresh = setInterval(() => void load(sort, page, stageFilter), 30000);
+    const refresh = setInterval(() => void load(sort, page, stageFilter, search, resiFilter), 30000);
     const clock = setInterval(() => setNow(new Date()), 60000);
     return () => {
       cancelled = true;
@@ -313,7 +344,7 @@ export default function PesananPengirimanPage() {
       clearInterval(refresh);
       clearInterval(clock);
     };
-  }, [load, sort, page, stageFilter]);
+  }, [load, sort, page, stageFilter, search, resiFilter]);
 
   /**
    * Ambil resi untuk semua pesanan yang dicentang sekaligus.
@@ -430,6 +461,17 @@ export default function PesananPengirimanPage() {
   const gantiTahap = (tahap: 'SEMUA' | Stage) => {
     setStageFilter(tahap);
     setPage(1); // halaman 1 untuk tahap baru: nomor halaman lama tidak berlaku lagi
+  };
+
+  /** Kembali ke halaman 1 saat kata kunci berubah, dengan alasan yang sama. */
+  const ubahPencarian = (v: string) => {
+    setSearch(v);
+    setPage(1);
+  };
+
+  const ubahResi = (v: 'SEMUA' | 'sudah' | 'belum') => {
+    setResiFilter(v);
+    setPage(1);
   };
 
   // Cetak label RESMI Shopee: unduh file dari Shopee, lalu buka di tab baru.
@@ -550,14 +592,48 @@ export default function PesananPengirimanPage() {
   if (error) return <ErrorState message={error} onRetry={() => { setLoading(true); void load(sort); }} />;
 
   const stages = data?.stages;
+  // Jumlah di tiap tab berasal dari server (stages), bukan dari panjang daftar
+  // yang sedang tampil. Kalau dihitung dari daftar yang tampil, angkanya akan
+  // berubah mengikuti halaman dan tidak lagi menggambarkan keadaan sebenarnya.
+  const r = data?.ringkasan;
   const filters: Array<{ key: 'SEMUA' | Stage; label: string; count: number }> = [
-    { key: 'SEMUA', label: 'Semua', count: data?.orders.length ?? 0 },
+    {
+      key: 'SEMUA',
+      label: 'Semua',
+      count:
+        (stages?.baru ?? 0) +
+        (stages?.menungguStok ?? 0) +
+        (stages?.siapDikemas ?? 0) +
+        (stages?.siapKirim ?? 0) +
+        (stages?.dikirim ?? 0) +
+        (stages?.selesai ?? 0) +
+        (stages?.dibatalkan ?? 0),
+    },
     { key: 'BARU', label: 'Perlu Diproses', count: stages?.baru ?? 0 },
     { key: 'MENUNGGU_STOK', label: 'Menunggu Stok', count: stages?.menungguStok ?? 0 },
     { key: 'SIAP_DIKEMAS', label: 'Siap Dikemas', count: stages?.siapDikemas ?? 0 },
     { key: 'SIAP_KIRIM', label: 'Siap Kirim', count: stages?.siapKirim ?? 0 },
+    { key: 'DIKIRIM', label: 'Dikirim', count: stages?.dikirim ?? 0 },
+    { key: 'SELESAI', label: 'Selesai', count: stages?.selesai ?? 0 },
     { key: 'DIBATALKAN', label: 'Dibatalkan', count: stages?.dibatalkan ?? 0 },
   ];
+
+  // Kartu ringkasan: pertanyaan yang paling sering diajukan operator tentang
+  // keadaan paket. Semuanya dihitung server dari seluruh data.
+  const kartuStatus: Array<{ label: string; nilai: number; warna: string }> = r
+    ? [
+        { label: 'Perlu diproses', nilai: r.perluDiproses, warna: '#0ea5e9' },
+        { label: 'Belum ada resi', nilai: r.belumResi, warna: '#f59e0b' },
+        { label: 'Sudah ada resi', nilai: r.sudahResi, warna: '#6366f1' },
+        { label: 'Belum dijemput kurir', nilai: r.belumDijemput, warna: '#a855f7' },
+        { label: 'Sedang di perjalanan', nilai: r.diPerjalanan, warna: '#0891b2' },
+        { label: 'Sudah diterima pembeli', nilai: r.sudahSampai, warna: '#16a34a' },
+        { label: 'Selesai', nilai: r.selesai, warna: '#15803d' },
+        { label: 'Gagal kirim', nilai: r.gagalKirim, warna: '#dc2626' },
+        { label: 'Dibatalkan', nilai: r.dibatalkan, warna: '#64748b' },
+        { label: 'Retur', nilai: r.retur, warna: '#ea580c' },
+      ]
+    : [];
 
   return (
     <div style={{ paddingBottom: 60 }}>
@@ -833,6 +909,68 @@ export default function PesananPengirimanPage() {
             <ArrowDownWideNarrow size={13} aria-hidden />
             <span>Terbaru dulu</span>
           </button>
+        </div>
+      </div>
+
+      {/* Kartu ringkasan: keadaan paket sekilas, tanpa perlu menghitung manual. */}
+      {kartuStatus.length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+            gap: 10,
+            marginBottom: 16,
+          }}
+        >
+          {kartuStatus.map((k) => (
+            <div
+              key={k.label}
+              className="card"
+              style={{ padding: '10px 12px', borderLeft: `4px solid ${k.warna}` }}
+            >
+              <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.1 }}>{k.nilai}</div>
+              <div className="small muted" style={{ marginTop: 2 }}>
+                {k.label}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Pencarian: nomor pesanan, nomor resi, nama pembeli, atau SKU. */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => ubahPencarian(e.target.value)}
+          placeholder="Cari nomor pesanan, nomor resi, nama pembeli, atau SKU"
+          aria-label="Cari pesanan"
+          style={{
+            flex: '1 1 320px',
+            minWidth: 0,
+            padding: '9px 12px',
+            borderRadius: 8,
+            border: '1px solid var(--border)',
+            background: 'var(--surface)',
+            color: 'inherit',
+            fontSize: 14,
+          }}
+        />
+        <div className="filter-chips">
+          {([
+            { key: 'SEMUA', label: 'Semua resi' },
+            { key: 'belum', label: 'Belum ada resi' },
+            { key: 'sudah', label: 'Sudah ada resi' },
+          ] as const).map((x) => (
+            <button
+              key={x.key}
+              type="button"
+              className={`btn btn-sm ${resiFilter === x.key ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => ubahResi(x.key)}
+            >
+              {x.label}
+            </button>
+          ))}
         </div>
       </div>
 

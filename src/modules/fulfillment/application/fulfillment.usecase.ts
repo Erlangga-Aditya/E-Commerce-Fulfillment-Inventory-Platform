@@ -849,7 +849,9 @@ export type StationStage =
   | 'SIAP_DIKEMAS'
   | 'SIAP_KIRIM'
   | 'DIKIRIM'
-  | 'DIBATALKAN';
+  | 'DIBATALKAN'
+  /** Pesanan tuntas: sudah diterima pembeli (status pesanan COMPLETED). */
+  | 'SELESAI';
 
 /**
  * Urutan resmi tahap stasiun kerja.
@@ -867,6 +869,7 @@ export const STATION_STAGES = [
   'SIAP_KIRIM',
   'DIKIRIM',
   'DIBATALKAN',
+  'SELESAI',
 ] as const satisfies readonly StationStage[];
 
 /**
@@ -893,11 +896,16 @@ export async function getFulfillmentStation(
     sort?: 'oldest' | 'newest';
     /** Batasi ke satu tahap saja; null berarti semua tahap. */
     stage?: StationStage | null;
+    /** Cari berdasarkan nomor pesanan, nomor resi, nama pembeli, atau SKU. */
+    search?: string;
+    /** Saring berdasarkan ada/tidaknya nomor resi. */
+    resi?: 'sudah' | 'belum' | null;
     page?: number;
     pageSize?: number;
   } = {},
 ) {
   const sortDir: 'asc' | 'desc' = options.sort === 'newest' ? 'desc' : 'asc';
+  const kataKunci = options.search?.trim();
   const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 20));
   const requestedPage = Math.max(1, options.page ?? 1);
 
@@ -911,7 +919,32 @@ export async function getFulfillmentStation(
     // `CANCELLED` ikut diambil supaya operator bisa melihat pesanan yang batal.
     // Pesanan batal tidak boleh hilang dari halaman — kalau hilang, operator
     // tidak pernah tahu kalau ada pembeli yang membatalkan pesanan.
-    where: { tenantId, status: { in: ['NEW', 'CONFIRMED', 'CANCELLED'] } },
+    where: {
+      tenantId,
+      // `CANCELLED` ikut diambil supaya operator bisa melihat pesanan yang
+      // batal. Pesanan batal tidak boleh hilang dari halaman.
+      // `COMPLETED` ikut diambil: pesanan yang sudah selesai harus bisa
+      // dilihat operator (dan dihitung di ringkasan). Sebelumnya status ini
+      // tidak pernah diambil, sehingga pesanan yang sudah diterima pembeli
+      // lenyap dari layar tanpa cara menampilkannya kembali.
+      status: { in: ['NEW', 'CONFIRMED', 'CANCELLED', 'COMPLETED'] },
+      ...(kataKunci
+        ? {
+            OR: [
+              { externalOrderId: { contains: kataKunci } },
+              { buyerName: { contains: kataKunci } },
+              { buyerPhone: { contains: kataKunci } },
+              { shipments: { some: { awb: { contains: kataKunci } } } },
+              { items: { some: { variant: { sku: { contains: kataKunci } } } } },
+            ],
+          }
+        : {}),
+      ...(options.resi === 'sudah'
+        ? { shipments: { some: { awb: { not: null } } } }
+        : options.resi === 'belum'
+          ? { shipments: { none: { awb: { not: null } } } }
+          : {}),
+    },
     include: {
       shop: { select: { name: true, provider: true } },
       items: {
@@ -976,7 +1009,9 @@ export async function getFulfillmentStation(
     // tombol aksi (scan, ambil resi, serahkan) harus dimatikan.
     const stage: StationStage = o.status === 'CANCELLED'
       ? 'DIBATALKAN'
-      : !fo
+      : o.status === 'COMPLETED'
+        ? 'SELESAI'
+        : !fo
         ? 'BARU'
         : fo.status === 'WAITING_STOCK'
           ? 'MENUNGGU_STOK'
@@ -1003,6 +1038,13 @@ export async function getFulfillmentStation(
       fulfillmentStatus: fo?.status ?? null,
       awb: shipment?.awb ?? null,
       carrier: shipment?.carrier ?? null,
+      /**
+       * Status paket menurut catatan kita (READY_TO_SHIP / PICKED_UP /
+       * IN_TRANSIT / DELIVERED / FAILED / RETURNED). Dipakai untuk kartu
+       * ringkasan dan penyaring, supaya operator bisa membedakan paket yang
+       * belum dijemput, sedang di perjalanan, dan sudah diterima pembeli.
+       */
+      shipmentStatus: shipment?.status ?? null,
       isCancelled: dibatalkan,
       canCancel: false,
       // Pesanan batal tidak boleh offer aksi apa pun: tidak bisa scan, tidak
@@ -1029,7 +1071,19 @@ export async function getFulfillmentStation(
     siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
     dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
     dibatalkan: unified.filter((u) => u.stage === 'DIBATALKAN').length,
+      selesai: unified.filter((u) => u.stage === 'SELESAI').length,
   };
+
+  // Tiga kelompok besar dipakai untuk ringkasan. Dipisahkan dari tahap kerja
+  // karena pertanyaannya berbeda: tahap menjawab "sedang di langkah mana",
+  // sedangkan kelompok ini menjawab "sudah sampai mana paketnya".
+  const daftarDibatalkan = unified.filter((u) => u.stage === 'DIBATALKAN');
+  const selesai = unified.filter((u) => u.orderStatus === 'COMPLETED');
+  const aktif = unified.filter((u) => u.stage !== 'DIBATALKAN' && u.orderStatus !== 'COMPLETED');
+
+  const jumlahRetur = await prisma.return.count({
+    where: { order: { tenantId } },
+  });
 
   const filtered = options.stage ? unified.filter((u) => u.stage === options.stage) : unified;
   const total = filtered.length;
@@ -1052,6 +1106,28 @@ export async function getFulfillmentStation(
     totalPages,
     /** true bila kandidat terpotong pagar pengaman; antarmuka WAJIB memberitahukan. */
     truncated,
+    /**
+     * Ringkasan jumlah per keadaan NYATA.
+     *
+     * Angka-angka ini dihitung dari seluruh kandidat (bukan dari halaman yang
+     * tampil), dan dari keadaan yang benar-benar dimiliki pesanan - bukan dari
+     * tebakan atau dari layar pihak lain. Operator perlu bisa menjawab pertanyaan
+     * seperti "berapa paket yang belum ada resinya" dan "berapa yang sudah
+     * sampai ke pembeli" tanpa menghitung satu per satu.
+     */
+    ringkasan: {
+      /** Semua pesanan yang masih perlu ditangani (bukan batal, bukan selesai). */
+      perluDiproses: aktif.length,
+      belumResi: aktif.filter((u) => !u.awb).length,
+      sudahResi: aktif.filter((u) => Boolean(u.awb)).length,
+      belumDijemput: aktif.filter((u) => u.awb && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP')).length,
+      diPerjalanan: aktif.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT').length,
+      sudahSampai: aktif.filter((u) => u.shipmentStatus === 'DELIVERED').length,
+      gagalKirim: aktif.filter((u) => u.shipmentStatus === 'FAILED').length,
+      selesai: selesai.length,
+      dibatalkan: daftarDibatalkan.length,
+      retur: jumlahRetur,
+    },
     generatedAt: new Date().toISOString(),
   };
 }

@@ -10,7 +10,9 @@ export type OperatorStage =
   | 'SIAP_DIKEMAS'
   | 'SIAP_KIRIM'
   | 'DIKIRIM'
-  | 'DIBATALKAN';
+  | 'DIBATALKAN'
+  /** Pesanan tuntas - sudah diterima pembeli. Tidak ada langkah kerja lagi. */
+  | 'SELESAI';
 
 export type NextOperatorAction =
   | 'ARRANGE_SHIPMENT'
@@ -46,6 +48,13 @@ export function deriveOperatorWorkflow(input: OperatorWorkflowInput): OperatorWo
   }
 
   if (input.stage === 'DIKIRIM') {
+    return { stage: input.stage, nextAction: 'NONE', canScan: false, canHandover: false };
+  }
+
+  // Pesanan selesai: sama seperti pesanan batal dan terkirim - tidak ada aksi.
+  // Tanpa penjagaan ini, tombol scan/serahkan bisa muncul untuk pesanan yang
+  // sudah diterima pembeli dan sudah tidak perlu diapa-apakan lagi.
+  if (input.stage === 'SELESAI') {
     return { stage: input.stage, nextAction: 'NONE', canScan: false, canHandover: false };
   }
 
