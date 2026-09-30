@@ -691,39 +691,56 @@ export class ShopeeAdapter implements MarketplaceAdapter {
   async getProducts(creds: ShopCredentials): Promise<MarketplaceProduct[]> {
     const cfg = await this.cfg();
 
-    // Step 1: get all item IDs using GET with multiple item_status
+    // Step 1: kumpulkan seluruh item_id.
+    //
+    // `item_status` di Shopee menerima SATU nilai, bukan daftar. Mengirim array
+    // - seperti yang dilakukan sebelumnya - masih diterima di sandbox, tetapi
+    // ditolak di produksi dengan `product.error_param_item_status`. Akibatnya
+    // seluruh sinkronisasi produk gagal begitu aplikasi dipakai dengan toko
+    // sungguhan, padahal di sandbox tampak berjalan normal.
+    //
+    // Jadi tiap status diminta satu per satu, lalu hasilnya digabung. Daftar
+    // item yang muncul di lebih dari satu status hanya dihitung sekali.
+    const DAFTAR_ITEM_STATUS = ['NORMAL', 'UNLIST', 'BANNED'] as const;
     const itemIds: string[] = [];
-    let offset = 0;
-    const hasMore = true;
+    const sudahDikumpulkan = new Set<string>();
 
-    while (hasMore && offset < 5000) {
-      const res = await callShopee<Record<string, unknown>>(
-        cfg,
-        '/api/v2/product/get_item_list',
-        {
-          method: 'GET',
-          params: {
-            offset,
-            page_size: 50,
-            item_status: ['NORMAL', 'UNLIST', 'BANNED'],
+    for (const status of DAFTAR_ITEM_STATUS) {
+      let offset = 0;
+
+      while (offset < 5000) {
+        const res = await callShopee<Record<string, unknown>>(
+          cfg,
+          '/api/v2/product/get_item_list',
+          {
+            method: 'GET',
+            params: {
+              offset,
+              page_size: 50,
+              item_status: status,
+            },
           },
-        },
-        { shopId: creds.shopId, accessToken: creds.accessToken },
-      );
-      const list =
-        (res?.item as Array<Record<string, unknown>>) ??
-        (res?.item_list as Array<Record<string, unknown>>) ??
-        [];
+          { shopId: creds.shopId, accessToken: creds.accessToken },
+        );
+        const list =
+          (res?.item as Array<Record<string, unknown>>) ??
+          (res?.item_list as Array<Record<string, unknown>>) ??
+          [];
 
-      for (const it of list) {
-        if (it.item_id) itemIds.push(String(it.item_id));
-      }
+        for (const it of list) {
+          const id = it.item_id ? String(it.item_id) : '';
+          if (id && !sudahDikumpulkan.has(id)) {
+            sudahDikumpulkan.add(id);
+            itemIds.push(id);
+          }
+        }
 
-      const hasNext = Boolean(res?.has_next_page ?? res?.has_next_item);
-      if (!hasNext || list.length === 0) {
-        break;
+        const hasNext = Boolean(res?.has_next_page ?? res?.has_next_item);
+        if (!hasNext || list.length === 0) {
+          break;
+        }
+        offset += list.length;
       }
-      offset += list.length;
     }
 
     if (itemIds.length === 0) {
