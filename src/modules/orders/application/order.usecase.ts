@@ -205,7 +205,8 @@ export async function importOrder(
 
   const status = (orderData.status as DomainOrderStatus) ?? 'NEW';
 
-  const order = await prisma.$transaction(async (tx) => {
+  const buatPesanan = () =>
+    prisma.$transaction(async (tx) => {
     const created = await tx.order.create({
       data: {
         tenantId,
@@ -238,8 +239,36 @@ export async function importOrder(
         reason: 'Pesanan diimpor dari marketplace',
       },
     });
-    return created;
-  });
+      return created;
+    });
+
+  /**
+   * Tahan-tabrakan: dua sinkronisasi dapat berjalan BERSAMAAN.
+   *
+   * Sinkronisasi otomatis berjalan tiap 60 detik dan dapat bertabrakan dengan
+   * sinkronisasi yang dijalankan operator. Keduanya memeriksa "pesanan sudah
+   * ada?" pada saat yang hampir sama, sama-sama melihat belum ada, lalu
+   * sama-sama membuat barisnya. Yang kalah mendapat pelanggaran batasan unik
+   * (P2002) - dan kegagalan itu MEMBATALKAN seluruh proses sinkronisasi,
+   * sehingga satu pesanan yang kebetulan dibuat dua kali membuat ratusan
+   * pesanan lain ikut batal tersinkron.
+   *
+   * Pelanggaran unik di sini bukan kegagalan: pesanannya memang sudah masuk
+   * lewat jalur yang menang. Jadi dibaca ulang dan dilaporkan sebagai pesanan
+   * yang sudah ada.
+   */
+  let order;
+  try {
+    order = await buatPesanan();
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002') {
+      const sudahAda = await prisma.order.findUnique({
+        where: { shopId_externalOrderId: { shopId, externalOrderId } },
+      });
+      if (sudahAda) return { orderId: sudahAda.id, created: false };
+    }
+    throw err;
+  }
 
   logger.info('Order imported', { tenantId, orderId: order.id, externalOrderId });
   return { orderId: order.id, created: true };
