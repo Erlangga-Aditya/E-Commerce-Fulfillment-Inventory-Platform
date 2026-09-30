@@ -5,6 +5,34 @@ import { ShopeeAdapter } from '@/modules/integrations/infrastructure/shopee.adap
 import { connectShopee, triggerFullSync } from '@/modules/integrations/application/sync.service';
 import { logger } from '@/shared/observability/logger';
 
+/**
+ * Alamat publik aplikasi, dipakai untuk mengalihkan BROWSER pengguna.
+ *
+ * Jangan memakai `request.url` untuk ini. Aplikasi berjalan di balik nginx yang
+ * meneruskan permintaan ke port dalam (3000), sehingga `request.url` berisi
+ * `localhost:3000` - alamat yang hanya ada di dalam server. Browser pengguna
+ * diarahkan ke sana dan gagal terhubung (ERR_CONNECTION_REFUSED), tepat setelah
+ * otorisasi toko berhasil. Itu tampak seperti otorisasi gagal, padahal
+ * otorisasinya justru sudah berhasil.
+ *
+ * Urutan sumber yang dipakai, dari yang paling dapat dipercaya:
+ *   1. APP_URL               - alamat resmi, disetel di .env
+ *   2. NEXT_PUBLIC_APP_URL   - sudah ada di .env proyek ini
+ *   3. header X-Forwarded-*  - dikirim proxy
+ *   4. request.url           - pilihan terakhir (pengembangan lokal)
+ */
+function alamatPublik(request: NextRequest): string {
+  const dikonfigurasi = (process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? '').trim();
+  if (dikonfigurasi) return dikonfigurasi.replace(/\/+$/, '');
+
+  const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
+  if (host) {
+    const proto = request.headers.get('x-forwarded-proto') ?? 'https';
+    return `${proto}://${host}`;
+  }
+  return new URL(request.url).origin;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get('code');
@@ -107,13 +135,15 @@ export async function GET(request: NextRequest) {
         });
       });
 
-    const successUrl = new URL('/dashboard/integrasi', request.url);
+    const successUrl = new URL('/dashboard/integrasi', alamatPublik(request));
     successUrl.searchParams.set('success', 'connected');
     return NextResponse.redirect(successUrl);
   } catch (err) {
     const message = (err as Error).message;
     logger.error('Shopee OAuth callback gagal', { error: message, code, shopId });
-    const url = new URL('/dashboard/integrasi', request.url);
+    // Alamat publik yang sama juga dipakai saat gagal: pesan kesalahan harus
+    // sampai ke browser pengguna, bukan hilang di alamat dalam server.
+    const url = new URL('/dashboard/integrasi', alamatPublik(request));
     url.searchParams.set('error', message);
     return NextResponse.redirect(url);
   }
