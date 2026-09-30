@@ -625,7 +625,7 @@ describe('ShopeeAdapter', () => {
       partnerKey,
     };
 
-    it('uses HTTP GET for getProducts item query', async () => {
+    it('uses HTTP GET for getProducts item query, satu item_status per permintaan', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         status: 200,
         text: async () =>
@@ -644,12 +644,23 @@ describe('ShopeeAdapter', () => {
       const [calledUrl, calledInit] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(calledInit.method).toBe('GET');
       expect(calledUrl).toContain('/api/v2/product/get_item_list');
-      // Parameter list pada Shopee dikirim sebagai JSON, bukan berulang:
-      //   item_status=["NORMAL","UNLIST","BANNED"]
-      // Bentuk berulang (`item_status=NORMAL&item_status=...`) ditolak Shopee
-      // dengan "format should be string[]" (terbukti di error produksi untuk
-      // `order_sn_list`).
-      expect(calledUrl).toContain(`item_status=${encodeURIComponent('["NORMAL","UNLIST","BANNED"]')}`);
+
+      // `item_status` adalah NILAI TUNGGAL, bukan daftar.
+      //
+      // Mengirimnya sebagai daftar JSON - `item_status=["NORMAL",...]` - masih
+      // diterima sandbox, tetapi ditolak toko sungguhan dengan
+      // `product.error_param_item_status` (terbukti pada log produksi
+      // 2026-09-30). Aturan "parameter daftar dikirim sebagai JSON" berlaku
+      // untuk parameter yang memang berupa daftar, mis. `order_sn_list` dan
+      // `item_id_list` - bukan untuk parameter ini.
+      expect(calledUrl).not.toContain('item_status=%5B');
+      expect(calledUrl).toContain('item_status=NORMAL');
+
+      // Setiap status diminta pada permintaannya sendiri, lalu hasilnya digabung.
+      const statusYangDiminta = fetchMock.mock.calls
+        .map(([u]) => String(u).match(/item_status=([A-Z_]+)/)?.[1])
+        .filter(Boolean);
+      expect(new Set(statusYangDiminta)).toEqual(new Set(['NORMAL', 'UNLIST', 'BANNED']));
     });
 
     it('uses HTTP POST with body for updateStock', async () => {
