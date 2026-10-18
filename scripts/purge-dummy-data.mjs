@@ -112,12 +112,16 @@ async function findEmptyTenants(primaryId) {
       prisma.shop.count({ where: { tenantId: t.id } }),
       prisma.order.count({ where: { tenantId: t.id } }),
       prisma.product.count({ where: { tenantId: t.id } }),
-      prisma.warehouse.count({ where: { tenantId: t.id } }),
+      prisma.warehouse.findMany({
+        where: { tenantId: t.id },
+        select: { id: true, name: true },
+      }),
       prisma.tenantMembership.findMany({
         where: { tenantId: t.id },
         select: { id: true, userId: true, role: true, permissions: true },
       }),
     ]);
+    // `warehouses` berisi baris (bukan jumlah) karena gudangnya ikut dihapus.
     if (shops === 0 && orders === 0 && products === 0) {
       kosong.push({ ...t, warehouses, memberships });
     }
@@ -261,6 +265,15 @@ async function main() {
           return (await prisma.warehouse.deleteMany({ where: { id: w.id } })).count;
         });
       }
+      // Audit log adalah satu-satunya baris yang masih menahan penghapusan
+      // tenant (FK `audit_logs.tenant_id`). Jejaknya TIDAK dibuang: dipindahkan
+      // ke tenant utama karena pelakunya orang yang sama, hanya workspace-nya
+      // dobel. Setelah ini tidak ada lagi yang menghalangi.
+      await write(`audit log tenant ${t.slug} → dipindahkan ke ${PRIMARY_SLUG}`, () =>
+        prisma.auditLog
+          .updateMany({ where: { tenantId: t.id }, data: { tenantId: primary.id } })
+          .then((r) => r.count),
+      );
       await write(`tenant kosong ${t.slug}`, () => prisma.tenant.deleteMany({ where: { id: t.id } }).then((r) => r.count));
     }
   }
