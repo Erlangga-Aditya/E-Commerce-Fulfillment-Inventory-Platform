@@ -640,7 +640,7 @@ export default function PesananPengirimanPage() {
           <span className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
             <CalendarDays size={14} aria-hidden /> Tanggal pesanan
           </span>
-          <div className="filter-chips">
+          <div className="filter-chips filter-chips-wrap">
             {RANGE_PRESETS.map((preset) => (
               <button
                 key={preset}

@@ -336,7 +336,10 @@ a:hover {
 /* Sidebar Component */
 .sidebar {
   width: var(--sidebar-width);
+  /* `100dvh` = tinggi yang benar-benar terlihat (bilah alamat Chrome ikut
+     diperhitungkan). `100vh` dibiarkan sebagai cadangan peramban lama. */
   height: 100vh;
+  height: 100dvh;
   position: fixed;
   left: 0;
   top: 0;
@@ -504,6 +507,14 @@ a:hover {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+}
+
+/* Badge peran di topbar (kosmetik). Ditulis sebagai kelas, bukan inline style,
+   supaya aturan `display: none` di media query ponsel bisa berlaku. */
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* Label badge sinkronisasi: penuh di layar lebar, ringkas di layar kecil. */
@@ -848,8 +859,11 @@ a:hover {
 }
 
 @media (max-width: 639px) {
+  /* Satu kolom. Dua kolom memaksa lebar minimum isi kartu (mis. "Status
+     Kredensial" + badge "Aktif") melebihi 375px — sumber geser mendatar di
+     halaman Hubungkan Shopee. */
   .stat-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: 1fr;
     gap: 10px;
   }
 
@@ -1009,6 +1023,31 @@ a:hover {
   max-width: 100%;
   padding-bottom: 4px;
   -webkit-overflow-scrolling: touch;
+}
+
+/* Chip tidak boleh mengecil sampai teksnya terpotong; biarkan barisnya yang
+   bergeser mendatar (di dalam wadahnya sendiri, bukan seluruh halaman). */
+.filter-chips > * {
+  flex: 0 0 auto;
+}
+
+/* Layar sangat sempit (≤480px): tombol "Tersambung …" hanya ikon + titik
+   status. Teksnya tetap tersedia lewat `title`/aria-label, dan ini yang
+   membuat topbar muat 360px tanpa geser mendatar (terukur lebih 10px). */
+@media (max-width: 480px) {
+  .auto-sync-label-short {
+    display: none;
+  }
+}
+
+/* Varian yang MEMBUNGKUS: dipakai baris chip tanggal di halaman Pesanan.
+   Di ponsel, menggeser chip yang tidak terlihat lebih merepotkan daripada
+   membiarkannya turun ke baris berikutnya. */
+@media (max-width: 639px) {
+  .filter-chips-wrap {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
 }
 
 .filter-chips::-webkit-scrollbar {
@@ -1535,6 +1574,41 @@ details.card[open] > summary::after {
    ============================================================ */
 
 @media (max-width: 639px) {
+  /* Topbar harus muat di 375px tanpa geser mendatar.
+     `flex-shrink: 0` pada `.topbar-right` membuat tombol tema + status sync +
+     badge peran berdesakan sampai melewati lebar layar (terukur 414px).
+     Badge peran disembunyikan karena hanya kosmetik — penjaga akses sebenarnya
+     ada di server. */
+  .topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .topbar-left {
+    overflow: hidden;
+  }
+
+  .topbar-left > div {
+    min-width: 0;
+  }
+
+  .topbar-left > div > div:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar-right {
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 100%;
+    gap: 6px;
+  }
+
+  .topbar-right .badge {
+    display: none;
+  }
+
   /* Tabel di dalam kartu tetap bisa digeser mendatar, tetapi kolomnya tidak
      dipaksa 640px sehingga isi tidak "hilang" di layar kecil. */
   .card .table {

@@ -280,8 +280,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           <div className="topbar-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ThemeToggle />
             <AutoSyncStatus />
+            {/* Badge peran: kosmetik. Di ponsel disembunyikan lewat CSS
+                (`.topbar-right .badge`) supaya topbar muat 360px — dulu di sini
+                ada `style={{ display: 'inline-flex' }}` yang mengalahkan aturan
+                CSS, sehingga badge tetap tampil dan seluruh halaman bisa
+                digeser mendatar. */}
             {me?.role ? (
-              <span className="badge badge-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span className="badge badge-secondary role-badge">
                 <UserCheck size={12} aria-hidden />
                 {me.role}
               </span>
