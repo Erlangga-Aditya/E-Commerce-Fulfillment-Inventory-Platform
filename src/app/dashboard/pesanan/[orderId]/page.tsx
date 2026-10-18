@@ -19,6 +19,7 @@ import {
   ScanLine,
   Copy,
   Check,
+  Gauge,
 } from 'lucide-react';
 import { api, formatDate, formatRupiah , openOfficialLabel } from '@/lib/api';
 import {  StatusBadge, LoadingState, ErrorState, Alert } from '@/components/ui';
@@ -88,7 +89,15 @@ interface OrderDetail {
       occurredAt: string;
     }>;
   }>;
-}
+  /** Hasil perhitungan prioritas beserta alasan yang dapat dibaca operator. */
+  priority: {
+    score: number | null;
+    level: string | null;
+    ruleVersion: string | null;
+    factors: Array<{ code: string; value: number; weight: number }> | null;
+    explanation: string | null;
+  } | null;
+};
 
 export default function OrderDetailPage({ params }: { params: Promise<{ orderId: string }> }) {
   const { orderId } = use(params);
@@ -283,6 +292,42 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
           </Link>
         </div>
       </div>
+
+      {/* Kartu Prioritas: skor, tingkat, dan alasan yang dapat dibaca operator.
+          Ini adalah salah satu kebaruan penelitian — maka ditampilkan lengkap. */}
+      {order.priority?.level && (
+        <div
+          style={{
+            background: 'var(--surface-container, #ffffff)',
+            border: '1px solid var(--outline-variant, #e5e7eb)',
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 20,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Gauge size={18} color="var(--primary, #0284c7)" />
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>PRIORITAS Pemenuhan</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                <StatusBadge status={order.priority.level} />
+                <span className="mono" style={{ fontWeight: 800, fontSize: 15 }}>
+                  Skor {order.priority.score ?? '—'}
+                </span>
+                <span className="small muted">({order.priority.ruleVersion ?? '—'})</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ flex: 1, minWidth: 240, fontSize: 13, lineHeight: 1.6 }}>
+            <strong>Alasan: </strong>
+            <span>{order.priority.explanation ?? 'Prioritas reguler.'}</span>
+          </div>
+        </div>
+      )}
 
       {/* 3-Column Info Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 20 }}>

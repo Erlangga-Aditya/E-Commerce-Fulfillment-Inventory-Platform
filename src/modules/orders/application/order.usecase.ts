@@ -5,16 +5,18 @@ import { isValidOrderTransition, type OrderStatus as DomainOrderStatus } from '.
 import {
   calculatePriority,
   explainPriority,
-  DEFAULT_PRIORITY_RULE,
-  type PriorityRuleConfig,
 } from '../domain/priority.engine';
+import { getActivePriorityConfig } from './priorityRule.usecase';
 import {
   NotFoundError,
   ValidationError,
   InvalidStateTransitionError,
 } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
-import { releaseReservationsForOrder } from '@/modules/inventory/application/inventory.usecase';
+import {
+  releaseReservationsForOrder,
+  markFulfillmentOrdersException,
+} from '@/modules/inventory/application/inventory.usecase';
 import { logger } from '@/shared/observability/logger';
 
 // ────────────────────────────────────────────────────────────
@@ -189,6 +191,10 @@ export async function importOrder(
         null,
         'Pesanan dibatalkan di Shopee',
       );
+      // Baris fulfillment-nya juga harus ditandai batal. Sebelumnya hanya
+      // reservasi yang dilepas: pesanan batal tetap dihitung sebagai
+      // "menunggu stok" pada ringkasan dashboard (angka membengkak palsu).
+      await markFulfillmentOrdersException(existing.tenantId, existing.id);
     }
 
     return { orderId: existing.id, created: false };
@@ -322,20 +328,9 @@ export async function recalculateOrderPriority(tenantId: string, orderId: string
     return reserved >= item.quantity;
   });
 
-  const ruleRecord = await prisma.priorityRule.findFirst({
-    where: { tenantId, isEnabled: true },
-    orderBy: { createdAt: 'desc' },
-  });
-
-  let rule: PriorityRuleConfig = DEFAULT_PRIORITY_RULE;
-  if (ruleRecord) {
-    try {
-      rule = ruleRecord.criteriaJson as unknown as PriorityRuleConfig;
-      rule.version = ruleRecord.version;
-    } catch {
-      logger.warn('Invalid priority rule config, using default', { tenantId, ruleId: ruleRecord.id });
-    }
-  }
+  // Aturan diambil lewat usecase prioritas (satu sumber kebenaran) supaya
+  // bentuk lawas `weights` selalu dinormalkan di satu tempat.
+  const rule = await getActivePriorityConfig(tenantId);
 
   const result = calculatePriority(
     { shipByAt: order.shipByAt, placedAt: order.placedAt, isStockReady },
