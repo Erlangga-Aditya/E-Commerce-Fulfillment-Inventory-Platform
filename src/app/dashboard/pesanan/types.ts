@@ -51,28 +51,18 @@ export interface StationOrder {
 export interface StationResponse {
   warehouse: { id: string; name: string; code: string } | null;
   sort: 'oldest' | 'newest';
-  stages: {
-    baru: number;
-    menungguStok: number;
-    siapDikemas: number;
-    siapKirim: number;
-    dikirim: number;
-    dibatalkan: number;
-    selesai: number;
-  };
-  stage: Stage | null;
-  /** Jumlah per keadaan nyata, dihitung server dari SELURUH data. */
-  ringkasan: {
+  bucket: 'semua' | 'baru' | 'sudahResi' | 'perluDiproses';
+  rangePreset: 'today' | 'yesterday' | 'last7' | 'last30' | 'all';
+  /** Batas rentang yang benar-benar dipakai server (ISO, null = tanpa batas). */
+  range: { from: string | null; to: string | null };
+  /**
+   * Tiga angka kartu. Selalu dihitung server dari SELURUH pesanan pada rentang
+   * yang dipilih, bukan dari halaman yang sedang tampil.
+   */
+  kartu: {
     perluDiproses: number;
-    belumResi: number;
+    pesananBaru: number;
     sudahResi: number;
-    belumDijemput: number;
-    diPerjalanan: number;
-    sudahSampai: number;
-    gagalKirim: number;
-    selesai: number;
-    dibatalkan: number;
-    retur: number;
   };
   orders: StationOrder[];
   page: number;

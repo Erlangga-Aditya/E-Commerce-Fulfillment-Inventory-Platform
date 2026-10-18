@@ -23,6 +23,8 @@ import {
   resolveOperatorStage,
   type OperatorStage,
 } from '../domain/operator-workflow';
+import { placedAtFilter, type DateRange } from '../domain/date-range';
+import { belongsToBucket, countBuckets, WORK_STAGES, type QueueBucket } from '../domain/work-queue';
 
 /** Item yang stoknya belum cukup untuk sebuah pesanan. */
 export interface StockShortfall {
@@ -891,20 +893,27 @@ export async function getFulfillmentStation(
   tenantId: string,
   options: {
     sort?: 'oldest' | 'newest';
-    /** Batasi ke satu tahap saja; null berarti semua tahap. */
-    stage?: StationStage | null;
     /** Cari berdasarkan nomor pesanan, nomor resi, nama pembeli, atau SKU. */
     search?: string;
-    /** Saring berdasarkan ada/tidaknya nomor resi. */
-    resi?: 'sudah' | 'belum' | null;
-    /** Saring berdasarkan kategori ringkasan pengiriman / antrean (mis. 'perluDiproses', 'belumDijemput', 'diPerjalanan', 'sudahSampai', 'gagalKirim'). */
-    statusKirim?: string | null;
+    /**
+     * Kartu penyaring: `baru` (belum ada resi), `sudahResi`, `perluDiproses`
+     * (keduanya), atau `semua` (termasuk batal & selesai). Default
+     * `perluDiproses` karena itulah pekerjaan operator sehari-hari.
+     */
+    bucket?: QueueBucket;
+    /** Rentang tanggal pesanan masuk (WIB). `{from:null,to:null}` = semua tanggal. */
+    range?: DateRange;
     page?: number;
     pageSize?: number;
   } = {},
 ) {
   const sortDir: 'asc' | 'desc' = options.sort === 'newest' ? 'desc' : 'asc';
   const kataKunci = options.search?.trim();
+  const range = {
+    from: options.range?.from ?? null,
+    to: options.range?.to ?? null,
+    placedAt: placedAtFilter({ from: options.range?.from ?? null, to: options.range?.to ?? null }),
+  };
   const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 20));
   const requestedPage = Math.max(1, options.page ?? 1);
 
@@ -927,6 +936,10 @@ export async function getFulfillmentStation(
       // tidak pernah diambil, sehingga pesanan yang sudah diterima pembeli
       // lenyap dari layar tanpa cara menampilkannya kembali.
       status: { in: ['NEW', 'CONFIRMED', 'CANCELLED', 'COMPLETED'] },
+      // Rentang tanggal memakai `placedAt` (tanggal pesanan masuk), bukan
+      // `createdAt` (tanggal baris dibuat di database): angka di layar harus
+      // sama dengan tanggal yang dilihat penjual di Seller Centre.
+      ...(range.placedAt ? { placedAt: range.placedAt } : {}),
       ...(kataKunci
         ? {
             OR: [
@@ -938,17 +951,6 @@ export async function getFulfillmentStation(
             ],
           }
         : {}),
-      ...(options.resi === 'sudah'
-        ? { shipments: { some: { AND: [{ awb: { not: null } }, { awb: { not: '' } }] } } }
-        : options.resi === 'belum'
-          ? {
-              shipments: {
-                none: {
-                  AND: [{ awb: { not: null } }, { awb: { not: '' } }],
-                },
-              },
-            }
-          : {}),
     },
     include: {
       shop: { select: { name: true, provider: true } },
@@ -1072,52 +1074,35 @@ export async function getFulfillmentStation(
     };
   });
 
-  // Jumlah per tahap dihitung dari SELURUH kandidat, bukan dari halaman yang
-  // sedang tampil - kalau dihitung dari halaman, angka di tab akan berubah
-  // setiap kali operator berpindah halaman dan itu menyesatkan.
-  const stages = {
-    baru: unified.filter((u) => u.stage === 'BARU').length,
-    menungguStok: unified.filter((u) => u.stage === 'MENUNGGU_STOK').length,
-    siapDikemas: unified.filter((u) => u.stage === 'SIAP_DIKEMAS').length,
-    siapKirim: unified.filter((u) => u.stage === 'SIAP_KIRIM').length,
-    dikirim: unified.filter((u) => u.stage === 'DIKIRIM').length,
-    dibatalkan: unified.filter((u) => u.stage === 'DIBATALKAN').length,
-      selesai: unified.filter((u) => u.stage === 'SELESAI').length,
-  };
+  /**
+   * Tiga angka yang benar-benar dipakai operator (dan satu-satunya yang tampil):
+   *
+   *   Pesanan Baru    = masih menunggu pekerjaan gudang & BELUM punya nomor resi
+   *   Sudah Ada Resi  = masih menunggu pekerjaan gudang & nomor resi sudah terbit
+   *   Perlu Diproses  = jumlah keduanya
+   *
+   * Dihitung dari SELURUH kandidat pada rentang tanggal yang dipilih, bukan
+   * dari halaman yang sedang tampil — angka di kartu tidak boleh berubah hanya
+   * karena operator pindah halaman.
+   */
+  const withQueue = unified.map((order) => ({
+    order,
+    queue: {
+      stage: order.stage,
+      needsWork: WORK_STAGES.includes(order.stage),
+      hasAwb: Boolean(order.awb && order.awb.trim() !== ''),
+    },
+  }));
+  const kartu = countBuckets(withQueue.map((item) => item.queue));
 
-  // Pesanan yang berada dalam antrean kerja fulfillment gudang:
-  // BARU (belum dialokasi), MENUNGGU_STOK (butuh restock), SIAP_DIKEMAS (siap packing), SIAP_KIRIM (siap serah kurir).
-  // Total ini persis sama dengan jumlah pesanan di tahap antrean gudang!
-  const antreanGudang = unified.filter(
-    (u) => u.stage === 'BARU' || u.stage === 'MENUNGGU_STOK' || u.stage === 'SIAP_DIKEMAS' || u.stage === 'SIAP_KIRIM',
-  );
+  const bucket = options.bucket ?? 'perluDiproses';
+  // `semua` sengaja tidak memakai `belongsToBucket` karena bucket itu harus
+  // juga menampilkan pesanan batal & selesai (untuk ditelusuri operator).
+  const filtered =
+    bucket === 'semua'
+      ? unified
+      : withQueue.filter((item) => belongsToBucket(bucket, item.queue)).map((item) => item.order);
 
-  const daftarDibatalkan = unified.filter((u) => u.stage === 'DIBATALKAN');
-  const selesai = unified.filter((u) => u.orderStatus === 'COMPLETED' || u.stage === 'SELESAI');
-
-  const jumlahRetur = await prisma.return.count({
-    where: { order: { tenantId } },
-  });
-
-  let filtered = options.stage ? unified.filter((u) => u.stage === options.stage) : unified;
-
-  if (options.statusKirim) {
-    if (options.statusKirim === 'perluDiproses') {
-      filtered = filtered.filter(
-        (u) => u.stage === 'BARU' || u.stage === 'MENUNGGU_STOK' || u.stage === 'SIAP_DIKEMAS' || u.stage === 'SIAP_KIRIM',
-      );
-    } else if (options.statusKirim === 'belumDijemput') {
-      filtered = filtered.filter(
-        (u) => Boolean(u.awb && u.awb.trim() !== '') && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP'),
-      );
-    } else if (options.statusKirim === 'diPerjalanan') {
-      filtered = filtered.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT');
-    } else if (options.statusKirim === 'sudahSampai') {
-      filtered = filtered.filter((u) => u.shipmentStatus === 'DELIVERED');
-    } else if (options.statusKirim === 'gagalKirim') {
-      filtered = filtered.filter((u) => u.shipmentStatus === 'FAILED');
-    }
-  }
   const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   // Halaman yang diminta bisa berada di luar rentang, misalnya setelah operator
@@ -1129,8 +1114,12 @@ export async function getFulfillmentStation(
   return {
     warehouse,
     sort: options.sort ?? 'oldest',
-    stage: options.stage ?? null,
-    stages,
+    bucket,
+    range: {
+      from: range.from ? range.from.toISOString() : null,
+      to: range.to ? range.to.toISOString() : null,
+    },
+    kartu,
     orders: filtered.slice(mulai, mulai + pageSize),
     page,
     pageSize,
@@ -1138,26 +1127,6 @@ export async function getFulfillmentStation(
     totalPages,
     /** true bila kandidat terpotong pagar pengaman; antarmuka WAJIB memberitahukan. */
     truncated,
-    /**
-     * Ringkasan jumlah per keadaan NYATA.
-     *
-     * Angka-angka ini dihitung dari seluruh kandidat (bukan dari halaman yang
-     * tampil), dan dari keadaan yang benar-benar dimiliki pesanan - bukan dari
-     * tebakan atau dari layar pihak lain.
-     */
-    ringkasan: {
-      /** Pesanan yang butuh penanganan gudang (Baru + Tunggu Stok + Siap Dikemas + Siap Kirim). */
-      perluDiproses: antreanGudang.length,
-      belumResi: antreanGudang.filter((u) => !u.awb || u.awb.trim() === '').length,
-      sudahResi: antreanGudang.filter((u) => Boolean(u.awb && u.awb.trim() !== '')).length,
-      belumDijemput: antreanGudang.filter((u) => Boolean(u.awb && u.awb.trim() !== '') && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP')).length,
-      diPerjalanan: unified.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT').length,
-      sudahSampai: unified.filter((u) => u.shipmentStatus === 'DELIVERED').length,
-      gagalKirim: unified.filter((u) => u.shipmentStatus === 'FAILED').length,
-      selesai: selesai.length,
-      dibatalkan: daftarDibatalkan.length,
-      retur: jumlahRetur,
-    },
     generatedAt: new Date().toISOString(),
   };
 }
