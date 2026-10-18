@@ -11,6 +11,10 @@
   --primary-hover: #d73a1a;
   --primary-active: #bd2a0d;
   --primary-strong: #c92c0d;
+  /* Khusus latar tombol terisi: #ee4d2d hanya mencapai 3,66:1 dengan teks putih,
+     di bawah ambang WCAG AA (4,5:1). Nilai ini mencapai 4,66:1 tanpa mengubah
+     warna brand untuk badge/ikon. */
+  --primary-solid: #d63a17;
   --on-primary: #ffffff;
   --primary-container: #fff4f1;
   --on-primary-container: #b82b0f;
@@ -50,7 +54,9 @@
   --surface-high: #e2e8f0;
   --surface-card: #ffffff;
   --on-surface: #0f172a;
-  --on-surface-variant: #64748b;
+  /* #64748b hanya 4,34:1 di atas --surface-low (badge netral 12px) — sedikit
+     digelapkan supaya lolos AA di semua permukaan terang. */
+  --on-surface-variant: #5a6b82;
   --on-surface-muted: #94a3b8;
 
   /* Lines & Borders */
@@ -259,7 +265,7 @@ a:hover {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 20px;
-  color: #ffffff;
+  color: var(--surface);
   background: var(--on-surface, #0f172a);
   box-shadow: var(--e-sm, 0 4px 10px rgba(15, 23, 42, 0.18));
 }
@@ -369,7 +375,7 @@ a:hover {
   align-items: center;
   justify-content: center;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   border-radius: var(--r-md);
   box-shadow: 0 2px 6px rgba(238, 77, 45, 0.3);
 }
@@ -472,7 +478,7 @@ a:hover {
 /* Topbar Header */
 .topbar {
   height: var(--header-height);
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--topbar-bg);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--divider);
@@ -741,14 +747,14 @@ a:hover {
 }
 
 .btn-primary {
-  background: var(--primary);
+  background: var(--primary-solid);
   color: var(--on-primary);
   box-shadow: 0 1px 2px rgba(238, 77, 45, 0.2);
 }
 
 .btn-primary:hover:not(:disabled) {
   background: var(--primary-hover);
-  color: #fff;
+  color: var(--on-primary);
   box-shadow: 0 3px 6px rgba(238, 77, 45, 0.3);
 }
 
@@ -1351,6 +1357,10 @@ a:hover {
   --info-container: #e0f2fe;
   --on-info-container: #0369a1;
   --info-border: #bae6fd;
+  /* Topbar semi-transparan (dengan blur). Ditulis sebagai token karena versi
+     lamanya `rgba(255,255,255,.9)` tetap putih di tema gelap sehingga teks
+     topbar nyaris tidak terbaca (kontras 1,05:1 — terukur di produksi). */
+  --topbar-bg: rgba(255, 255, 255, 0.9);
   color-scheme: light;
 }
 
@@ -1361,6 +1371,7 @@ a:hover {
   --primary-hover: #ff8163;
   --primary-active: #e8563a;
   --primary-strong: #ff9d86;
+  --primary-solid: #ff6b4a;
   --on-primary: #2a0d06;
   --primary-container: #3b1a12;
   --on-primary-container: #ffc0b0;
@@ -1419,6 +1430,7 @@ a:hover {
   --info-container: #0c2b3d;
   --on-info-container: #8ed7f7;
   --info-border: #164258;
+  --topbar-bg: rgba(18, 26, 41, 0.9);
 
   --e-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
   --e-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
