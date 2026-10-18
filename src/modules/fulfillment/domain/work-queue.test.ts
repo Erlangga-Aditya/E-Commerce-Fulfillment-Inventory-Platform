@@ -1,78 +1,86 @@
 import { describe, expect, it } from 'vitest';
-import { belongsToBucket, classifyWorkQueue, countBuckets, type WorkQueueEntry } from './work-queue';
+import { belongsToBucket, classifyWorkQueue, countBuckets, type WorkQueueInput } from './work-queue';
 
-const entry = (over: Partial<Parameters<typeof classifyWorkQueue>[0]> = {}): WorkQueueEntry =>
+const q = (over: Partial<WorkQueueInput> = {}) =>
   classifyWorkQueue({
     orderStatus: 'CONFIRMED',
+    externalStatus: 'READY_TO_SHIP',
     fulfillmentStatus: null,
     shipmentStatus: null,
     hasAwb: false,
     ...over,
   });
 
-describe('antrean kerja gudang', () => {
-  it('pesanan baru tanpa fulfillment masih perlu dikerjakan', () => {
-    expect(entry()).toMatchObject({ stage: 'BARU', needsWork: true, hasAwb: false });
+describe('antrean kerja gudang — mengikuti status Shopee', () => {
+  it('READY_TO_SHIP = "Belum diproses" → kartu Pesanan Baru', () => {
+    expect(q()).toMatchObject({ needsWork: true, bucket: 'baru' });
   });
 
-  it('menunggu stok masih perlu dikerjakan', () => {
-    expect(entry({ fulfillmentStatus: 'WAITING_STOCK' })).toMatchObject({
-      stage: 'MENUNGGU_STOK',
+  it('PROCESSED = "Telah diproses" → kartu Sudah Ada Resi', () => {
+    expect(q({ externalStatus: 'PROCESSED', hasAwb: true, fulfillmentStatus: 'READY_TO_SHIP' })).toMatchObject({
       needsWork: true,
+      bucket: 'sudahResi',
     });
   });
 
-  it('sudah dikemas & sudah ada resi masih perlu diserahkan ke kurir', () => {
-    expect(entry({ fulfillmentStatus: 'READY_TO_SHIP', shipmentStatus: 'READY_TO_SHIP', hasAwb: true })).toMatchObject({
-      stage: 'SIAP_KIRIM',
-      needsWork: true,
-    });
+  it('RETRY_SHIP tetap dihitung menunggu pengiriman ulang', () => {
+    expect(q({ externalStatus: 'RETRY_SHIP', hasAwb: true })).toMatchObject({ needsWork: true, bucket: 'sudahResi' });
   });
 
-  it.each(['PICKED_UP', 'IN_TRANSIT', 'DELIVERED'] as const)(
-    'paket berstatus %s tidak lagi masuk antrean kerja',
-    (status) => {
-      expect(entry({ fulfillmentStatus: 'READY_TO_SHIP', shipmentStatus: status, hasAwb: true }).needsWork).toBe(false);
+  // Inti perbaikan: IN_CANCEL dipetakan ke NEW internal, sehingga tanpa
+  // `externalStatus` pesanan yang sedang dibatalkan pembeli ikut terhitung.
+  it.each(['IN_CANCEL', 'UNPAID', 'PENDING', 'TO_RETURN', 'SHIPPED', 'TO_CONFIRM_RECEIVE', 'CANCELLED'])(
+    'status Shopee %s tidak boleh masuk antrean kerja',
+    (externalStatus) => {
+      expect(q({ externalStatus }).needsWork).toBe(false);
     },
   );
 
-  it('pesanan batal dan selesai tidak pernah masuk antrean', () => {
-    expect(entry({ orderStatus: 'CANCELLED' }).needsWork).toBe(false);
-    expect(entry({ orderStatus: 'COMPLETED' }).needsWork).toBe(false);
+  it('paket yang sudah dijemput kurir keluar dari antrean walau status pesanan masih PROCESSED', () => {
+    expect(q({ externalStatus: 'PROCESSED', shipmentStatus: 'PICKED_UP', hasAwb: true }).needsWork).toBe(false);
   });
 
-  it('fulfillment HANDED_OVER tidak masuk antrean walau resi belum tersinkron', () => {
-    expect(entry({ fulfillmentStatus: 'HANDED_OVER', hasAwb: false }).needsWork).toBe(false);
+  it('tanpa status mentah (baris lama) memakai cadangan: resi menentukan kartu', () => {
+    expect(q({ externalStatus: null, fulfillmentStatus: 'READY_TO_PICK' })).toMatchObject({
+      needsWork: true,
+      bucket: 'baru',
+    });
+    expect(
+      q({ externalStatus: null, fulfillmentStatus: 'READY_TO_SHIP', shipmentStatus: 'READY_TO_SHIP', hasAwb: true }),
+    ).toMatchObject({ needsWork: true, bucket: 'sudahResi' });
   });
 
-  it('kartu baru vs sudah resi membelah antrean tanpa sisa', () => {
+  it('pesanan batal & selesai tidak pernah masuk antrean', () => {
+    expect(q({ orderStatus: 'CANCELLED', externalStatus: 'CANCELLED' }).needsWork).toBe(false);
+    expect(q({ orderStatus: 'COMPLETED', externalStatus: 'COMPLETED' }).needsWork).toBe(false);
+  });
+
+  it('kartu baru + sudah resi = perlu diproses (tanpa sisa)', () => {
     const daftar = [
-      entry(),
-      entry({ fulfillmentStatus: 'WAITING_STOCK' }),
-      entry({ fulfillmentStatus: 'READY_TO_SHIP', shipmentStatus: 'READY_TO_SHIP', hasAwb: true }),
-      entry({ orderStatus: 'CANCELLED' }),
+      q(),
+      q({ externalStatus: 'PROCESSED', hasAwb: true }),
+      q({ externalStatus: 'IN_CANCEL' }),
+      q({ orderStatus: 'COMPLETED', externalStatus: 'COMPLETED' }),
     ];
     const baru = daftar.filter((e) => belongsToBucket('baru', e));
     const sudahResi = daftar.filter((e) => belongsToBucket('sudahResi', e));
     const perlu = daftar.filter((e) => belongsToBucket('perluDiproses', e));
 
-    expect(baru).toHaveLength(2);
+    expect(baru).toHaveLength(1);
     expect(sudahResi).toHaveLength(1);
-    // Invarian penting: Perlu Diproses = Pesanan Baru + Sudah Ada Resi.
     expect(perlu).toHaveLength(baru.length + sudahResi.length);
   });
 
-  it('bucket "semua" dipakai hanya untuk melihat pesanan final', () => {
-    expect(belongsToBucket('semua', entry({ orderStatus: 'CANCELLED' }))).toBe(false);
-    expect(belongsToBucket('semua', entry())).toBe(true);
+  it('bucket "semua" dipakai untuk menampilkan pesanan final juga', () => {
+    expect(belongsToBucket('semua', q({ orderStatus: 'CANCELLED', externalStatus: 'CANCELLED' }))).toBe(true);
   });
 
   it('countBuckets menjumlahkan sesuai definisi kartu', () => {
     const entries = [
-      entry(),
-      entry(),
-      entry({ hasAwb: true }),
-      entry({ orderStatus: 'COMPLETED' }),
+      q(),
+      q(),
+      q({ externalStatus: 'PROCESSED', hasAwb: true }),
+      q({ orderStatus: 'COMPLETED', externalStatus: 'COMPLETED' }),
     ];
     expect(countBuckets(entries)).toEqual({ perluDiproses: 3, pesananBaru: 2, sudahResi: 1 });
   });

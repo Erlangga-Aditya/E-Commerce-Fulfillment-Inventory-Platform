@@ -31,6 +31,8 @@ export interface StationOrder {
   shipByAt: string | null;
   priorityLevel: string | null;
   orderStatus: string;
+  /** Status mentah marketplace (READY_TO_SHIP / PROCESSED / …). */
+  externalStatus: string | null;
   fulfillmentId: string | null;
   fulfillmentStatus: string | null;
   awb: string | null;

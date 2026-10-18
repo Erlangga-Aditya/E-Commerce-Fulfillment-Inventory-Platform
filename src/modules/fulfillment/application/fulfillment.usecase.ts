@@ -24,7 +24,7 @@ import {
   type OperatorStage,
 } from '../domain/operator-workflow';
 import { placedAtFilter, type DateRange } from '../domain/date-range';
-import { belongsToBucket, countBuckets, WORK_STAGES, type QueueBucket } from '../domain/work-queue';
+import { belongsToBucket, classifyWorkQueue, countBuckets, type QueueBucket } from '../domain/work-queue';
 
 /** Item yang stoknya belum cukup untuk sebuah pesanan. */
 export interface StockShortfall {
@@ -1044,6 +1044,8 @@ export async function getFulfillmentStation(
       shipByAt: o.shipByAt,
       priorityLevel: o.priorityLevel,
       orderStatus: o.status,
+      /** Status mentah marketplace (READY_TO_SHIP / PROCESSED / …). */
+      externalStatus: o.externalStatus,
       fulfillmentId: fo?.id ?? null,
       fulfillmentStatus: fo?.status ?? null,
       awb: shipment?.awb ?? null,
@@ -1087,11 +1089,13 @@ export async function getFulfillmentStation(
    */
   const withQueue = unified.map((order) => ({
     order,
-    queue: {
-      stage: order.stage,
-      needsWork: WORK_STAGES.includes(order.stage),
+    queue: classifyWorkQueue({
+      orderStatus: order.orderStatus,
+      externalStatus: order.externalStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+      shipmentStatus: order.shipmentStatus,
       hasAwb: Boolean(order.awb && order.awb.trim() !== ''),
-    },
+    }),
   }));
   const kartu = countBuckets(withQueue.map((item) => item.queue));
 

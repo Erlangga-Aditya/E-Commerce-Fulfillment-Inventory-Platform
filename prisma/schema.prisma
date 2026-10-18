@@ -345,6 +345,11 @@ model Order {
   shopId               String         @map("shop_id")
   externalOrderId      String         @map("external_order_id")
   status               OrderStatus    @default(NEW)
+  /// Status pesanan MENTAH dari marketplace (mis. `READY_TO_SHIP`, `PROCESSED`,
+  /// `SHIPPED`, `IN_CANCEL`). Disimpan karena `status` internal memetakan
+  /// beberapa status Shopee ke `CONFIRMED` sekaligus, sehingga beda antara
+  /// "Belum diproses" (READY_TO_SHIP) dan "Telah diproses" (PROCESSED) hilang.
+  externalStatus       String?        @map("external_status")
   placedAt             DateTime       @map("placed_at")
   shipByAt             DateTime?      @map("ship_by_at")
   buyerName            String?        @map("buyer_name")

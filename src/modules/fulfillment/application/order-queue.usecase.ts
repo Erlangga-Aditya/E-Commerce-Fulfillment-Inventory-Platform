@@ -44,6 +44,8 @@ export async function countOrderQueue(tenantId: string, range: DateRange): Promi
     },
     select: {
       status: true,
+      // Status mentah Shopee: dasar pembeda "Belum diproses" vs "Telah diproses".
+      externalStatus: true,
       fulfillmentOrders: {
         where: { status: { notIn: ['COMPLETED'] } },
         orderBy: { createdAt: 'desc' },
@@ -63,6 +65,7 @@ export async function countOrderQueue(tenantId: string, range: DateRange): Promi
     const shipment = row.shipments[0] ?? null;
     return classifyWorkQueue({
       orderStatus: row.status,
+      externalStatus: row.externalStatus,
       fulfillmentStatus: fo?.status ?? null,
       shipmentStatus: shipment?.status ?? null,
       hasAwb: Boolean(shipment?.awb?.trim()),

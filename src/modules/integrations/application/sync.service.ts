@@ -412,6 +412,9 @@ export async function triggerOrderSync(
         buyerNote: mOrder.buyerNote,
         shippingAddress: mOrder.shippingAddress,
         status: mapShopeeStatusToInternal(mOrder.rawStatus),
+        // Status mentah disimpan apa adanya: inilah yang membedakan
+        // "Belum diproses" (READY_TO_SHIP) dari "Telah diproses" (PROCESSED).
+        externalStatus: mOrder.rawStatus || undefined,
         // Jumlah paket asli Shopee — dasar keputusan package_number di ship_order.
         ...(mOrder.packageCount != null ? { packageCount: mOrder.packageCount } : {}),
         items,
@@ -689,6 +692,9 @@ export async function triggerHistoricalSync(
             buyerNote: mOrder.buyerNote,
             shippingAddress: mOrder.shippingAddress,
             status: mapShopeeStatusToInternal(mOrder.rawStatus),
+        // Status mentah disimpan apa adanya: inilah yang membedakan
+        // "Belum diproses" (READY_TO_SHIP) dari "Telah diproses" (PROCESSED).
+        externalStatus: mOrder.rawStatus || undefined,
             ...(mOrder.packageCount != null ? { packageCount: mOrder.packageCount } : {}),
             items,
             currency: mOrder.payment?.currency ?? undefined,
@@ -1817,10 +1823,14 @@ async function handleOrderStatusPush(
   }
 
   if (order.status !== status) {
+    const rawStatus = String(data.status ?? '');
     await prisma.$transaction(async (tx) => {
       await tx.order.update({
         where: { id: order.id },
-        data: { status: status as import('@prisma/client').OrderStatus },
+        data: {
+          status: status as import('@prisma/client').OrderStatus,
+          ...(rawStatus ? { externalStatus: rawStatus } : {}),
+        },
       });
       await tx.orderStatusHistory.create({
         data: {

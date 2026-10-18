@@ -37,6 +37,11 @@ export const ImportOrderSchema = z.object({
   buyerPhone: z.string().max(30).nullable().optional(),
   shippingAddress: z.record(z.unknown()).optional(),
   status: z.enum(['NEW', 'CONFIRMED', 'CANCELLED', 'COMPLETED']).optional(),
+  /**
+   * Status MENTAH marketplace (Shopee `order_status`). Disimpan apa adanya
+   * supaya "Belum diproses" dan "Telah diproses" bisa dibedakan lagi.
+   */
+  externalStatus: z.string().max(40).nullable().optional(),
   // ── Rincian uang dari marketplace (opsional: tidak semua pesanan punya) ──
   buyerNote: z.string().max(2000).nullable().optional(),
   packageNumber: z.string().max(120).nullable().optional(),
@@ -90,6 +95,7 @@ export async function importOrder(
   const {
     shopId,
     externalOrderId,
+    externalStatus,
     items,
     buyerNote,
     packageNumber,
@@ -158,7 +164,17 @@ export async function importOrder(
       existing.status !== 'CANCELLED' &&
       existing.status !== 'COMPLETED';
 
-    const hasFieldUpdates = Object.keys(moneyFields).length > 0 || Object.keys(contactFields).length > 0;
+    // Status mentah ikut disimpan setiap sinkronisasi. Ini yang membuat kartu
+    // "Belum diproses" / "Telah diproses" tetap sama dengan Seller Centre,
+    // walaupun status internal tidak berubah (READY_TO_SHIP → PROCESSED
+    // keduanya CONFIRMED).
+    const externalStatusChanged =
+      externalStatus !== undefined && externalStatus !== null && externalStatus !== existing.externalStatus;
+
+    const hasFieldUpdates =
+      Object.keys(moneyFields).length > 0 ||
+      Object.keys(contactFields).length > 0 ||
+      externalStatusChanged;
 
     if (statusChanged || hasFieldUpdates) {
       await prisma.$transaction(async (tx) => {
@@ -168,6 +184,7 @@ export async function importOrder(
             ...contactFields,
             ...moneyFields,
             ...(statusChanged ? { status: incoming as OrderStatus } : {}),
+            ...(externalStatusChanged ? { externalStatus } : {}),
           },
         });
         if (statusChanged) {
@@ -224,6 +241,8 @@ export async function importOrder(
         shopId,
         externalOrderId,
         status: status as OrderStatus,
+        // Status mentah marketplace hanya ditulis bila memang dikirim.
+        ...(externalStatus ? { externalStatus } : {}),
         placedAt: orderData.placedAt,
         shipByAt: orderData.shipByAt ?? null,
         buyerName: orderData.buyerName ?? null,
