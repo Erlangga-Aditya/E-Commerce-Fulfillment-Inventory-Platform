@@ -18,6 +18,11 @@ import { consumeStockLotsFifo } from '@/modules/inventory/application/stock-lot.
 import { reconcileOrphanReservations } from '@/modules/inventory/application/inventory.usecase';
 import { recalculateOrderPriority } from '@/modules/orders/application/order.usecase';
 import { logger } from '@/shared/observability/logger';
+import {
+  deriveOperatorWorkflow,
+  resolveOperatorStage,
+  type OperatorStage,
+} from '../domain/operator-workflow';
 
 /** Item yang stoknya belum cukup untuk sebuah pesanan. */
 export interface StockShortfall {
@@ -839,19 +844,11 @@ export async function handOverToCarrier(
 /**
  * Tahapan alur yang dilihat operator (bahasa sehari-hari).
  *
- * `DIBATALKAN` bukan tahap kerja — pesanan ini tidak akan pernah dikemas.
- * Tetap ditampilkan supaya operator bisa melihat pesanan mana yang batal,
- * alih-alih pesanan itu hilang tanpa kabar.
+ * Alias dari `OperatorStage` di lapisan domain supaya tidak ada dua definisi
+ * tahap yang bisa berbeda. `DIBATALKAN` bukan tahap kerja — pesanan ini tidak
+ * akan pernah dikemas — tetapi tetap ditampilkan supaya tidak hilang tanpa kabar.
  */
-export type StationStage =
-  | 'BARU'
-  | 'MENUNGGU_STOK'
-  | 'SIAP_DIKEMAS'
-  | 'SIAP_KIRIM'
-  | 'DIKIRIM'
-  | 'DIBATALKAN'
-  /** Pesanan tuntas: sudah diterima pembeli (status pesanan COMPLETED). */
-  | 'SELESAI';
+export type StationStage = OperatorStage;
 
 /**
  * Urutan resmi tahap stasiun kerja.
@@ -900,6 +897,8 @@ export async function getFulfillmentStation(
     search?: string;
     /** Saring berdasarkan ada/tidaknya nomor resi. */
     resi?: 'sudah' | 'belum' | null;
+    /** Saring berdasarkan kategori ringkasan pengiriman / antrean (mis. 'perluDiproses', 'belumDijemput', 'diPerjalanan', 'sudahSampai', 'gagalKirim'). */
+    statusKirim?: string | null;
     page?: number;
     pageSize?: number;
   } = {},
@@ -940,9 +939,15 @@ export async function getFulfillmentStation(
           }
         : {}),
       ...(options.resi === 'sudah'
-        ? { shipments: { some: { awb: { not: null } } } }
+        ? { shipments: { some: { AND: [{ awb: { not: null } }, { awb: { not: '' } }] } } }
         : options.resi === 'belum'
-          ? { shipments: { none: { awb: { not: null } } } }
+          ? {
+              shipments: {
+                none: {
+                  AND: [{ awb: { not: null } }, { awb: { not: '' } }],
+                },
+              },
+            }
           : {}),
     },
     include: {
@@ -1005,23 +1010,26 @@ export async function getFulfillmentStation(
       };
     });
 
-    // Pesanan batal tidak punya tahap kerja: tidak akan pernah dikemas, dan
-    // tombol aksi (scan, ambil resi, serahkan) harus dimatikan.
-    const stage: StationStage = o.status === 'CANCELLED'
-      ? 'DIBATALKAN'
-      : o.status === 'COMPLETED'
-        ? 'SELESAI'
-        : !fo
-        ? 'BARU'
-        : fo.status === 'WAITING_STOCK'
-          ? 'MENUNGGU_STOK'
-          : fo.status === 'PACKED' || fo.status === 'READY_TO_SHIP'
-            ? 'SIAP_KIRIM'
-            : fo.status === 'HANDED_OVER'
-              ? 'DIKIRIM'
-              : 'SIAP_DIKEMAS';
+    // Tahap & aksi dihitung oleh SATU sumber (`operator-workflow`), bukan
+    // diturunkan ulang di sini. Sebelumnya tiga tempat menghitung sendiri-sendiri
+    // (server, daftar pesanan, halaman detail) dan hasilnya berbeda: pesanan batal
+    // bisa menampilkan tombol "Ambil Resi".
+    const stage = resolveOperatorStage({
+      orderStatus: o.status,
+      fulfillmentStatus: fo?.status ?? null,
+      shipmentStatus: shipment?.status ?? null,
+    });
 
     const dibatalkan = o.status === 'CANCELLED';
+
+    // Kekurangan stok ikut menentukan aksi: pesanan yang stoknya kurang harus
+    // diarahkan ke "isi stok", bukan ke scan resi yang akan gagal.
+    const shortfallUnits = items.reduce((sum, i) => sum + i.shortfall, 0);
+    const workflow = deriveOperatorWorkflow({
+      stage,
+      hasAwb: Boolean(shipment?.awb?.trim()),
+      hasShortfall: shortfallUnits > 0,
+    });
 
     return {
       orderId: o.id,
@@ -1047,17 +1055,20 @@ export async function getFulfillmentStation(
       shipmentStatus: shipment?.status ?? null,
       isCancelled: dibatalkan,
       canCancel: false,
-      // Pesanan batal tidak boleh offer aksi apa pun: tidak bisa scan, tidak
-      // bisa minta resi baru. Kalau tidak dijaga, operator bisa memicu
-      // perubahan stok untuk pesanan yang sudah dibatalkan pembeli.
-      canArrangeShipment: !dibatalkan && !shipment?.awb,
-      /** Barang hanya boleh dinyatakan siap kirim setelah nomor resi terbit. */
-      canPack: !dibatalkan && Boolean(shipment?.awb),
-      canHandOver: !dibatalkan && fo?.status === 'READY_TO_SHIP',
+      /**
+       * Aksi yang boleh ditawarkan — dihitung sekali di `operator-workflow`.
+       * UI tidak boleh menyusun syaratnya sendiri lagi; itulah akar tombol
+       * "Ambil Resi" yang muncul pada pesanan batal / sudah diterima pembeli.
+       */
+      workflow,
+      canArrangeShipment: workflow.canArrangeShipment,
+      /** Barang hanya boleh dinyatakan siap kirim setelah nomor resi terbit dan belum diserahkan ke kurir. */
+      canPack: workflow.canScan,
+      canHandOver: workflow.canHandover,
       stage,
       items,
       totalUnits: items.reduce((sum, i) => sum + i.quantity, 0),
-      shortfallUnits: items.reduce((sum, i) => sum + i.shortfall, 0),
+      shortfallUnits,
     };
   });
 
@@ -1074,18 +1085,39 @@ export async function getFulfillmentStation(
       selesai: unified.filter((u) => u.stage === 'SELESAI').length,
   };
 
-  // Tiga kelompok besar dipakai untuk ringkasan. Dipisahkan dari tahap kerja
-  // karena pertanyaannya berbeda: tahap menjawab "sedang di langkah mana",
-  // sedangkan kelompok ini menjawab "sudah sampai mana paketnya".
+  // Pesanan yang berada dalam antrean kerja fulfillment gudang:
+  // BARU (belum dialokasi), MENUNGGU_STOK (butuh restock), SIAP_DIKEMAS (siap packing), SIAP_KIRIM (siap serah kurir).
+  // Total ini persis sama dengan jumlah pesanan di tahap antrean gudang!
+  const antreanGudang = unified.filter(
+    (u) => u.stage === 'BARU' || u.stage === 'MENUNGGU_STOK' || u.stage === 'SIAP_DIKEMAS' || u.stage === 'SIAP_KIRIM',
+  );
+
   const daftarDibatalkan = unified.filter((u) => u.stage === 'DIBATALKAN');
-  const selesai = unified.filter((u) => u.orderStatus === 'COMPLETED');
-  const aktif = unified.filter((u) => u.stage !== 'DIBATALKAN' && u.orderStatus !== 'COMPLETED');
+  const selesai = unified.filter((u) => u.orderStatus === 'COMPLETED' || u.stage === 'SELESAI');
 
   const jumlahRetur = await prisma.return.count({
     where: { order: { tenantId } },
   });
 
-  const filtered = options.stage ? unified.filter((u) => u.stage === options.stage) : unified;
+  let filtered = options.stage ? unified.filter((u) => u.stage === options.stage) : unified;
+
+  if (options.statusKirim) {
+    if (options.statusKirim === 'perluDiproses') {
+      filtered = filtered.filter(
+        (u) => u.stage === 'BARU' || u.stage === 'MENUNGGU_STOK' || u.stage === 'SIAP_DIKEMAS' || u.stage === 'SIAP_KIRIM',
+      );
+    } else if (options.statusKirim === 'belumDijemput') {
+      filtered = filtered.filter(
+        (u) => Boolean(u.awb && u.awb.trim() !== '') && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP'),
+      );
+    } else if (options.statusKirim === 'diPerjalanan') {
+      filtered = filtered.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT');
+    } else if (options.statusKirim === 'sudahSampai') {
+      filtered = filtered.filter((u) => u.shipmentStatus === 'DELIVERED');
+    } else if (options.statusKirim === 'gagalKirim') {
+      filtered = filtered.filter((u) => u.shipmentStatus === 'FAILED');
+    }
+  }
   const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   // Halaman yang diminta bisa berada di luar rentang, misalnya setelah operator
@@ -1111,19 +1143,17 @@ export async function getFulfillmentStation(
      *
      * Angka-angka ini dihitung dari seluruh kandidat (bukan dari halaman yang
      * tampil), dan dari keadaan yang benar-benar dimiliki pesanan - bukan dari
-     * tebakan atau dari layar pihak lain. Operator perlu bisa menjawab pertanyaan
-     * seperti "berapa paket yang belum ada resinya" dan "berapa yang sudah
-     * sampai ke pembeli" tanpa menghitung satu per satu.
+     * tebakan atau dari layar pihak lain.
      */
     ringkasan: {
-      /** Semua pesanan yang masih perlu ditangani (bukan batal, bukan selesai). */
-      perluDiproses: aktif.length,
-      belumResi: aktif.filter((u) => !u.awb).length,
-      sudahResi: aktif.filter((u) => Boolean(u.awb)).length,
-      belumDijemput: aktif.filter((u) => u.awb && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP')).length,
-      diPerjalanan: aktif.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT').length,
-      sudahSampai: aktif.filter((u) => u.shipmentStatus === 'DELIVERED').length,
-      gagalKirim: aktif.filter((u) => u.shipmentStatus === 'FAILED').length,
+      /** Pesanan yang butuh penanganan gudang (Baru + Tunggu Stok + Siap Dikemas + Siap Kirim). */
+      perluDiproses: antreanGudang.length,
+      belumResi: antreanGudang.filter((u) => !u.awb || u.awb.trim() === '').length,
+      sudahResi: antreanGudang.filter((u) => Boolean(u.awb && u.awb.trim() !== '')).length,
+      belumDijemput: antreanGudang.filter((u) => Boolean(u.awb && u.awb.trim() !== '') && (!u.shipmentStatus || u.shipmentStatus === 'READY_TO_SHIP')).length,
+      diPerjalanan: unified.filter((u) => u.shipmentStatus === 'PICKED_UP' || u.shipmentStatus === 'IN_TRANSIT').length,
+      sudahSampai: unified.filter((u) => u.shipmentStatus === 'DELIVERED').length,
+      gagalKirim: unified.filter((u) => u.shipmentStatus === 'FAILED').length,
       selesai: selesai.length,
       dibatalkan: daftarDibatalkan.length,
       retur: jumlahRetur,

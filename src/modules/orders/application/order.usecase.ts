@@ -16,7 +16,12 @@ import { auditLog } from '@/modules/audit/application/auditLog.service';
 import {
   releaseReservationsForOrder,
   markFulfillmentOrdersException,
+  getAvailabilityMap,
 } from '@/modules/inventory/application/inventory.usecase';
+import {
+  deriveOperatorWorkflow,
+  resolveOperatorStage,
+} from '@/modules/fulfillment/domain/operator-workflow';
 import { logger } from '@/shared/observability/logger';
 
 // ────────────────────────────────────────────────────────────
@@ -550,11 +555,50 @@ export async function getOrderDetail(tenantId: string, orderId: string) {
       : null;
 
   const mainShipment = order.shipments[0];
+  const activeFulfillment =
+    order.fulfillmentOrders.find((fo) => fo.status !== 'COMPLETED') ?? order.fulfillmentOrders[0] ?? null;
+
+  // Aksi yang boleh ditawarkan dihitung oleh SATU sumber (`operator-workflow`).
+  // Sebelumnya halaman detail memakai syaratnya sendiri (`!awb` → tombol
+  // "Ambil Resi"), sehingga pesanan batal dan pesanan yang sudah diterima
+  // pembeli tetap menawarkan permintaan resi ke Shopee.
+  const stage = resolveOperatorStage({
+    orderStatus: order.status,
+    fulfillmentStatus: activeFulfillment?.status ?? null,
+    shipmentStatus: mainShipment?.status ?? null,
+  });
+
+  // Kekurangan stok dihitung dari satu query batch (bukan per item), supaya
+  // tahap kerja yang dikirim ke UI benar-benar mencerminkan stok hari ini.
+  let shortfallUnits = 0;
+  if (activeFulfillment) {
+    const availability = await getAvailabilityMap(
+      [activeFulfillment.warehouseId],
+      [...new Set(order.items.map((item) => item.variantId))],
+    );
+    shortfallUnits = order.items.reduce((sum, item) => {
+      const ownReservation = item.reservations.reduce((acc, r) => acc + r.quantity, 0);
+      const available =
+        (availability.get(`${activeFulfillment.warehouseId}:${item.variantId}`)?.available ?? 0) +
+        ownReservation;
+      const required = item.quantity - item.fulfilledQuantity;
+      return sum + (required > available ? required - available : 0);
+    }, 0);
+  }
+
+  const workflow = deriveOperatorWorkflow({
+    stage,
+    hasAwb: Boolean(mainShipment?.awb?.trim()),
+    hasShortfall: shortfallUnits > 0,
+  });
 
   return {
     id: order.id,
     externalOrderId: order.externalOrderId,
     status: order.status,
+    stage,
+    workflow,
+    shortfallUnits,
     shopId: order.shopId,
     shopName: order.shop.name,
     provider: order.shop.provider,

@@ -20,6 +20,10 @@ export type AwbScanCode =
   | 'PACKED'
   | 'ALREADY_PACKED'
   | 'ALREADY_HANDED_OVER'
+  /** Pesanan dibatalkan di Shopee: stok TIDAK boleh dikurangi. */
+  | 'CANCELLED'
+  /** Pesanan sudah diterima pembeli: tidak ada langkah kerja yang tersisa. */
+  | 'ALREADY_DELIVERED'
   | 'NEEDS_PICKING'
   | 'WAITING_STOCK'
   | 'NOT_QUEUED'
@@ -195,13 +199,35 @@ export async function scanAwbForPacking(
         select: { id: true, status: true },
       },
       items: { include: { variant: { select: { sku: true } } } },
-      shipments: { orderBy: { createdAt: 'desc' }, take: 1, select: { id: true, awb: true } },
+      shipments: { orderBy: { createdAt: 'desc' }, take: 1, select: { id: true, awb: true, status: true } },
     },
   });
   if (!order) return emptyOutcome('NOT_FOUND', `Pesanan untuk kode "${code}" tidak lagi tersedia.`);
 
   const summary = await buildOrderSummary(order.id);
   const fo = order.fulfillmentOrders[0] ?? null;
+  const latestShipment = order.shipments[0] ?? null;
+
+  // Pesanan batal: tidak ada yang boleh diproses. Penjagaan ini WAJIB ada di
+  // sini, bukan hanya di UI — pesanan yang dibatalkan di Shopee bisa saja masih
+  // menyisakan fulfillment aktif, dan tanpa penjagaan ini scan resi akan
+  // "berhasil" memotong stok gudang untuk pesanan yang tidak akan dikirim.
+  if (order.status === 'CANCELLED') {
+    return emptyOutcome(
+      'CANCELLED',
+      `Pesanan ${order.externalOrderId} sudah DIBATALKAN di Shopee. Resinya tidak perlu diproses dan stok gudang tidak dikurangi.`,
+      { order: summary },
+    );
+  }
+
+  // Sudah diterima pembeli / pesanan tuntas: tidak ada langkah kerja tersisa.
+  if (order.status === 'COMPLETED' || latestShipment?.status === 'DELIVERED') {
+    return emptyOutcome(
+      'ALREADY_DELIVERED',
+      `Pesanan ${order.externalOrderId} sudah selesai (diterima pembeli). Tidak ada yang perlu dipindai lagi.`,
+      { order: summary },
+    );
+  }
 
   if (!fo) {
     return emptyOutcome(

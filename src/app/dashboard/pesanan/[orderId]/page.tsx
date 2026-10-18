@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { api, formatDate, formatRupiah , openOfficialLabel } from '@/lib/api';
 import {  StatusBadge, LoadingState, ErrorState, Alert } from '@/components/ui';
+import type { OperatorStage, OperatorWorkflow } from '@/modules/fulfillment/domain/operator-workflow';
 
 interface OrderDetail {
   id: string;
@@ -54,6 +55,10 @@ interface OrderDetail {
   carrier: string | null;
   shipmentStatus: string | null;
   canPrintOfficialLabel: boolean;
+  /** Tahap kerja & aksi yang boleh ditawarkan — dihitung server (satu sumber). */
+  stage: OperatorStage;
+  workflow: OperatorWorkflow;
+  shortfallUnits: number;
   items: Array<{
     id: string;
     sku: string;
@@ -246,10 +251,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
           </div>
         </div>
 
-        {/* Top Action Buttons */}
+        {/* Tombol aksi — SEMUA berasal dari `order.workflow` yang dihitung server.
+            Sebelumnya di sini tertulis `!awb` → "Ambil Resi", sehingga pesanan batal
+            dan pesanan yang sudah diterima pembeli tetap menawarkan permintaan resi. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/* Cetak Label RESMI Shopee (hanya kalau resi sudah ada) */}
-          {awb ? (
+          {order.workflow.canPrintLabel ? (
             <button
               type="button"
               onClick={handlePrintLabel}
@@ -260,15 +266,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
               <Printer size={15} />
               <span>{printingLabel ? 'Menyiapkan label dari Shopee…' : 'Cetak Label Resi'}</span>
             </button>
-          ) : (
-            <span className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-              <Printer size={15} />
-              <span>Label resmi Shopee muncul setelah nomor resi terbit</span>
-            </span>
-          )}
+          ) : null}
 
-          {/* Atur Pengiriman Button */}
-          {!awb && (
+          {order.workflow.canArrangeShipment ? (
             <button
               type="button"
               onClick={handleArrangeShipment}
@@ -279,7 +279,20 @@ export default function OrderDetailPage({ params }: { params: Promise<{ orderId:
               <Truck size={15} />
               <span>{arranging ? 'Memproses...' : 'Ambil Resi dari Shopee'}</span>
             </button>
-          )}
+          ) : null}
+
+          {order.workflow.isFinal ? (
+            <span className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <CheckCircle2 size={15} />
+              <span>
+                {order.stage === 'DIBATALKAN'
+                  ? 'Pesanan dibatalkan — tidak ada langkah kerja lagi.'
+                  : order.stage === 'SELESAI'
+                    ? 'Pesanan selesai — sudah diterima pembeli.'
+                    : 'Paket sudah diserahkan ke kurir.'}
+              </span>
+            </span>
+          ) : null}
 
           {/* Kembali ke daftar kerja */}
           <Link

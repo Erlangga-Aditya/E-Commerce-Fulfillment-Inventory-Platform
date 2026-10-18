@@ -126,6 +126,7 @@ export interface SyncOptions {
   fromDate?: Date;
   toDate?: Date;
   pageSize?: number;
+  timeRangeField?: 'create_time' | 'update_time';
 }
 
 /** Hasil label resmi: file dari Shopee + format yang dipakainya. */

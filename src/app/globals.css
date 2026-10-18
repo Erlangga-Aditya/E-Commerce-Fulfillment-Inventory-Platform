@@ -1323,3 +1323,232 @@ a:hover {
 .mb12 { margin-bottom: 12px; }
 .mb16 { margin-bottom: 16px; }
 .mb24 { margin-bottom: 24px; }
+
+
+/* ============================================================
+   ALIAS TOKEN & TEMA (TERANG / GELAP)
+   ============================================================
+
+   Sebelum blok ini, sebagian kode memakai nama variabel yang TIDAK PERNAH
+   didefinisikan (--danger, --warning, --border, --muted, --surface-container,
+   --subtle, --info). Pemakaian `var(--danger, #ef4444)` terlihat "aman" karena
+   memakai nilai cadangan, tetapi cadangan itu HANYA dipakai saat variabel tidak
+   ada — artinya tema gelap tidak akan pernah mengubah warna tersebut.
+   Semua nama itu sekarang punya nilai nyata, sehingga `var(--x, fallback)`
+   otomatis ikut tema. Nilai cadangan di komponen dibiarkan apa adanya.
+   ============================================================ */
+
+:root {
+  --danger: var(--error);
+  --warning: var(--tertiary);
+  --info: #0284c7;
+  --border: var(--outline-variant);
+  --surface-container: var(--surface);
+  --surface-elevated: var(--surface);
+  --muted: var(--on-surface-variant);
+  --subtle: var(--surface-low);
+  --color-primary: var(--primary);
+  --info-container: #e0f2fe;
+  --on-info-container: #0369a1;
+  --info-border: #bae6fd;
+  color-scheme: light;
+}
+
+/* Tema gelap: seluruh permukaan, teks, garis, dan warna status diturunkan ulang.
+   Tidak ada komponen yang perlu diubah — semua sudah memakai token di atas. */
+[data-theme='dark'] {
+  --primary: #ff6b4a;
+  --primary-hover: #ff8163;
+  --primary-active: #e8563a;
+  --primary-strong: #ff9d86;
+  --on-primary: #2a0d06;
+  --primary-container: #3b1a12;
+  --on-primary-container: #ffc0b0;
+  --primary-border: #5a2a1e;
+
+  --secondary: #7cb0ff;
+  --secondary-hover: #9cc4ff;
+  --on-secondary: #06213f;
+  --secondary-container: #16283f;
+  --on-secondary-container: #a9caff;
+  --secondary-border: #24405f;
+
+  --tertiary: #fbbf24;
+  --tertiary-container: #3a2c0d;
+  --on-tertiary-container: #fcd77a;
+  --tertiary-border: #5a4614;
+
+  --error: #f87171;
+  --error-hover: #fca5a5;
+  --on-error: #2a0a0a;
+  --error-container: #3a1618;
+  --on-error-container: #fbb4b4;
+  --error-border: #5a2226;
+
+  --success: #34d399;
+  --on-success: #052e1d;
+  --success-container: #12301f;
+  --on-success-container: #8ce0b8;
+  --success-border: #1d4c33;
+
+  --background: #0b1220;
+  --on-background: #e6edf7;
+  --surface: #121a29;
+  --surface-subtle: #141d2c;
+  --surface-low: #182233;
+  --surface-high: #22304a;
+  --surface-card: #121a29;
+  --surface-container: #182233;
+  --surface-elevated: #1b2740;
+  --on-surface: #e6edf7;
+  --on-surface-variant: #a4b4c9;
+  --on-surface-muted: #7f90a8;
+
+  --outline: #3a4c66;
+  --outline-variant: #2a3a50;
+  --divider: #223047;
+  --border: #2a3a50;
+  --focus-ring: #7cb0ff;
+
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --info: #38bdf8;
+  --muted: #a4b4c9;
+  --subtle: #182233;
+  --color-primary: #ff6b4a;
+  --info-container: #0c2b3d;
+  --on-info-container: #8ed7f7;
+  --info-border: #164258;
+
+  --e-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --e-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --e-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --e-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.55), 0 4px 6px -4px rgba(0, 0, 0, 0.4);
+  --e-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+/* Perpindahan tema tidak boleh "berkedip" putih saat berpindah halaman:
+   warna latar diwarisi dari <html> supaya area di luar <body> ikut gelap. */
+html {
+  background: var(--background);
+}
+
+/* Badge informasi (dipakai kartu pesanan untuk status perjalanan paket). */
+.badge-info {
+  background: var(--info-container);
+  color: var(--on-info-container);
+  border: 1px solid var(--info-border);
+}
+
+/* ============================================================
+   HEADER HALAMAN, KARTU PESANAN, DAN PANEL AKSI MASSAL
+   ============================================================ */
+
+/* `.page-head` dipakai beberapa halaman (Kelola Tim, Pengaturan) tetapi belum
+   pernah didefinisikan. Tanpa aturan ini judul dan tombol aksi bertumpuk dan
+   tombol meluber keluar layar pada ponsel. */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.page-head > div {
+  min-width: 0;
+}
+
+.page-head h1 {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.25;
+  margin: 0 0 4px;
+}
+
+.page-head h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+
+.order-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.bulk-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-left: 3px solid var(--color-primary);
+  background: var(--surface-elevated);
+}
+
+details.card > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+details.card > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.card > summary::after {
+  content: '▾';
+  font-size: 12px;
+  color: var(--on-surface-muted);
+  transition: transform 0.15s ease;
+}
+
+details.card[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+/* ============================================================
+   PENYESUAIAN PONSEL
+   ============================================================ */
+
+@media (max-width: 639px) {
+  /* Tabel di dalam kartu tetap bisa digeser mendatar, tetapi kolomnya tidak
+     dipaksa 640px sehingga isi tidak "hilang" di layar kecil. */
+  .card .table {
+    min-width: 480px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  /* Tombol aksi kartu pesanan memenuhi lebar agar mudah disentuh. */
+  .order-card-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .order-card-head > div:last-child {
+    justify-content: flex-start;
+  }
+
+  .bulk-bar {
+    position: static;
+    gap: 8px;
+  }
+
+  .page-head h1 {
+    font-size: 18px;
+  }
+}

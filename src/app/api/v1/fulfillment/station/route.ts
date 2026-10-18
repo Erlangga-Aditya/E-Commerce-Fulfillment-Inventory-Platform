@@ -48,10 +48,12 @@ export async function GET(request: NextRequest) {
     // menghasilkan daftar yang berbeda dari yang dimaksud pemakainya.
     const resiParam = getQueryParam(request, 'resi');
     const resi = resiParam === 'sudah' || resiParam === 'belum' ? resiParam : null;
+    const statusKirim = getQueryParam(request, 'statusKirim') ?? null;
     const station = await getFulfillmentStation(ctx.tenantId, {
       sort: sortParam === 'newest' ? 'newest' : 'oldest',
       stage,
       resi,
+      statusKirim,
       search: getQueryParam(request, 'search'),
       page,
       pageSize,
