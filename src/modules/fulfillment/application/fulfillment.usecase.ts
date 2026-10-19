@@ -1099,6 +1099,26 @@ export async function getFulfillmentStation(
   }));
   const kartu = countBuckets(withQueue.map((item) => item.queue));
 
+  // Anomali yang bisa ditutup operator: paket sudah keluar gudang (dijemput /
+  // transit / diterima / gagal / kembali) tetapi catatan fulfillment-nya masih
+  // berstatus "di gudang". Selama belum ditutup, scan resi paket itu berhenti
+  // di pemeriksaan stok — asal pesan "harus tambah stok" yang membingungkan.
+  const STATUS_MASIH_DI_GUDANG = new Set([
+    'WAITING_STOCK',
+    'READY_TO_PICK',
+    'PICKING',
+    'PICKED',
+    'PACKING',
+    'PACKED',
+    'READY_TO_SHIP',
+  ]);
+  const STATUS_PAKET_KELUAR = new Set(['PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED', 'RETURNED']);
+  const paketJalanBelumDitutup = unified.filter(
+    (o) =>
+      STATUS_PAKET_KELUAR.has(String(o.shipmentStatus ?? '')) &&
+      STATUS_MASIH_DI_GUDANG.has(String(o.fulfillmentStatus ?? '')),
+  ).length;
+
   const bucket = options.bucket ?? 'perluDiproses';
   // `semua` sengaja tidak memakai `belongsToBucket` karena bucket itu harus
   // juga menampilkan pesanan batal & selesai (untuk ditelusuri operator).
@@ -1124,6 +1144,7 @@ export async function getFulfillmentStation(
       to: range.to ? range.to.toISOString() : null,
     },
     kartu,
+    anomali: { paketJalanBelumDitutup },
     orders: filtered.slice(mulai, mulai + pageSize),
     page,
     pageSize,

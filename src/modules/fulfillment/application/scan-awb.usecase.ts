@@ -6,6 +6,7 @@ import {
   type PendingPickingItem,
   type StockShortfall,
 } from './fulfillment.usecase';
+import { resolveParcelPhase } from '../domain/parcel-status';
 import { logger } from '@/shared/observability/logger';
 
 /**
@@ -24,6 +25,14 @@ export type AwbScanCode =
   | 'CANCELLED'
   /** Pesanan sudah diterima pembeli: tidak ada langkah kerja yang tersisa. */
   | 'ALREADY_DELIVERED'
+  /**
+   * Paket sudah dijemput kurir / dalam perjalanan. Ini yang dulu salah: scan
+   * masuk ke jalur packing, menagih stok, lalu menampilkan "tambah stok" untuk
+   * barang yang secara fisik sudah meninggalkan gudang.
+   */
+  | 'ALREADY_IN_TRANSIT'
+  /** Paket gagal kirim / dikembalikan: bukan pekerjaan packing. */
+  | 'PARCEL_RETURNED'
   | 'NEEDS_PICKING'
   | 'WAITING_STOCK'
   | 'NOT_QUEUED'
@@ -220,8 +229,35 @@ export async function scanAwbForPacking(
     );
   }
 
+  // ── Fase paket di dunia nyata ────────────────────────────────────────────
+  // Diperiksa SEBELUM status fulfillment. Urutan ini yang memperbaiki anomali
+  // "scan paket in-transit → diminta tambah stok": catatan fulfillment bisa
+  // tertinggal (pesanan dikirim lewat Seller Centre), tetapi posisi paket tidak
+  // pernah bohong. Kalau paket sudah keluar gudang, tidak ada yang perlu
+  // dipacking dan stok TIDAK boleh disentuh.
+  const fasePaket = resolveParcelPhase(latestShipment?.status);
+
+  if (fasePaket === 'DALAM_PERJALANAN') {
+    return emptyOutcome(
+      'ALREADY_IN_TRANSIT',
+      `Paket pesanan ${order.externalOrderId} sudah dijemput kurir dan sedang dalam perjalanan` +
+        (latestShipment?.awb ? ` (resi ${latestShipment.awb})` : '') +
+        '. Tidak ada yang perlu dipindai dan stok gudang tidak dikurangi.',
+      { order: summary },
+    );
+  }
+
+  if (fasePaket === 'GAGAL' || fasePaket === 'DIKEMBALIKAN') {
+    return emptyOutcome(
+      'PARCEL_RETURNED',
+      `Paket pesanan ${order.externalOrderId} berstatus ${fasePaket === 'GAGAL' ? 'gagal kirim' : 'dikembalikan ke gudang'}. ` +
+        'Periksa di menu Pengembalian; jangan dipacking ulang dari layar ini.',
+      { order: summary },
+    );
+  }
+
   // Sudah diterima pembeli / pesanan tuntas: tidak ada langkah kerja tersisa.
-  if (order.status === 'COMPLETED' || latestShipment?.status === 'DELIVERED') {
+  if (order.status === 'COMPLETED' || fasePaket === 'DITERIMA') {
     return emptyOutcome(
       'ALREADY_DELIVERED',
       `Pesanan ${order.externalOrderId} sudah selesai (diterima pembeli). Tidak ada yang perlu dipindai lagi.`,

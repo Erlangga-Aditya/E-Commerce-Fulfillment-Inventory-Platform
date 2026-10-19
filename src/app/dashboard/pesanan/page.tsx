@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   ClipboardList,
   ExternalLink,
+  Info,
   PackageCheck,
   Printer,
   RefreshCw,
@@ -28,6 +29,52 @@ import { RANGE_LABEL, RANGE_PRESETS, type RangePreset } from '@/modules/fulfillm
 import type { QueueBucket } from '@/modules/fulfillment/domain/work-queue';
 import { OrderCard } from './order-card';
 import { type ScanOutcome, type StationOrder, type StationResponse } from './types';
+
+/**
+ * Nada & judul panel hasil scan. Dikumpulkan di satu tempat supaya tidak ada
+ * lagi rangkaian ternary berlapis yang mudah salah saat kode hasil scan
+ * bertambah (`ALREADY_IN_TRANSIT`, `PARCEL_RETURNED`, …).
+ */
+type ScanTone = 'success' | 'info' | 'warning' | 'danger';
+
+const NADA_HASIL: Record<ScanOutcome['code'], ScanTone> = {
+  PACKED: 'success',
+  ALREADY_PACKED: 'info',
+  ALREADY_HANDED_OVER: 'info',
+  ALREADY_IN_TRANSIT: 'info',
+  ALREADY_DELIVERED: 'info',
+  CANCELLED: 'warning',
+  PARCEL_RETURNED: 'warning',
+  NEEDS_PICKING: 'warning',
+  NEEDS_SHIPMENT: 'warning',
+  WAITING_STOCK: 'warning',
+  NOT_QUEUED: 'warning',
+  EXCEPTION: 'danger',
+  NOT_FOUND: 'danger',
+};
+
+const JUDUL_HASIL: Record<ScanOutcome['code'], string> = {
+  PACKED: 'Pesanan selesai diproses — stok gudang sudah berkurang',
+  ALREADY_PACKED: 'Pesanan ini sudah pernah dipacking',
+  ALREADY_HANDED_OVER: 'Pesanan sudah diserahkan ke kurir',
+  ALREADY_IN_TRANSIT: 'Paket sudah dalam perjalanan — tidak perlu dipindai',
+  ALREADY_DELIVERED: 'Pesanan sudah diterima pembeli',
+  CANCELLED: 'Pesanan dibatalkan — resi tidak perlu diproses',
+  PARCEL_RETURNED: 'Paket gagal kirim / dikembalikan',
+  NEEDS_PICKING: 'Picking belum selesai',
+  NEEDS_SHIPMENT: 'Resi belum ada — atur pengiriman dulu',
+  WAITING_STOCK: 'Stok belum cukup untuk dipacking',
+  NOT_QUEUED: 'Pesanan belum masuk antrian fulfillment',
+  EXCEPTION: 'Pesanan bermasalah — periksa halaman fulfillment',
+  NOT_FOUND: 'Resi / nomor pesanan tidak dikenali',
+};
+
+const WARNA_NADA: Record<ScanTone, string> = {
+  success: 'var(--success)',
+  info: 'var(--secondary)',
+  warning: 'var(--warning)',
+  danger: 'var(--danger)',
+};
 
 /**
  * Halaman kerja operator: pesanan masuk → ambil resi → scan resi → serahkan.
@@ -69,6 +116,7 @@ export default function PesananPengirimanPage() {
   const [search, setSearch] = useState('');
 
   const [outcome, setOutcome] = useState<ScanOutcome | null>(null);
+  const [reconciling, setReconciling] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
   const [stockVariantId, setStockVariantId] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
@@ -329,6 +377,34 @@ export default function PesananPengirimanPage() {
     }
   }
 
+  /**
+   * Menutup catatan fulfillment untuk paket yang sudah dikirim (dijemput kurir /
+   * transit / diterima). Tanpa ini, scan resi paket tersebut berhenti di
+   * pemeriksaan stok dan menampilkan "harus tambah stok".
+   */
+  async function tutupPaketSudahDikirim() {
+    setReconciling(true);
+    setNotice(null);
+    try {
+      const res = await api<{
+        ditutup: number;
+        unitStokDipotong: number;
+        varianStokMinus: number;
+        messages: string[];
+      }>('/api/v1/fulfillment/reconcile-shipped', { method: 'POST', body: { apply: true } });
+      cacheRef.current.clear();
+      await load({ force: true });
+      setNotice({
+        tone: res.ditutup > 0 ? 'success' : 'info',
+        text: res.messages[0] ?? 'Tidak ada paket yang perlu ditutup.',
+      });
+    } catch (e) {
+      setNotice({ tone: 'danger', text: (e as Error).message });
+    } finally {
+      setReconciling(false);
+    }
+  }
+
   const scanResi = useCallback(
     async (code: string) => {
       setBusyKey('scan');
@@ -475,6 +551,29 @@ export default function PesananPengirimanPage() {
         </div>
       )}
 
+      {(data?.anomali?.paketJalanBelumDitutup ?? 0) > 0 && (
+        <div className="mb16">
+          <Alert tone="warning">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>
+                <strong>{data!.anomali.paketJalanBelumDitutup} paket sudah dikirim</strong> (dijemput kurir / dalam
+                perjalanan) tetapi catatan gudangnya masih dianggap belum selesai. Selama belum ditutup, scan resi paket
+                itu berhenti di pemeriksaan stok.
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={reconciling}
+                onClick={() => void tutupPaketSudahDikirim()}
+              >
+                <PackageCheck size={13} aria-hidden />
+                <span>{reconciling ? 'Menutup…' : 'Tutup otomatis'}</span>
+              </button>
+            </div>
+          </Alert>
+        </div>
+      )}
+
       {!data?.warehouse && (
         <div className="mb16">
           <Alert tone="warning">
@@ -511,44 +610,21 @@ export default function PesananPengirimanPage() {
           <div
             style={{
               marginTop: 14,
-              border: `1px solid ${
-                outcome.code === 'PACKED' || outcome.code === 'ALREADY_PACKED' || outcome.code === 'ALREADY_HANDED_OVER'
-                  ? 'var(--success)'
-                  : outcome.code === 'NOT_FOUND' || outcome.code === 'EXCEPTION' || outcome.code === 'CANCELLED'
-                    ? 'var(--danger)'
-                    : 'var(--warning)'
-              }`,
+              border: `1px solid ${WARNA_NADA[NADA_HASIL[outcome.code]]}`,
               borderRadius: 12,
               padding: 16,
               background: 'var(--surface-container)',
             }}
           >
             <div style={{ display: 'flex', gap: 10 }}>
-              {outcome.code === 'PACKED' || outcome.code === 'ALREADY_PACKED' || outcome.code === 'ALREADY_HANDED_OVER' ? (
-                <CheckCircle2 size={20} aria-hidden style={{ color: 'var(--success)', flexShrink: 0 }} />
-              ) : outcome.code === 'NOT_FOUND' || outcome.code === 'EXCEPTION' || outcome.code === 'CANCELLED' ? (
-                <XCircle size={20} aria-hidden style={{ color: 'var(--danger)', flexShrink: 0 }} />
-              ) : (
-                <AlertTriangle size={20} aria-hidden style={{ color: 'var(--warning)', flexShrink: 0 }} />
-              )}
+              {(() => {
+                const nada = NADA_HASIL[outcome.code];
+                const warna = WARNA_NADA[nada];
+                const Ikon = nada === 'success' ? CheckCircle2 : nada === 'danger' ? XCircle : nada === 'info' ? Info : AlertTriangle;
+                return <Ikon size={20} aria-hidden style={{ color: warna, flexShrink: 0 }} />;
+              })()}
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>
-                  {outcome.code === 'PACKED'
-                    ? 'Pesanan selesai diproses — stok gudang sudah berkurang'
-                    : outcome.code === 'NEEDS_SHIPMENT'
-                      ? 'Resi belum ada — atur pengiriman dulu'
-                      : outcome.code === 'ALREADY_PACKED'
-                        ? 'Pesanan ini sudah pernah diselesaikan'
-                        : outcome.code === 'ALREADY_HANDED_OVER'
-                          ? 'Pesanan sudah diserahkan ke kurir'
-                          : outcome.code === 'CANCELLED'
-                            ? 'Pesanan dibatalkan — resi tidak perlu diproses'
-                            : outcome.code === 'ALREADY_DELIVERED'
-                              ? 'Pesanan sudah diterima pembeli'
-                              : outcome.code === 'NOT_FOUND'
-                                ? 'Resi / nomor pesanan tidak dikenali'
-                                : 'Belum bisa diselesaikan'}
-                </div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{JUDUL_HASIL[outcome.code]}</div>
                 <p style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>{outcome.message}</p>
 
                 {outcome.shortfalls.length > 0 && (

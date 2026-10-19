@@ -66,6 +66,8 @@ export interface StationResponse {
     pesananBaru: number;
     sudahResi: number;
   };
+  /** Anomali yang bisa dibereskan operator (paket sudah jalan, catatan tertinggal). */
+  anomali: { paketJalanBelumDitutup: number };
   orders: StationOrder[];
   page: number;
   pageSize: number;
@@ -87,6 +89,8 @@ export interface ScanOutcome {
     | 'NOT_QUEUED'
     | 'CANCELLED'
     | 'ALREADY_DELIVERED'
+    | 'ALREADY_IN_TRANSIT'
+    | 'PARCEL_RETURNED'
     | 'EXCEPTION'
     | 'NOT_FOUND';
   message: string;

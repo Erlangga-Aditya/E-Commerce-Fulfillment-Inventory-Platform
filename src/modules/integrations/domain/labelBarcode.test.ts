@@ -12,7 +12,7 @@
  * contoh, jadi tidak ada data pribadi yang ikut tersimpan.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,11 +25,19 @@ describe('Barcode label Shopee (PDF resmi dari Shopee sandbox)', () => {
   const pdf = readFileSync(LABEL_PDF);
   const workDir = mkdtempSync(join(tmpdir(), 'label-test-'));
 
-  // Membaca barcode menjalankan proses Python (uv + PyMuPDF). Default vitest
-  // 5 detik terlalu ketat: satu pembacaan butuh sekitar 3-4 detik sendiri, dan
-  // lebih lama lagi saat suite berjalan paralel. Tanpa ini, test gagal karena
-  // kehabisan waktu, bukan karena kodenya salah.
-  const BATAS_MS = 30_000;
+  // Membaca barcode menjalankan proses Python (uv + PyMuPDF). Satu pembacaan
+  // butuh 15-25 detik di mesin ini, dan lebih lama lagi saat seluruh suite
+  // berjalan paralel - dengan batas 30 detik test gagal karena kehabisan
+  // waktu, bukan karena kodenya salah.
+  const BATAS_MS = 120_000;
+
+  // Hasil bacaan dipakai bersama: dulu tiap test memanggil pembaca sendiri,
+  // jadi berkas PDF yang sama diurai 5 kali (~2 menit) dan mudah kehabisan
+  // waktu saat suite berjalan paralel.
+  let barcodes: Awaited<ReturnType<typeof readLabelBarcodes>>;
+  beforeAll(async () => {
+    barcodes = await readLabelBarcodes(pdf, workDir);
+  }, BATAS_MS);
 
   it('fixtur label benar-benar berkas PDF', () => {
     // Penjaga sederhana: kalau fixtur rusak atau tergantikan, ketahuan di sini
@@ -38,9 +46,7 @@ describe('Barcode label Shopee (PDF resmi dari Shopee sandbox)', () => {
     expect(pdf.byteLength).toBeGreaterThan(10_000);
   });
 
-  it('menemukan barcode yang memuat nomor pesanan', async () => {
-    const barcodes = await readLabelBarcodes(pdf, workDir);
-
+  it('menemukan barcode yang memuat nomor pesanan', () => {
     expect(barcodes.length).toBeGreaterThan(0);
     const texts = barcodes.map((b) => b.text);
     expect(
@@ -49,8 +55,7 @@ describe('Barcode label Shopee (PDF resmi dari Shopee sandbox)', () => {
     ).toBe(true);
   }, BATAS_MS);
 
-  it('format barcode yang terbaca adalah Code 128 atau QR', async () => {
-    const barcodes = await readLabelBarcodes(pdf, workDir);
+  it('format barcode yang terbaca adalah Code 128 atau QR', () => {
     const format = barcodes.find((b) => b.text.includes(orderSn))?.format;
     expect(['CODE_128', 'QR_CODE']).toContain(format);
   }, BATAS_MS);
