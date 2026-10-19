@@ -8,6 +8,11 @@
  * lebih buruk daripada tidak ada test, karena membuat orang mengira barcode
  * sudah diperiksa padahal belum.
  *
+ * Berkas ini berakhiran `.integration.test.ts`: TIDAK ikut `npm run test`
+ * (yang harus cepat & deterministik), tetapi WAJIB dijalankan lewat
+ * `npm run test:integration` sebelum rilis. Bukan dilewati diam-diam - ada
+ * perintah tersendiri dan hasilnya terlihat.
+ *
  * Label ini berasal dari Shopee SANDBOX: alamat dan nomor teleponnya data
  * contoh, jadi tidak ada data pribadi yang ikut tersimpan.
  */
