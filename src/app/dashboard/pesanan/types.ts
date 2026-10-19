@@ -33,6 +33,16 @@ export interface StationOrder {
   orderStatus: string;
   /** Status mentah marketplace (READY_TO_SHIP / PROCESSED / …). */
   externalStatus: string | null;
+  /** Pelaku pembatalan menurut Shopee: buyer / seller / system / Ops. */
+  cancelBy: string | null;
+  cancelReason: string | null;
+  buyerCancelReason: string | null;
+  cancelRequestedAt: string | null;
+  cancelledAt: string | null;
+  /** Kategori pembatalan (DIAJUKAN = masih bisa ditanggapi). */
+  cancelCategory: 'DIAJUKAN' | 'DIBATALKAN_PEMBELI' | 'DIBATALKAN_PENJUAL' | 'DIBATALKAN_SISTEM' | null;
+  /** Risiko keterlambatan menurut tenggat kirim. */
+  lateRisk: 'TIDAK_RELEVAN' | 'AMAN' | 'BERESIKO' | 'BESOK_BATAL' | 'TERLAMBAT';
   fulfillmentId: string | null;
   fulfillmentStatus: string | null;
   awb: string | null;
@@ -68,6 +78,18 @@ export interface StationResponse {
   };
   /** Anomali yang bisa dibereskan operator (paket sudah jalan, catatan tertinggal). */
   anomali: { paketJalanBelumDitutup: number };
+  /**
+   * Angka "perlu perhatian". `pembatalanDiajukan` & `batalSistem` mengikuti
+   * rentang tanggal yang dipilih (kapan diajukan / kapan batal); sisanya
+   * dihitung dari tenggat kirim terhadap hari ini.
+   */
+  perhatian: {
+    pembatalanDiajukan: number;
+    batalSistem: number;
+    terlambat: number;
+    besokBatal: number;
+    beresiko: number;
+  };
   orders: StationOrder[];
   page: number;
   pageSize: number;

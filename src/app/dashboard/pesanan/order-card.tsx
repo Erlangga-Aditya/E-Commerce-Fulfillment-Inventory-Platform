@@ -17,6 +17,31 @@ import {
 import { Alert } from '@/components/ui';
 import { formatDate } from '@/lib/api';
 import { STAGE_LABEL, STAGE_TONE, type OrderItemRow, type StationOrder } from './types';
+import {
+  CANCEL_CATEGORY_LABEL,
+  LATE_RISK_LABEL,
+  type CancelCategory,
+  type LateRisk,
+} from '@/modules/fulfillment/domain/order-exceptions';
+
+/** Nada badge untuk risiko keterlambatan (hanya yang perlu perhatian). */
+function nadaRisiko(risk: LateRisk): string | null {
+  switch (risk) {
+    case 'TERLAMBAT':
+      return 'badge-danger';
+    case 'BESOK_BATAL':
+      return 'badge-warning';
+    case 'BERESIKO':
+      return 'badge-secondary';
+    default:
+      return null;
+  }
+}
+
+/** Nada badge untuk kategori pembatalan. */
+function nadaPembatalan(kategori: CancelCategory): string {
+  return kategori === 'DIAJUKAN' ? 'badge-warning' : 'badge-neutral';
+}
 
 /**
  * Satu kartu pesanan.
@@ -188,6 +213,16 @@ export function OrderCard({
               ) : (
                 <span className="badge badge-neutral" style={{ fontSize: 11 }}>Resi belum ada</span>
               )}
+              {o.lateRisk !== 'TIDAK_RELEVAN' && nadaRisiko(o.lateRisk) && (
+                <span className={`badge ${nadaRisiko(o.lateRisk)}`} style={{ fontSize: 11 }}>
+                  {LATE_RISK_LABEL[o.lateRisk]}
+                </span>
+              )}
+              {o.cancelCategory && (
+                <span className={`badge ${nadaPembatalan(o.cancelCategory)}`} style={{ fontSize: 11 }}>
+                  {CANCEL_CATEGORY_LABEL[o.cancelCategory]}
+                </span>
+              )}
               {urgent && hoursLeft !== null && (
                 <span className="badge badge-danger" style={{ fontSize: 11 }}>
                   {hoursLeft < 0 ? `Lewat ${Math.abs(hoursLeft)} jam` : `Sisa ${hoursLeft} jam`}
@@ -198,6 +233,31 @@ export function OrderCard({
               {o.buyerName ?? 'Pembeli Shopee'} · {o.shopName} · masuk {formatDate(o.placedAt)} · batas kirim{' '}
               {formatDate(o.shipByAt)} · {o.totalUnits} barang
             </div>
+            {o.cancelCategory && (
+              <div className="small" style={{ marginTop: 4 }}>
+                {o.cancelCategory === 'DIAJUKAN' ? (
+                  <>
+                    <strong>Pembatalan diajukan</strong>
+                    {o.buyerCancelReason || o.cancelReason ? `: ${o.buyerCancelReason ?? o.cancelReason}` : ''}
+                    {o.cancelRequestedAt ? ` · diajukan ${formatDate(o.cancelRequestedAt)}` : ''}
+                    {' · '}
+                    <a
+                      href={`https://seller.shopee.co.id/portal/sale/order/${o.externalOrderId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Tanggapi di Seller Centre
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <strong>{CANCEL_CATEGORY_LABEL[o.cancelCategory]}</strong>
+                    {o.cancelReason ? `: ${o.cancelReason}` : ''}
+                    {o.cancelledAt ? ` · ${formatDate(o.cancelledAt)}` : ''}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -50,6 +50,7 @@ def deploy(client: paramiko.SSHClient) -> int:
     perintah = (
         f'cd {APP_DIR} && '
         'tar xzf /tmp/ef8.tgz --overwrite && '
+        'npx prisma migrate deploy > /tmp/mig.log 2>&1; echo MIGRATE=$?; '
         'npx prisma generate > /tmp/gen.log 2>&1; echo GEN=$?; '
         'npm run build > /tmp/be.log 2>&1; echo BUILD_EXIT=$?; '
         'pm2 restart efulfill --update-env > /dev/null 2>&1; '

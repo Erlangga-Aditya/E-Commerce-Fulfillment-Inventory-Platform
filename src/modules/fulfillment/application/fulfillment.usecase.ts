@@ -25,6 +25,12 @@ import {
 } from '../domain/operator-workflow';
 import { placedAtFilter, type DateRange } from '../domain/date-range';
 import { belongsToBucket, classifyWorkQueue, countBuckets, type QueueBucket } from '../domain/work-queue';
+import {
+  isSystemCancelNeedsAttention,
+  resolveCancelCategory,
+  resolveLateRisk,
+  type ExceptionKategori,
+} from '../domain/order-exceptions';
 
 /** Item yang stoknya belum cukup untuk sebuah pesanan. */
 export interface StockShortfall {
@@ -903,11 +909,19 @@ export async function getFulfillmentStation(
     bucket?: QueueBucket;
     /** Rentang tanggal pesanan masuk (WIB). `{from:null,to:null}` = semua tanggal. */
     range?: DateRange;
+    /**
+     * Saring ke satu kelompok "perlu perhatian": pembatalan yang diajukan,
+     * batal oleh sistem, atau pesanan yang terlambat/berisiko terlambat.
+     */
+    kategori?: ExceptionKategori;
     page?: number;
     pageSize?: number;
   } = {},
 ) {
   const sortDir: 'asc' | 'desc' = options.sort === 'newest' ? 'desc' : 'asc';
+  const kategori = options.kategori ?? null;
+  /** Satu acuan waktu untuk seluruh perhitungan pada satu permintaan. */
+  const now = new Date();
   const kataKunci = options.search?.trim();
   const range = {
     from: options.range?.from ?? null,
@@ -1046,6 +1060,15 @@ export async function getFulfillmentStation(
       orderStatus: o.status,
       /** Status mentah marketplace (READY_TO_SHIP / PROCESSED / …). */
       externalStatus: o.externalStatus,
+      /** Pelaku pembatalan menurut Shopee (buyer/seller/system/Ops). */
+      cancelBy: o.cancelBy,
+      cancelReason: o.cancelReason,
+      buyerCancelReason: o.buyerCancelReason,
+      cancelRequestedAt: o.cancelRequestedAt?.toISOString() ?? null,
+      cancelledAt: o.cancelledAt?.toISOString() ?? null,
+      /** Kategori pembatalan & risiko keterlambatan (dihitung domain murni). */
+      cancelCategory: resolveCancelCategory({ externalStatus: o.externalStatus, cancelBy: o.cancelBy }),
+      lateRisk: resolveLateRisk({ externalStatus: o.externalStatus, shipByAt: o.shipByAt, now }),
       fulfillmentId: fo?.id ?? null,
       fulfillmentStatus: fo?.status ?? null,
       awb: shipment?.awb ?? null,
@@ -1113,6 +1136,32 @@ export async function getFulfillmentStation(
     'READY_TO_SHIP',
   ]);
   const STATUS_PAKET_KELUAR = new Set(['PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED', 'RETURNED']);
+  // ── Kartu "perlu perhatian" ───────────────────────────────────────────────
+  // Pembatalan memakai tanggal KEJADIAN yang diminta operator (kapan diajukan /
+  // kapan batal), bukan tanggal pesanan masuk. Keterlambatan tidak punya
+  // tanggal kejadian — ia dihitung dari tenggat `ship_by_date` terhadap hari ini.
+  const dalamRentang = (waktu: string | null): boolean => {
+    if (!waktu) return range.from === null && range.to === null;
+    const nilai = new Date(waktu).getTime();
+    return (range.from === null || nilai >= range.from.getTime()) && (range.to === null || nilai < range.to.getTime());
+  };
+
+  const hitungPerhatian = (daftar: typeof unified) => ({
+    pembatalanDiajukan: daftar.filter((o) => o.cancelCategory === 'DIAJUKAN' && dalamRentang(o.cancelRequestedAt)).length,
+    // Hanya batal sistem yang perlu perhatian (bukan "Unpaid Order").
+    batalSistem: daftar.filter(
+      (o) =>
+        o.cancelCategory === 'DIBATALKAN_SISTEM' &&
+        isSystemCancelNeedsAttention(o.cancelReason) &&
+        dalamRentang(o.cancelledAt),
+    ).length,
+    terlambat: daftar.filter((o) => o.lateRisk === 'TERLAMBAT').length,
+    besokBatal: daftar.filter((o) => o.lateRisk === 'BESOK_BATAL').length,
+    beresiko: daftar.filter((o) => o.lateRisk === 'BERESIKO').length,
+  });
+
+  const perhatian = hitungPerhatian(unified);
+
   const paketJalanBelumDitutup = unified.filter(
     (o) =>
       // Pesanan batal bukan pekerjaan gudang — jangan dihitung sebagai anomali.
@@ -1124,10 +1173,32 @@ export async function getFulfillmentStation(
   const bucket = options.bucket ?? 'perluDiproses';
   // `semua` sengaja tidak memakai `belongsToBucket` karena bucket itu harus
   // juga menampilkan pesanan batal & selesai (untuk ditelusuri operator).
-  const filtered =
+  const cocokKategori = (o: (typeof unified)[number]): boolean => {
+    switch (kategori) {
+      case 'pembatalan':
+        return o.cancelCategory === 'DIAJUKAN' && dalamRentang(o.cancelRequestedAt);
+      case 'batalSistem':
+        return (
+          o.cancelCategory === 'DIBATALKAN_SISTEM' &&
+          isSystemCancelNeedsAttention(o.cancelReason) &&
+          dalamRentang(o.cancelledAt)
+        );
+      case 'terlambat':
+        return o.lateRisk === 'TERLAMBAT';
+      case 'besokBatal':
+        return o.lateRisk === 'BESOK_BATAL';
+      case 'beresiko':
+        return o.lateRisk === 'BERESIKO';
+      default:
+        return true;
+    }
+  };
+
+  const filtered = (
     bucket === 'semua'
       ? unified
-      : withQueue.filter((item) => belongsToBucket(bucket, item.queue)).map((item) => item.order);
+      : withQueue.filter((item) => belongsToBucket(bucket, item.queue)).map((item) => item.order)
+  ).filter(cocokKategori);
 
   const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -1146,6 +1217,7 @@ export async function getFulfillmentStation(
       to: range.to ? range.to.toISOString() : null,
     },
     kartu,
+    perhatian,
     anomali: { paketJalanBelumDitutup },
     orders: filtered.slice(mulai, mulai + pageSize),
     page,

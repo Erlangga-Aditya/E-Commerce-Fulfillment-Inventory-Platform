@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   ArrowDownWideNarrow,
   ArrowUpWideNarrow,
+  Ban,
+  Clock,
   Boxes,
   CalendarDays,
   CheckCircle2,
@@ -27,6 +29,7 @@ import { BarcodeScanner, playScanFeedback } from '@/components/barcode-scanner';
 import { StockPanel } from '@/components/stock-panel';
 import { RANGE_LABEL, RANGE_PRESETS, type RangePreset } from '@/modules/fulfillment/domain/date-range';
 import type { QueueBucket } from '@/modules/fulfillment/domain/work-queue';
+import type { ExceptionKategori } from '@/modules/fulfillment/domain/order-exceptions';
 import { OrderCard } from './order-card';
 import { type ScanOutcome, type StationOrder, type StationResponse } from './types';
 
@@ -110,6 +113,8 @@ export default function PesananPengirimanPage() {
 
   const [sort, setSort] = useState<'oldest' | 'newest'>('oldest');
   const [bucket, setBucket] = useState<QueueBucket>('perluDiproses');
+  /** Saringan "perlu perhatian": pembatalan / keterlambatan. */
+  const [kategori, setKategori] = useState<ExceptionKategori | null>(null);
   const [range, setRange] = useState<RangePreset>('all');
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState('');
@@ -132,7 +137,14 @@ export default function PesananPengirimanPage() {
   const cacheRef = useRef(new Map<string, { at: number; data: StationResponse }>());
 
   const buildUrl = useCallback(
-    (opts: { sort: 'oldest' | 'newest'; bucket: QueueBucket; range: RangePreset; page: number; search: string }) => {
+    (opts: {
+      sort: 'oldest' | 'newest';
+      bucket: QueueBucket;
+      range: RangePreset;
+      page: number;
+      search: string;
+      kategori?: ExceptionKategori | null;
+    }) => {
       const params = new URLSearchParams({
         sort: opts.sort,
         bucket: opts.bucket,
@@ -140,6 +152,7 @@ export default function PesananPengirimanPage() {
         page: String(opts.page),
       });
       if (opts.search.trim()) params.set('search', opts.search.trim());
+      if (opts.kategori) params.set('kategori', opts.kategori);
       return `/api/v1/fulfillment/station?${params.toString()}`;
     },
     [],
@@ -153,6 +166,7 @@ export default function PesananPengirimanPage() {
         range?: RangePreset;
         page?: number;
         search?: string;
+        kategori?: ExceptionKategori | null;
         /** true = abaikan cache (tombol "Muat Ulang" / setelah aksi). */
         force?: boolean;
       } = {},
@@ -163,6 +177,7 @@ export default function PesananPengirimanPage() {
         range: opts.range ?? range,
         page: opts.page ?? page,
         search: opts.search ?? search,
+        kategori: opts.kategori !== undefined ? opts.kategori : kategori,
       };
       const url = buildUrl(target);
 
@@ -196,7 +211,7 @@ export default function PesananPengirimanPage() {
         if (!controller.signal.aborted) setLoading(false);
       }
     },
-    [buildUrl, bucket, page, range, search, sort],
+    [buildUrl, bucket, kategori, page, range, search, sort],
   );
 
   // Muat pertama + muat ulang saat filter berubah.
@@ -247,6 +262,19 @@ export default function PesananPengirimanPage() {
 
   const gantiBucket = (next: QueueBucket) => {
     setBucket(next);
+    setPage(1);
+    setLoading(true);
+  };
+
+  /**
+   * Saringan "perlu perhatian". Membalik bucket ke `semua` karena pembatalan
+   * dan pesanan selesai tidak masuk antrean kerja biasa — tanpa ini, kartu
+   * Pembatalan/Batal Sistem akan selalu kosong.
+   */
+  const gantiKategori = (next: ExceptionKategori) => {
+    const berikut = kategori === next ? null : next;
+    setKategori(berikut);
+    setBucket('semua');
     setPage(1);
     setLoading(true);
   };
@@ -512,6 +540,56 @@ export default function PesananPengirimanPage() {
     },
   ];
 
+  const perhatianList: Array<{
+    key: ExceptionKategori;
+    label: string;
+    hint: string;
+    nilai: number;
+    tone: string;
+    icon: typeof AlertTriangle;
+  }> = [
+    {
+      key: 'pembatalan',
+      label: 'Pembatalan Diajukan',
+      hint: 'Pembeli minta batal — perlu ditanggapi',
+      nilai: data?.perhatian.pembatalanDiajukan ?? 0,
+      tone: 'var(--warning)',
+      icon: AlertTriangle,
+    },
+    {
+      key: 'batalSistem',
+      label: 'Batal oleh Sistem',
+      hint: 'Dibatalkan otomatis Shopee (mis. terlambat kirim)',
+      nilai: data?.perhatian.batalSistem ?? 0,
+      tone: 'var(--danger)',
+      icon: Ban,
+    },
+    {
+      key: 'terlambat',
+      label: 'Terlambat',
+      hint: 'Tenggat kirim sudah lewat',
+      nilai: data?.perhatian.terlambat ?? 0,
+      tone: 'var(--danger)',
+      icon: Clock,
+    },
+    {
+      key: 'besokBatal',
+      label: 'Besok Batal',
+      hint: 'Belum ada resi, tenggat ≤ 24 jam',
+      nilai: data?.perhatian.besokBatal ?? 0,
+      tone: 'var(--warning)',
+      icon: Clock,
+    },
+    {
+      key: 'beresiko',
+      label: 'Beresiko Terlambat',
+      hint: 'Resi sudah ada, menunggu penjemputan',
+      nilai: data?.perhatian.beresiko ?? 0,
+      tone: 'var(--secondary)',
+      icon: Clock,
+    },
+  ];
+
   return (
     <div style={{ paddingBottom: 60 }}>
       <PageHeader
@@ -757,6 +835,51 @@ export default function PesananPengirimanPage() {
             );
           })}
         </div>
+
+        {/* ── Perlu perhatian: pembatalan & keterlambatan ────────────────── */}
+        <div className="queue-cards" style={{ marginTop: 10 }}>
+          {perhatianList.map((k) => {
+            const Icon = k.icon;
+            const aktif = kategori === k.key;
+            return (
+              <button
+                key={k.key}
+                type="button"
+                className={`queue-card ${aktif ? 'is-active' : ''}`}
+                style={{ borderLeftColor: k.tone }}
+                onClick={() => gantiKategori(k.key)}
+                aria-pressed={aktif}
+                title={`Tampilkan: ${k.label}`}
+              >
+                <span className="queue-card-head">
+                  <Icon size={14} aria-hidden style={{ color: k.tone }} />
+                  <span>{k.label}</span>
+                </span>
+                <span className="queue-card-value" style={{ color: k.tone }}>
+                  {rupiahNol(k.nilai)}
+                </span>
+                <span className="queue-card-hint">{k.hint}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {kategori && (
+          <div
+            style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+            className="small"
+          >
+            <span className="muted">
+              Menampilkan: <strong>{perhatianList.find((k) => k.key === kategori)?.label}</strong>
+              {kategori === 'pembatalan' || kategori === 'batalSistem'
+                ? ' — mengikuti rentang tanggal di atas'
+                : ' — dihitung dari tenggat kirim'}
+            </span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => gantiKategori(kategori)}>
+              Hapus saringan
+            </button>
+          </div>
+        )}
 
         {bucket !== 'semua' && (
           <button

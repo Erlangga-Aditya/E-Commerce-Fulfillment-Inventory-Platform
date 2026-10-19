@@ -415,6 +415,11 @@ export async function triggerOrderSync(
         // Status mentah disimpan apa adanya: inilah yang membedakan
         // "Belum diproses" (READY_TO_SHIP) dari "Telah diproses" (PROCESSED).
         externalStatus: mOrder.rawStatus || undefined,
+        // Jejak pembatalan (siapa & kenapa) — dasar kartu Pembatalan Diajukan
+        // dan Batal oleh Sistem.
+        cancelBy: mOrder.cancelBy ?? undefined,
+        cancelReason: mOrder.cancelReason ?? undefined,
+        buyerCancelReason: mOrder.buyerCancelReason ?? undefined,
         // Jumlah paket asli Shopee — dasar keputusan package_number di ship_order.
         ...(mOrder.packageCount != null ? { packageCount: mOrder.packageCount } : {}),
         items,
@@ -695,6 +700,11 @@ export async function triggerHistoricalSync(
         // Status mentah disimpan apa adanya: inilah yang membedakan
         // "Belum diproses" (READY_TO_SHIP) dari "Telah diproses" (PROCESSED).
         externalStatus: mOrder.rawStatus || undefined,
+        // Jejak pembatalan (siapa & kenapa) — dasar kartu Pembatalan Diajukan
+        // dan Batal oleh Sistem.
+        cancelBy: mOrder.cancelBy ?? undefined,
+        cancelReason: mOrder.cancelReason ?? undefined,
+        buyerCancelReason: mOrder.buyerCancelReason ?? undefined,
             ...(mOrder.packageCount != null ? { packageCount: mOrder.packageCount } : {}),
             items,
             currency: mOrder.payment?.currency ?? undefined,

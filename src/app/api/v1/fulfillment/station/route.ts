@@ -1,6 +1,7 @@
 import { type NextRequest } from 'next/server';
 import { getFulfillmentStation } from '@/modules/fulfillment/application/fulfillment.usecase';
 import { isQueueBucket } from '@/modules/fulfillment/domain/work-queue';
+import { isExceptionKategori } from '@/modules/fulfillment/domain/order-exceptions';
 import { isRangePreset, resolveRangePreset } from '@/modules/fulfillment/domain/date-range';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import {
@@ -43,6 +44,7 @@ export async function GET(request: NextRequest) {
     const rangeParam = getQueryParam(request, 'range');
     const preset = isRangePreset(rangeParam) ? rangeParam : 'all';
     const bucketParam = getQueryParam(request, 'bucket');
+    const kategoriParam = getQueryParam(request, 'kategori');
     const bucket = isQueueBucket(bucketParam) ? bucketParam : 'perluDiproses';
 
     const station = await getFulfillmentStation(ctx.tenantId, {
@@ -50,6 +52,7 @@ export async function GET(request: NextRequest) {
       bucket,
       range: resolveRangePreset(preset, new Date()),
       search: getQueryParam(request, 'search'),
+      ...(isExceptionKategori(kategoriParam) ? { kategori: kategoriParam } : {}),
       page,
       pageSize,
     });

@@ -11,14 +11,6 @@
  */
 import { resolveOperatorStage, type OperatorStage } from './operator-workflow';
 
-/** Tahap yang berarti pesanan MASIH menunggu pekerjaan gudang. */
-export const WORK_STAGES: readonly OperatorStage[] = [
-  'BARU',
-  'MENUNGGU_STOK',
-  'SIAP_DIKEMAS',
-  'SIAP_KIRIM',
-] as const;
-
 /** Shopee: pesanan sudah dibayar, penjual BELUM mengatur pengiriman. */
 const EXTERNAL_AWAITING_SHIP = new Set(['READY_TO_SHIP']);
 /** Shopee: pengiriman sudah diatur (resi terbit), menunggu dijemput kurir. */
@@ -47,6 +39,9 @@ export const QUEUE_BUCKETS: readonly QueueBucket[] = ['semua', 'baru', 'sudahRes
 export function isQueueBucket(value: string | null | undefined): value is QueueBucket {
   return typeof value === 'string' && (QUEUE_BUCKETS as readonly string[]).includes(value);
 }
+
+/** Tahap yang berarti pesanan MASIH menunggu pekerjaan gudang (cadangan). */
+const WORK_STAGES: readonly OperatorStage[] = ['BARU', 'MENUNGGU_STOK', 'SIAP_DIKEMAS', 'SIAP_KIRIM'] as const;
 
 export interface WorkQueueInput {
   orderStatus: string;

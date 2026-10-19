@@ -42,6 +42,12 @@ export const ImportOrderSchema = z.object({
    * supaya "Belum diproses" dan "Telah diproses" bisa dibedakan lagi.
    */
   externalStatus: z.string().max(40).nullable().optional(),
+  /** Pelaku pembatalan: buyer / seller / system / Ops (dari marketplace). */
+  cancelBy: z.string().max(20).nullable().optional(),
+  /** Kode alasan pembatalan dari marketplace. */
+  cancelReason: z.string().max(80).nullable().optional(),
+  /** Alasan versi pembeli saat mengajukan pembatalan. */
+  buyerCancelReason: z.string().max(255).nullable().optional(),
   // ── Rincian uang dari marketplace (opsional: tidak semua pesanan punya) ──
   buyerNote: z.string().max(2000).nullable().optional(),
   packageNumber: z.string().max(120).nullable().optional(),
@@ -96,6 +102,9 @@ export async function importOrder(
     shopId,
     externalOrderId,
     externalStatus,
+    cancelBy,
+    cancelReason,
+    buyerCancelReason,
     items,
     buyerNote,
     packageNumber,
@@ -171,9 +180,30 @@ export async function importOrder(
     const externalStatusChanged =
       externalStatus !== undefined && externalStatus !== null && externalStatus !== existing.externalStatus;
 
+    // Jejak waktu pembatalan: dicatat SAAT PERTAMA KALI terlihat dan tidak
+    // pernah ditimpa. Inilah dasar filter tanggal "pembatalan diajukan hari ini".
+    const cancelRequestedAt =
+      externalStatus === 'IN_CANCEL' && !existing.cancelRequestedAt ? new Date() : undefined;
+    const cancelledAt =
+      externalStatus === 'CANCELLED' && !existing.cancelledAt ? new Date() : undefined;
+
+    // Hanya ditulis bila memang berubah supaya sinkronisasi tidak menulis
+    // ulang baris yang sama setiap 60 detik.
+    const cancelFields: Record<string, string> = {};
+    if (cancelBy !== undefined && cancelBy !== null && cancelBy !== existing.cancelBy) cancelFields.cancelBy = cancelBy;
+    if (cancelReason !== undefined && cancelReason !== null && cancelReason !== existing.cancelReason) {
+      cancelFields.cancelReason = cancelReason;
+    }
+    if (buyerCancelReason !== undefined && buyerCancelReason !== null && buyerCancelReason !== existing.buyerCancelReason) {
+      cancelFields.buyerCancelReason = buyerCancelReason;
+    }
+
     const hasFieldUpdates =
       Object.keys(moneyFields).length > 0 ||
       Object.keys(contactFields).length > 0 ||
+      Object.keys(cancelFields).length > 0 ||
+      Boolean(cancelRequestedAt) ||
+      Boolean(cancelledAt) ||
       externalStatusChanged;
 
     if (statusChanged || hasFieldUpdates) {
@@ -185,6 +215,9 @@ export async function importOrder(
             ...moneyFields,
             ...(statusChanged ? { status: incoming as OrderStatus } : {}),
             ...(externalStatusChanged ? { externalStatus } : {}),
+            ...cancelFields,
+            ...(cancelRequestedAt ? { cancelRequestedAt } : {}),
+            ...(cancelledAt ? { cancelledAt } : {}),
           },
         });
         if (statusChanged) {
@@ -243,6 +276,11 @@ export async function importOrder(
         status: status as OrderStatus,
         // Status mentah marketplace hanya ditulis bila memang dikirim.
         ...(externalStatus ? { externalStatus } : {}),
+        ...(cancelBy ? { cancelBy } : {}),
+        ...(cancelReason ? { cancelReason } : {}),
+        ...(buyerCancelReason ? { buyerCancelReason } : {}),
+        ...(externalStatus === 'IN_CANCEL' ? { cancelRequestedAt: new Date() } : {}),
+        ...(externalStatus === 'CANCELLED' ? { cancelledAt: new Date() } : {}),
         placedAt: orderData.placedAt,
         shipByAt: orderData.shipByAt ?? null,
         buyerName: orderData.buyerName ?? null,
