@@ -1115,6 +1115,8 @@ export async function getFulfillmentStation(
   const STATUS_PAKET_KELUAR = new Set(['PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED', 'RETURNED']);
   const paketJalanBelumDitutup = unified.filter(
     (o) =>
+      // Pesanan batal bukan pekerjaan gudang — jangan dihitung sebagai anomali.
+      o.orderStatus !== 'CANCELLED' &&
       STATUS_PAKET_KELUAR.has(String(o.shipmentStatus ?? '')) &&
       STATUS_MASIH_DI_GUDANG.has(String(o.fulfillmentStatus ?? '')),
   ).length;

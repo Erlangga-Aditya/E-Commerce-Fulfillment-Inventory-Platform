@@ -82,10 +82,13 @@ export async function reconcileShippedOrders(
         },
       },
       shipments: { orderBy: { createdAt: 'desc' }, take: 1, select: { awb: true, status: true } },
+      // SEMUA fulfillment order yang masih terbuka, bukan hanya yang terbaru.
+      // Satu pesanan bisa punya lebih dari satu (hasil "Proses ke Fulfillment"
+      // berulang); kalau hanya yang terbaru ditutup, yang lama tetap membuat
+      // pesanan tampak "masih di gudang" dan terus memicu peringatan.
       fulfillmentOrders: {
         where: { status: { in: [...STATUS_MASIH_DI_GUDANG] } },
-        orderBy: { createdAt: 'desc' },
-        take: 1,
+        orderBy: { createdAt: 'asc' },
         select: { id: true, status: true, warehouseId: true },
       },
     },
@@ -100,8 +103,8 @@ export async function reconcileShippedOrders(
   let dilewati = 0;
 
   for (const order of orders) {
-    const fo = order.fulfillmentOrders[0] ?? null;
-    if (!fo) {
+    const terbuka = order.fulfillmentOrders;
+    if (terbuka.length === 0) {
       // Tidak ada catatan fulfillment yang tertinggal → bukan urusan rekonsiliasi.
       dilewati += 1;
       continue;
@@ -118,31 +121,32 @@ export async function reconcileShippedOrders(
       awb: shipment?.awb ?? null,
       phase,
       phaseLabel: phase,
-      fulfillmentStatus: fo.status,
+      fulfillmentStatus: terbuka.map((f) => f.status).join(', '),
       targetStatus,
       unitsToDeduct,
     });
 
     if (!apply) continue;
 
-    const hasil = await tutupSatuPesanan({
-      tenantId,
-      actorId: options.actorId,
-      order,
-      fulfillmentOrderId: fo.id,
-      warehouseId: fo.warehouseId,
-      statusLama: fo.status,
-      targetStatus,
-    });
-
-    if (!hasil) {
-      dilewati += 1;
-      continue;
+    let adaYangDitutup = false;
+    for (const fo of terbuka) {
+      const hasil = await tutupSatuPesanan({
+        tenantId,
+        actorId: options.actorId,
+        order,
+        fulfillmentOrderId: fo.id,
+        warehouseId: fo.warehouseId,
+        statusLama: fo.status,
+        targetStatus,
+      });
+      if (!hasil) continue;
+      adaYangDitutup = true;
+      unitStokDipotong += hasil.units;
+      if (hasil.negatif) varianStokMinus += 1;
     }
 
-    ditutup += 1;
-    unitStokDipotong += hasil.units;
-    if (hasil.negatif) varianStokMinus += 1;
+    if (adaYangDitutup) ditutup += 1;
+    else dilewati += 1;
   }
 
   if (apply && ditutup > 0) {
