@@ -101,18 +101,30 @@ menyentuh stok.
 
 ## 5. Roadmap
 
-### Fase 1 — Persetujuan pembatalan oleh owner (belum)
-- [ ] `POST /api/v1/orders/[orderId]/cancellation` — hanya OWNER (`order.cancel_buyer_request`)
-- [ ] Adapter Shopee: `order/cancel_order` (`order_sn`, `cancel_reason`)
-- [ ] Penjagaan: hanya `external_status = IN_CANCEL`; konfirmasi 2 langkah; audit `buyer_cancellation_approved`
-- [ ] Setelah sukses: sinkronkan ulang pesanan itu, tampilkan hasil apa adanya (termasuk penolakan Shopee)
-- [ ] Tombol "Setujui pembatalan" + tautan Seller Centre; tombol "Tolak" **tidak ada** (D5)
-- Selesai bila: pesanan uji benar-benar batal di Shopee dan `cancel_by=seller` tercatat, audit berisi aktor.
+### Fase 1 — Persetujuan pembatalan oleh owner (selesai, kecuali uji happy-path)
+- [x] `POST /api/v1/orders/[orderId]/cancellation` — izin `order.cancel` **dan** peran OWNER
+- [x] Adapter Shopee: `order/cancel_order` (`order_sn`, `cancel_reason: OTHERS`)
+- [x] Aturan murni `domain/cancellation.ts` + 7 test (bukan owner, bukan pengajuan, sudah final, paket sudah jalan)
+- [x] Audit `buyer_cancellation_approved` + pelepasan reservasi stok pesanan itu
+- [x] Tombol "Setujui pembatalan" hanya tampil bila server mengirim `izin.setujuiPembatalan`;
+      tombol "Tolak" **tidak ada** (D5)
+- [x] Terverifikasi di produksi: `izin.setujuiPembatalan=true` untuk owner, dan endpoint
+      menolak dengan pesan jelas saat pesanan bukan pengajuan (HTTP 422)
+- [ ] **Uji happy-path** (pesanan benar-benar batal dengan `cancel_by=seller`) menunggu
+      ada pengajuan baru — saat verifikasi, satu-satunya pengajuan sudah dibatalkan
+      Shopee sendiri (`cancel_by=buyer`) karena melewati tenggat tanggapan
+- **Temuan penting:** pengajuan pembatalan pembeli punya tenggat. Kalau owner tidak
+  menanggapi, Shopee menyetujuinya sendiri (`cancel_by=buyer`). Karena itu kartu
+  "Pembatalan Diajukan" harus ditindaklanjuti hari itu juga.
 
-### Fase 2 — Jejak aktor per tahap (belum)
-- [ ] Simpan `pickedById`, `packedById`, `handedOverById` + waktunya pada fulfillment order
-- [ ] Endpoint tindakan mengisi kolom itu (bukan hanya audit)
-- Selesai bila: satu paket bisa dicetak jejaknya (siapa, kapan, tahap apa).
+### Fase 2 — Jejak aktor per tahap (selesai)
+- [x] Kolom `pickedById/pickedAt`, `packedById/packedAt`, `handedOverById/handedOverAt`
+      + indeks untuk laporan per-orang
+- [x] Diisi oleh usecase aksi (picking, packing, handover), bukan hanya audit log
+- [x] Dikirim ke UI sebagai `order.aktor` (id + nama) dan ditampilkan di kartu pesanan
+- [x] Terverifikasi: migrasi `MIGRATE=0`, kolom terpasang, 344 test lulus
+- Catatan: pesanan **lama** tidak punya jejak ini (kolomnya baru) — terisi untuk aksi
+  berikutnya, bukan hasil backfill.
 
 ### Fase 3 — Dashboard operasional owner (belum)
 - [ ] Kartu: Perlu Produksi · Siap Diambil · Sedang Dipacking · Siap Diserahkan · Diserahkan ke Kurir · Diterima Kurir Shopee · Gagal

@@ -13,6 +13,7 @@ import {
   ScanLine,
   Truck,
   TruckIcon,
+  XCircle,
 } from 'lucide-react';
 import { Alert } from '@/components/ui';
 import { formatDate } from '@/lib/api';
@@ -164,6 +165,11 @@ export interface OrderCardProps {
   onFocusScanner: () => void;
   onPrintLabel: () => void;
   onAddStock: (variantId: string | null) => void;
+  /**
+   * Menyetujui pembatalan pembeli. Hanya dikirim server bila peran pengguna
+   * OWNER (`data.izin.setujuiPembatalan`) — UI tidak menebak sendiri.
+   */
+  onSetujuiPembatalan?: () => void;
 }
 
 export function OrderCard({
@@ -180,6 +186,7 @@ export function OrderCard({
   onFocusScanner,
   onPrintLabel,
   onAddStock,
+  onSetujuiPembatalan,
 }: OrderCardProps) {
   const w = o.workflow;
   const hoursLeft =
@@ -233,6 +240,14 @@ export function OrderCard({
               {o.buyerName ?? 'Pembeli Shopee'} · {o.shopName} · masuk {formatDate(o.placedAt)} · batas kirim{' '}
               {formatDate(o.shipByAt)} · {o.totalUnits} barang
             </div>
+            {(o.aktor.pickedByNama || o.aktor.packedByNama || o.aktor.handedOverByNama) && (
+              <div className="small muted" style={{ marginTop: 4 }}>
+                {/* Jejak aktor: dasar pembayaran packer & kurir internal per paket. */}
+                {o.aktor.pickedByNama ? <>Diambil: {o.aktor.pickedByNama} · </> : null}
+                {o.aktor.packedByNama ? <>Dipacking: {o.aktor.packedByNama} · </> : null}
+                {o.aktor.handedOverByNama ? <>Diserahkan: {o.aktor.handedOverByNama}</> : null}
+              </div>
+            )}
             {o.cancelCategory && (
               <div className="small" style={{ marginTop: 4 }}>
                 {o.cancelCategory === 'DIAJUKAN' ? (
@@ -262,6 +277,19 @@ export function OrderCard({
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {o.cancelCategory === 'DIAJUKAN' && onSetujuiPembatalan && (
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={busyKey === `batal-${o.orderId}`}
+              title="Membatalkan pesanan di Shopee (tercatat sebagai penjual). Hanya pemilik toko."
+              onClick={onSetujuiPembatalan}
+            >
+              <XCircle size={13} aria-hidden />
+              <span>{busyKey === `batal-${o.orderId}` ? 'Memproses…' : 'Setujui pembatalan'}</span>
+            </button>
+          )}
+
           {w.nextAction === 'ARRANGE_SHIPMENT' && (
             <button
               type="button"

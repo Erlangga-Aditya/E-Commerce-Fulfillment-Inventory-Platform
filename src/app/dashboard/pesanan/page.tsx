@@ -410,6 +410,36 @@ export default function PesananPengirimanPage() {
    * transit / diterima). Tanpa ini, scan resi paket tersebut berhenti di
    * pemeriksaan stok dan menampilkan "harus tambah stok".
    */
+  /**
+   * Menyetujui pembatalan yang diajukan pembeli. Konfirmasi dulu, karena
+   * efeknya membatalkan pesanan di Shopee dan melepas stok.
+   */
+  async function setujuiPembatalan(orderId: string, externalOrderId: string) {
+    const yakin = window.confirm(
+      `Setujui pembatalan pesanan ${externalOrderId}?\n\n` +
+        'Pesanan akan dibatalkan di Shopee (tercatat sebagai penjual) dan stok yang ' +
+        'ditahan pesanan ini dilepas. Tindakan ini tidak bisa dibatalkan dari aplikasi.',
+    );
+    if (!yakin) return;
+
+    setBusyKey(`batal-${orderId}`);
+    setNotice(null);
+    try {
+      const res = await api<{ message: string }>(`/api/v1/orders/${orderId}/cancellation`, {
+        method: 'POST',
+        body: { operation: 'ACCEPT' },
+      });
+      setOutcome(null);
+      cacheRef.current.clear();
+      await load({ force: true });
+      setNotice({ tone: 'success', text: res.message });
+    } catch (e) {
+      setNotice({ tone: 'danger', text: (e as Error).message });
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   async function tutupPaketSudahDikirim() {
     setReconciling(true);
     setNotice(null);
@@ -1065,6 +1095,11 @@ export default function PesananPengirimanPage() {
               }
               onFocusScanner={() => focusScannerForOrder(o)}
               onPrintLabel={() => void handlePrintOfficialLabel(o.orderId, o.externalOrderId)}
+              onSetujuiPembatalan={
+                data?.izin.setujuiPembatalan
+                  ? () => void setujuiPembatalan(o.orderId, o.externalOrderId)
+                  : undefined
+              }
               onAddStock={(variantId) => {
                 setStockVariantId(variantId);
                 setStockOpen(true);

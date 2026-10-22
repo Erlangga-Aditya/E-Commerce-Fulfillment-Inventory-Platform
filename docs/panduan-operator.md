@@ -164,7 +164,7 @@ tenggat kirim terhadap hari ini).
 
 | Kartu | Artinya | Yang dilakukan |
 |---|---|---|
-| **Pembatalan Diajukan** | Pembeli minta batal (`IN_CANCEL`), belum final | Cek alasannya, lalu tanggapi di Seller Centre (tautan di kartu pesanan). Tombol setujui langsung dari aplikasi menyusul. |
+| **Pembatalan Diajukan** | Pembeli minta batal (`IN_CANCEL`), belum final | **Tanggapi hari itu juga.** Owner bisa menekan "Setujui pembatalan" di kartu pesanan (tercatat sebagai penjual, stok otomatis dilepas). Kalau dibiarkan lewat tenggat, Shopee menyetujuinya sendiri. |
 | **Batal oleh Sistem** | Shopee membatalkan otomatis, mis. "Seller did not Ship" | Tidak ada yang bisa diproses; ini catatan keterlambatan yang sudah terjadi |
 | **Terlambat** | Tenggat kirim sudah lewat, paket belum diserahkan | Kirim hari ini atau batalkan sendiri supaya tidak dibatalkan sistem |
 | **Besok Batal** | Belum ada resi, tenggat ≤ 24 jam | Prioritas tertinggi: ambil resi sekarang |
