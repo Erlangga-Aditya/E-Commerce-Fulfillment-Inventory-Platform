@@ -396,6 +396,12 @@ model Order {
   /// Rincian mentah dari Shopee (cadangan bila ada field baru).
   incomeJson           Json?          @map("income_json")
   // Priority fields
+  /// Penundaan oleh owner: pesanan sengaja tidak dikerjakan sampai waktu ini.
+  /// Disimpan sebagai data (bukan hanya audit) supaya saran urutan kerja benar.
+  deferredUntil        DateTime?      @map("deferred_until")
+  deferReason          String?        @map("defer_reason")
+  deferredById         String?        @map("deferred_by_id")
+
   priorityScore        Float?         @map("priority_score")
   priorityLevel        PriorityLevel? @map("priority_level")
   priorityRuleVersion  String?        @map("priority_rule_version")

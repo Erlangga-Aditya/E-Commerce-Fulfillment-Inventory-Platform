@@ -143,25 +143,35 @@ menyentuh stok.
 - [ ] Tabel jejak per pesanan (timeline) — menyusul bersama Fase 5
 - Ukur keberhasilan: angka `hari ini` cocok dengan hitungan manual satu hari kerja.
 
-### Fase 4 — Pemilihan pesanan oleh owner (belum)
-- [ ] Daftar "Menunggu dipilih" dengan saran urutan: batas kirim terdekat, stok tersedia, prioritas
-- [ ] Aksi "Kerjakan"/"Tunda" (alasan ditunda tercatat + aktor)
-- [ ] Pilih massal → masuk antrean kerja; yang belum ada stok otomatis `WAITING_STOCK`
-- Selesai bila: owner bisa memilih 20 pesanan sekaligus dan antrean kerja mengikuti.
+### Fase 4 — Pemilihan pesanan oleh owner (selesai)
+- [x] `GET/POST /api/v1/fulfillment/selection` + `domain/owner-selection.ts` (10 test)
+- [x] Urutan dari **batas kirim terdekat**, tanpa batas kirim di belakang, seri → pesanan lebih dulu masuk
+- [x] "Kerjakan" memakai `processOrderForFulfillment` (stok kurang → `WAITING_STOCK`, dilaporkan per pesanan)
+- [x] "Tunda 6 jam" wajib alasan ≥ 8 karakter, disimpan di kolom (`deferred_until`, `defer_reason`,
+      `deferred_by_id`) sehingga saran benar-benar mengecualikannya; "Kerjakan" menghapus penundaan
+- [x] Batas 50 pesanan sekali proses; kegagalan satu pesanan tidak membatalkan yang lain
+- [x] Panel di halaman Pesanan + tombol "Daftar produksi" (lihat Fase 5)
+- [x] Terverifikasi produksi: saran keluar urut (`Terlambat 28 jam → Terlambat 4 jam → Tersisa 3 jam`),
+      validasi menolak TUNDA tanpa alasan dan aksi tak dikenal (HTTP 422)
 
-### Fase 5 — Daftar produksi (PDF) (belum)
-- [ ] `GET /api/v1/fulfillment/production-list.pdf?from=&to=` (memakai `pdf-lib`)
-- [ ] Isi: nomor pesanan, produk, varian/jilid, qty, batas kirim; dikelompokkan per SKU dengan total
-- [ ] "Batch produksi" agar PDF yang dicetak dua kali tidak memicu produksi ganda
-- [ ] Kolom tanda tangan tim produksi
-- Selesai bila: tim produksi menerima satu lembar untuk satu batch dan statusnya terlacak.
+### Fase 5 — Daftar produksi (PDF) (selesai, kecuali pelacakan batch)
+- [x] `GET /api/v1/fulfillment/production-list` → PDF A4 (`pdf-lib`), hanya FO `WAITING_STOCK`
+- [x] Dikelompokkan **per SKU** dengan total unit, di dalamnya daftar pesanan urut batas kirim
+- [x] Kolom tanda tangan "diserahkan / diterima tim produksi" + kode batch harian (`PROD-YYYYMMDD`)
+- [x] `amanUntukPdf()` membersihkan karakter di luar Latin-1 (emoji, kutip melengkung) — tanpa ini
+      `pdf-lib` melempar error dan seluruh dokumen gagal
+- [x] Audit `production_list_printed` setiap unduhan
+- [x] Terverifikasi produksi: HTTP 200, `application/pdf`, 10.433 byte, header `%PDF`
+- [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda —
+      saat ini PDF memuat kode batch tetapi belum mengunci pesanan
 
 ### Fase 6 — Perapian & operasional (sebagian)
 - [x] Hapus route `historical-sync` + tombol "Tarik Data Historis"
 - [x] Hapus 12 skrip sekali-pakai; sisakan `vps-health.sh` + helper deploy
 - [x] Purge binlog + retensi 2 hari (disk 100% → 10%)
 - [x] Pisahkan test integrasi dari gate harian
-- [ ] `pm2 install pm2-logrotate` (batas 10 MB × 5) + cek disk mingguan
+- [x] `pm2-logrotate`: 10 MB per berkas, simpan 5, kompres, rotasi harian (`scripts/vps-setup-logrotate.sh`)
+- [ ] Cek disk mingguan otomatis (cron) — alatnya sudah ada: `scripts/vps-health.sh`
 - [ ] Backfill `external_status` **tidak perlu** (0 pesanan aktif tanpa status — terukur)
 
 ---

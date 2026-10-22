@@ -31,6 +31,7 @@ import { RANGE_LABEL, RANGE_PRESETS, type RangePreset } from '@/modules/fulfillm
 import type { QueueBucket } from '@/modules/fulfillment/domain/work-queue';
 import type { ExceptionKategori } from '@/modules/fulfillment/domain/order-exceptions';
 import { OrderCard } from './order-card';
+import { SelectionPanel } from './selection-panel';
 import { type ScanOutcome, type StationOrder, type StationResponse } from './types';
 
 /**
@@ -839,7 +840,9 @@ export default function PesananPengirimanPage() {
           {loading && data ? <span className="small muted">memperbarui…</span> : null}
         </div>
 
-        <div className="queue-cards">
+        <SelectionPanel onSelesai={() => void load({ force: true })} />
+
+      <div className="queue-cards">
           {kartuList.map((k) => {
             const Icon = k.icon;
             const aktif = bucket === k.key;
