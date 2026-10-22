@@ -204,8 +204,16 @@ cetak lembar produksi** (lihat Fase 5).
       Akar masalah: webhook `order_status_push` hanya memperbarui `order.status` dan
       tidak menutup `FulfillmentOrder` (jalur `importOrder` sudah benar sejak awal).
       Solusi: webhook kini memanggil `releaseReservationsForOrder` +
-      `markFulfillmentOrdersException` (idempoten); data lama dibereskan lewat
-      `scripts/backfill-tutup-fulfillment-batal.sh`.
+      `markFulfillmentOrdersException` (idempoten); `importOrder` juga menyembuhkan
+      data batal lama (kondisi `existing.status !== 'CANCELLED'` dihapus — idempoten);
+      data lama dibereskan lewat `scripts/backfill-tutup-fulfillment-batal.sh`
+      (crash-safe per pesanan): 9 baris terakhir ditutup, `WAITING_STOCK` = 14,
+      yatim = 0.
+- [x] **Definisi daftar produksi = antrean kerja (badge)**. Dulu hanya `WAITING_STOCK`
+      sehingga beda dengan angka "Perlu Diproses" di menu (28). Kini pemilihan memakai
+      `classifyWorkQueue` yang sama dengan halaman Pesanan: pesanan batal keluar,
+      pesanan stok-ada (SIAP_DIKEMAS) ikut masuk. Terverifikasi produksi:
+      `daftar produksi = 28 pesanan / 38 unit / 14 baris` = angka badge.
 - [x] **Verifikasi sumber kebenaran**: full-sync dari Shopee setelah perbaikan →
       `orders: COMPLETED, recordsWritten=0` — 23 pesanan tersisa memang masih CONFIRMED
       menurut API Shopee; 5 di antaranya sudah lewat `shipByAt` = isi section (prioritas

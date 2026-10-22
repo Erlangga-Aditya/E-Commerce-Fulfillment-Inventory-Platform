@@ -8,6 +8,7 @@ import {
   type BarisProduksi,
   type DaftarProduksi,
 } from '../domain/production-list';
+import { classifyWorkQueue } from '../domain/work-queue';
 
 export interface PesananMendesak {
   orderId: string;
@@ -37,40 +38,68 @@ export async function ambilDataProduksi(
   tenantId: string,
   opsi: { orderIds?: string[]; limit?: number } = {},
 ): Promise<DataProduksi> {
-  const fo = await prisma.fulfillmentOrder.findMany({
+  // ── Pemilihan pesanan: SATU SUMBER KEBENARAN dengan badge "Perlu Diproses".
+  // Dulu daftar ini hanya mengambil fulfillment `WAITING_STOCK`, sehingga:
+  //   (a) pesanan yang stoknya sudah ada (SIAP_DIKEMAS) tidak pernah masuk lembar
+  //       produksi — padahal barangnya tetap harus dikerjakan gudang, dan
+  //   (b) pesanan batal ikut terhitung bila baris fulfillment-nya belum ditutup.
+  // Pemilihan kini memakai `classifyWorkQueue` yang sama dengan halaman Pesanan —
+  // daftar produksi dan badge menu tidak bisa beda lagi.
+  const kandidat = await prisma.order.findMany({
     where: {
-      order: { tenantId },
-      status: 'WAITING_STOCK',
-      ...(opsi.orderIds && opsi.orderIds.length > 0 ? { orderId: { in: opsi.orderIds } } : {}),
+      tenantId,
+      status: { in: ['NEW', 'CONFIRMED'] },
+      ...(opsi.orderIds && opsi.orderIds.length > 0 ? { id: { in: opsi.orderIds } } : {}),
     },
     select: {
-      order: {
+      id: true,
+      externalOrderId: true,
+      status: true,
+      externalStatus: true,
+      placedAt: true,
+      shipByAt: true,
+      fulfillmentOrders: {
+        where: { status: { notIn: ['COMPLETED'] } },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { status: true },
+      },
+      shipments: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { awb: true, status: true },
+      },
+      items: {
         select: {
-          id: true,
-          externalOrderId: true,
-          placedAt: true,
-          shipByAt: true,
-          items: {
-            select: {
-              quantity: true,
-              variant: { select: { sku: true, name: true, product: { select: { name: true } } } },
-            },
-          },
+          quantity: true,
+          variant: { select: { sku: true, name: true, product: { select: { name: true } } } },
         },
       },
     },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { placedAt: 'asc' },
     take: opsi.limit ?? 400,
   });
 
   const baris: BarisProduksi[] = [];
-  for (const f of fo) {
-    for (const item of f.order.items) {
+  for (const o of kandidat) {
+    const fo = o.fulfillmentOrders[0] ?? null;
+    const shipment = o.shipments[0] ?? null;
+    const antrean = classifyWorkQueue({
+      orderStatus: o.status,
+      externalStatus: o.externalStatus,
+      fulfillmentStatus: fo?.status ?? null,
+      shipmentStatus: shipment?.status ?? null,
+      hasAwb: Boolean(shipment?.awb?.trim()),
+    });
+    // Batal / sudah dijemput kurir / sudah diterima → bukan pekerjaan produksi.
+    if (!antrean.needsWork) continue;
+
+    for (const item of o.items) {
       baris.push({
-        orderId: f.order.id,
-        externalOrderId: f.order.externalOrderId,
-        placedAt: f.order.placedAt.toISOString(),
-        shipByAt: f.order.shipByAt ? f.order.shipByAt.toISOString() : null,
+        orderId: o.id,
+        externalOrderId: o.externalOrderId,
+        placedAt: o.placedAt.toISOString(),
+        shipByAt: o.shipByAt ? o.shipByAt.toISOString() : null,
         sku: item.variant?.sku ?? '(tanpa SKU)',
         produk: item.variant?.product?.name ?? '(tanpa nama)',
         varian: item.variant?.name ?? null,
