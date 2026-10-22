@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState, useMemo } from 'react';
 import { RefreshCw, Search, BookOpen, Layers } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState } from '@/components/ui';
-import { OperasionalSection } from './operasional-section';
 
 interface Movement {
   id: string;
@@ -38,33 +37,35 @@ export default function LaporanPage() {
       .then(([m, d]) => {
         setMovements(m.items ?? []);
         setDist(d.priorityDistribution ?? []);
+        setLoading(false);
       })
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        setError((e as Error).message);
+        setLoading(false);
+      });
   }, []);
 
-  useEffect(load, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const filteredMovements = useMemo(() => {
-    if (!search.trim()) return movements;
+    if (!search) return movements;
     const q = search.toLowerCase();
     return movements.filter(
       (m) =>
         m.sku.toLowerCase().includes(q) ||
         m.warehouseName.toLowerCase().includes(q) ||
-        (m.reason && m.reason.toLowerCase().includes(q)) ||
-        (m.actorName && m.actorName.toLowerCase().includes(q)),
+        (m.actorName ?? '').toLowerCase().includes(q) ||
+        (m.reason ?? '').toLowerCase().includes(q),
     );
   }, [movements, search]);
-
-  if (loading) return <LoadingState message="Memuat buku besar audit inventori..." />;
-  if (error) return <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); load(); }} />;
 
   return (
     <div>
       <PageHeader
         title="Laporan & Buku Besar (Ledger)"
-        subtitle="Ringkasan operasional gudang, riwayat audit mutasi stok, dan distribusi prioritas pesanan"
+        subtitle="Riwayat audit mutasi stok dan distribusi prioritas pesanan"
         actions={
           <button
             type="button"
@@ -74,9 +75,8 @@ export default function LaporanPage() {
               setError('');
               load();
             }}
+            title="Muat ulang data"
           >
-
-      <OperasionalSection />
             <RefreshCw size={14} aria-hidden />
             <span>Muat Ulang</span>
           </button>
@@ -116,7 +116,16 @@ export default function LaporanPage() {
 
       {/* Movements Table Section */}
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 16,
+            flexWrap: 'wrap',
+            gap: 12,
+          }}
+        >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <BookOpen size={18} style={{ color: 'var(--secondary)' }} aria-hidden />
             <h2 style={{ fontSize: 16, fontWeight: 700 }}>Buku Besar Mutasi Stok Fisik</h2>

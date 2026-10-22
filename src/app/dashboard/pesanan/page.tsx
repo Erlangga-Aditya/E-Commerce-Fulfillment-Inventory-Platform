@@ -24,8 +24,9 @@ import {
 } from 'lucide-react';
 import { api, openOfficialLabel } from '@/lib/api';
 import { usePermission } from '@/hooks/usePermission';
-import { Alert, EmptyState, ErrorState, LoadingState, PageHeader } from '@/components/ui';
+import { OperasionalSectionPesanan } from './operasional-section';
 import { BarcodeScanner, playScanFeedback } from '@/components/barcode-scanner';
+import { Alert, EmptyState, ErrorState, LoadingState, PageHeader } from '@/components/ui';
 import { StockPanel } from '@/components/stock-panel';
 import { RANGE_LABEL, RANGE_PRESETS, type RangePreset } from '@/modules/fulfillment/domain/date-range';
 import type { QueueBucket } from '@/modules/fulfillment/domain/work-queue';
@@ -817,6 +818,9 @@ export default function PesananPengirimanPage() {
           </div>
         )}
       </div>
+
+      {/* Ringkasan operasional gudang: keadaan sekarang + kejadian dalam rentang */}
+      <OperasionalSectionPesanan />
 
       {/* Rentang tanggal + tiga kartu kerja. */}
       <div className="card mb16" style={{ padding: '12px 14px' }}>
