@@ -35,6 +35,16 @@ interface Daftar {
  * produksi. Tidak ada panel saran yang harus ditafsirkan; urutannya sudah
  * bawaan: produk SET lebih dulu, lalu jilid 1, 2, 3, …
  */
+/** Rentang tanggal pesanan pada satu produk ("20 Okt" atau "20-22 Okt"). */
+function rentangTanggal(pesanan: PesananProduksi[]): string {
+  if (pesanan.length === 0) return '-';
+  const unik = [...new Set(pesanan.map((p) => p.tanggal.slice(0, 10)))].sort();
+  const fmt = (iso: string) =>
+    new Date(`${iso}T00:00:00Z`).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+  if (unik.length === 1) return fmt(unik[0] as string);
+  return `${fmt(unik[0] as string)}-${fmt(unik[unik.length - 1] as string)}`;
+}
+
 export default function ProduksiPage() {
   const [data, setData] = useState<Daftar | null>(null);
   const [dipilih, setDipilih] = useState<string[]>([]);
@@ -70,9 +80,6 @@ export default function ProduksiPage() {
     () => (data?.grup ?? []).flatMap((g) => g.pesanan.map((p) => p.orderId)),
     [data],
   );
-
-  const toggle = (id: string) =>
-    setDipilih((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const toggleGrup = (g: GrupProduksi) => {
     const ids = g.pesanan.map((p) => p.orderId);
@@ -170,51 +177,43 @@ export default function ProduksiPage() {
             </button>
           </div>
 
-          {data.grup.map((g) => (
-            <section key={g.nama} className="card" style={{ marginBottom: 12 }}>
-              <div className="queue-card-head" style={{ gap: 10, flexWrap: 'wrap' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minWidth: 0 }}>
-                  <input
-                    type="checkbox"
-                    checked={g.pesanan.every((p) => dipilih.includes(p.orderId))}
-                    onChange={() => toggleGrup(g)}
-                    aria-label={`Pilih semua ${g.nama}`}
-                  />
-                  <strong style={{ fontSize: 14 }}>{g.nama}</strong>
-                </label>
-                <span className="small muted">{g.totalUnit} pcs · {g.pesanan.length} pesanan</span>
-              </div>
-              <div className="table-wrap">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: 34 }} />
-                      <th>No. Pesanan</th>
-                      <th className="num">Qty</th>
-                      <th>Tanggal</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {g.pesanan.map((p) => (
-                      <tr key={`${p.orderId}-${p.sku}`}>
+          <div className="card">
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 34 }} />
+                    <th>Produk</th>
+                    <th className="num">Qty</th>
+                    <th>Tanggal pesanan</th>
+                    <th className="num">Resi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.grup.map((g) => {
+                    const semuaId = g.pesanan.map((p) => p.orderId);
+                    const terpilih = semuaId.every((id) => dipilih.includes(id));
+                    return (
+                      <tr key={g.nama}>
                         <td>
                           <input
                             type="checkbox"
-                            checked={dipilih.includes(p.orderId)}
-                            onChange={() => toggle(p.orderId)}
-                            aria-label={`Pilih ${p.externalOrderId}`}
+                            checked={terpilih}
+                            onChange={() => toggleGrup(g)}
+                            aria-label={`Pilih ${g.nama}`}
                           />
                         </td>
-                        <td style={{ fontWeight: 600, wordBreak: 'break-word' }}>{p.externalOrderId}</td>
-                        <td className="num">{p.qty}</td>
-                        <td className="small muted">{new Date(p.tanggal).toLocaleDateString('id-ID')}</td>
+                        <td style={{ fontWeight: 600 }}>{g.nama}</td>
+                        <td className="num">{g.totalUnit}</td>
+                        <td className="small muted">{rentangTanggal(g.pesanan)}</td>
+                        <td className="num small muted">{g.pesanan.length}</td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ))}
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       )}
     </div>

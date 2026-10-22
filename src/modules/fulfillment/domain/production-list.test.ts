@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { amanUntukPdf, isSet, jilidDari, kelompokkanProduksi, namaPendek, type BarisProduksi } from './production-list';
+import {
+  amanUntukPdf,
+  isSet,
+  jilidDari,
+  kelompokkanProduksi,
+  kunciUrut,
+  namaPendek,
+  rentangTanggal,
+  type BarisProduksi,
+} from './production-list';
 
 describe('nama pendek untuk lembar produksi', () => {
   const kasus: [string, string | null, string][] = [
@@ -86,6 +95,21 @@ describe('kelompokkan daftar produksi', () => {
     expect(hasil.totalPesanan).toBe(2);
   });
 
+  it('produk dari merek yang sama berdampingan (Muslim Jilid 1 tepat di atas Muslim Jilid 2)', () => {
+    const hasil = kelompokkanProduksi([
+      baris({ produk: 'HADIST SHOHIH MUSLIM DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 2' }),
+      baris({ produk: 'HADIST SUNAN NASAI DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 1' }),
+      baris({ produk: 'HADIST SHOHIH MUSLIM SET DARUL HIKMAH', varian: null }),
+      baris({ produk: 'HADIST SHOHIH MUSLIM DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 1' }),
+    ]);
+    expect(hasil.grup.map((g) => g.nama)).toEqual([
+      'Muslim Set',
+      'Muslim Jilid 1',
+      'Muslim Jilid 2',
+      'Nasai Jilid 1',
+    ]);
+  });
+
   it('di dalam grup, batas kirim terdekat naik ke atas', () => {
     const hasil = kelompokkanProduksi([
       baris({ orderId: 'jauh', shipByAt: '2026-10-20T00:00:00.000Z' }),
@@ -102,5 +126,29 @@ describe('kelompokkan daftar produksi', () => {
 describe('pembersihan teks untuk PDF', () => {
   it('membuang emoji dan menormalkan tanda baca', () => {
     expect(amanUntukPdf('Buku 📚 “Set” — Jilid’s')).toBe('Buku "Set" - Jilid\'s');
+  });
+});
+
+describe('kunci urutan & rentang tanggal', () => {
+  it('memisahkan merek dan jilid dari nama pendek', () => {
+    expect(kunciUrut('Bukhori Set')).toEqual({ merek: 'Bukhori', jilid: null });
+    expect(kunciUrut('Bukhori Jilid 6')).toEqual({ merek: 'Bukhori', jilid: 6 });
+    expect(kunciUrut('ALQURAN COMBI')).toEqual({ merek: 'ALQURAN COMBI', jilid: null });
+  });
+
+  it('tanggal yang sama diringkas jadi satu tanggal', () => {
+    const hasil = rentangTanggal([
+      baris({ placedAt: '2026-10-20T03:00:00.000Z' }),
+      baris({ placedAt: '2026-10-20T09:00:00.000Z' }),
+    ]);
+    expect(hasil).toBe('20 Okt');
+  });
+
+  it('tanggal berbeda jadi rentang, bukan dua baris terpisah', () => {
+    const hasil = rentangTanggal([
+      baris({ placedAt: '2026-10-22T03:00:00.000Z' }),
+      baris({ placedAt: '2026-10-20T03:00:00.000Z' }),
+    ]);
+    expect(hasil).toBe('20 Okt-22 Okt');
   });
 });

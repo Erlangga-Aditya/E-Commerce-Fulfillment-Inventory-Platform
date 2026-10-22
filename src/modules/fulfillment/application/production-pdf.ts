@@ -1,5 +1,11 @@
 import { prisma } from '@/shared/infrastructure/prisma';
-import { amanUntukPdf, kelompokkanProduksi, type BarisProduksi, type DaftarProduksi } from '../domain/production-list';
+import {
+  amanUntukPdf,
+  kelompokkanProduksi,
+  rentangTanggal,
+  type BarisProduksi,
+  type DaftarProduksi,
+} from '../domain/production-list';
 
 export interface DataProduksi extends DaftarProduksi {
   kodeBatch: string;
@@ -116,31 +122,28 @@ export async function buatPdfProduksi(data: DataProduksi): Promise<Uint8Array> {
   garis(y);
   y -= 14;
 
+  // SATU baris per produk: semua pesanan dengan produk yang sama digabung,
+  // karena tim produksi membuat barangnya sekaligus — bukan per resi.
   for (const g of data.grup) {
-    for (const p of g.pesanan) {
-      if (y < 100) halamanBaru();
-      tulis(g.nama, margin, 9.5);
-      tulis(String(p.qty), margin + 330, 9.5);
-      tulis(new Date(p.placedAt).toLocaleDateString('id-ID'), margin + 380, 9.5);
-      y -= 13;
+    if (y < 100) halamanBaru();
+    tulis(g.nama, margin, 9.5);
+    if (g.pesanan.length > 1) {
+      page.drawText(amanUntukPdf(`${g.pesanan.length} resi`), {
+        x: margin,
+        y: y - 9,
+        size: 7.5,
+        font,
+        color: rgb(0.45, 0.45, 0.45),
+      });
     }
+    tulis(String(g.totalUnit), margin + 330, 9.5);
+    tulis(rentangTanggal(g.pesanan), margin + 380, 9.5);
+    y -= g.pesanan.length > 1 ? 20 : 13;
   }
 
   if (data.grup.length === 0) {
     tulis('Tidak ada pesanan yang menunggu produksi.', margin, 10);
     y -= 16;
-  }
-
-  if (y < 130) halamanBaru();
-  y -= 6;
-  garis(y);
-  y -= 16;
-  tulis('Rekap per produk', margin, 9.5, true);
-  y -= 13;
-  for (const g of data.grup) {
-    if (y < 110) halamanBaru();
-    tulis(`${g.nama} : ${g.totalUnit} pcs`, margin + 8, 9);
-    y -= 12;
   }
 
   if (y < 120) halamanBaru();

@@ -171,7 +171,11 @@ cetak lembar produksi** (lihat Fase 5).
       `ALQURAN POCKET` · `Muslim Set` · `Tirmidzi Jilid 5` · `Ibnu Majah Set` · `Nasai Set` ·
       `Bukhori Jilid 6` · `Bukhori Set` (15 kasus diuji, termasuk varian salah ketik "Jilid i" → Jilid 1)
 - [x] **Urutan: SET dulu**, lalu jilid 1,2,3,… (diuji)
-- [x] PDF disederhanakan: **Produk · Qty · Tanggal** + rekap per produk + tanda tangan
+- [x] PDF disederhanakan: **Produk · Qty · Tanggal** + tanda tangan; **satu baris per produk**
+      (semua resi dengan produk sama digabung, qty dijumlahkan, "2 resi" dicatat kecil di bawah nama)
+- [x] Urutan: **merek A→Z**, di dalam merek SET dulu lalu jilid menaik
+      (Abu Daud Set → Abu Daud Jilid 1 → … → Bukhori Set → Bukhori Jilid 1 → …);
+      tanggal kolom menampilkan rentang bila pesanannya beda hari
 - [x] Terverifikasi produksi: 51 pesanan/67 unit, urutan `Abu Daud Set → Bukhori Set → … → Abu Daud Jilid 1`;
       cetak 3 pesanan terpilih → PDF 1.699 byte (bukan seluruh daftar)
 - [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda

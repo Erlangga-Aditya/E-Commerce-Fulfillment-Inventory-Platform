@@ -119,7 +119,34 @@ export function isSet(produk: string): boolean {
   return /\bSET\b/.test(P) && !/PERJILID/.test(P);
 }
 
-/** Mengelompokkan baris per nama pendek: SET dulu, lalu jilid 1,2,3,… */
+/**
+ * Memisahkan nama pendek menjadi (merek, jilid) untuk pengurutan.
+ *
+ * Tujuan: semua produk dari merek yang sama berdampingan, dan di dalam satu
+ * merek urutannya SET lebih dulu lalu jilid 1, 2, 3, …
+ * Contoh hasil urutan: Abu Daud Set → Abu Daud Jilid 1 → … → Bukhori Set → …
+ */
+export function kunciUrut(nama: string): { merek: string; jilid: number | null } {
+  const set = nama.match(/^(.*)\s+Set$/i);
+  if (set) return { merek: set[1] ?? nama, jilid: null };
+  const jilid = nama.match(/^(.*)\s+Jilid\s+(\d+)$/i);
+  if (jilid) return { merek: jilid[1] ?? nama, jilid: Number(jilid[2] ?? 0) };
+  return { merek: nama, jilid: null };
+}
+
+/** Rentang tanggal pesanan, mis. "20 Okt" atau "20-22 Okt". */
+export function rentangTanggal(pesanan: readonly BarisProduksi[]): string {
+  if (pesanan.length === 0) return '-';
+  const tanggal = [...new Set(pesanan.map((p) => p.placedAt.slice(0, 10)))].sort();
+  const fmt = (iso: string) =>
+    new Date(`${iso}T00:00:00Z`).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+  const pertama = tanggal[0] ?? '';
+  const terakhir = tanggal[tanggal.length - 1] ?? pertama;
+  if (tanggal.length === 1) return fmt(pertama);
+  return `${fmt(pertama)}-${fmt(terakhir)}`;
+}
+
+/** Mengelompokkan baris per nama pendek: merek A→Z, di dalam merek SET dulu lalu jilid. */
 export function kelompokkanProduksi(rows: readonly BarisProduksi[]): DaftarProduksi {
   const peta = new Map<string, GrupProduksi>();
   for (const r of rows) {
@@ -135,10 +162,15 @@ export function kelompokkanProduksi(rows: readonly BarisProduksi[]): DaftarProdu
   }
 
   const grup = [...peta.values()].sort((a, b) => {
-    // 1) SET lebih dulu; 2) jilid menaik; 3) nama sebagai penentu akhir.
-    if (a.jilid === null && b.jilid !== null) return -1;
-    if (a.jilid !== null && b.jilid === null) return 1;
-    if (a.jilid !== null && b.jilid !== null && a.jilid !== b.jilid) return a.jilid - b.jilid;
+    const ka = kunciUrut(a.nama);
+    const kb = kunciUrut(b.nama);
+    // 1) merek A→Z supaya produk sejenis berdampingan;
+    const bedaMerek = ka.merek.localeCompare(kb.merek);
+    if (bedaMerek !== 0) return bedaMerek;
+    // 2) di dalam merek: SET dulu (jilid null), lalu jilid menaik.
+    if (ka.jilid === null && kb.jilid !== null) return -1;
+    if (ka.jilid !== null && kb.jilid === null) return 1;
+    if (ka.jilid !== null && kb.jilid !== null && ka.jilid !== kb.jilid) return ka.jilid - kb.jilid;
     return a.nama.localeCompare(b.nama);
   });
 
