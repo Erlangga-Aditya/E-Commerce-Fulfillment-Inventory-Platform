@@ -32,8 +32,16 @@ interface PesananMendesak {
   jam: number;
 }
 
+interface CetakanTerakhir {
+  kodeBatch: string;
+  printedAt: string;
+  totalOrders: number;
+  totalUnits: number;
+}
+
 interface Daftar {
   kodeBatch: string;
+  terakhirDicetak: CetakanTerakhir | null;
   mendesak: PesananMendesak[];
   totalPesanan: number;
   totalUnit: number;
@@ -120,16 +128,23 @@ export default function ProduksiPage() {
         const info = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
         throw new Error(info.error?.message ?? `Gagal membuat PDF (HTTP ${res.status}).`);
       }
+      const duplikat = res.headers.get('X-Batch-Duplikat') === 'true';
+      const kodeBatch = res.headers.get('X-Batch-Kode') ?? data?.kodeBatch ?? '';
+      const dicetakPada = res.headers.get('X-Batch-Dicetak-Pada');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `daftar-produksi-${data?.kodeBatch ?? 'hari-ini'}.pdf`;
+      a.download = `daftar-produksi-${kodeBatch}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setPesan(`PDF dibuat untuk ${hanyaTerpilih ? dipilih.length : semuaId.length} pesanan.`);
+      setPesan(
+        duplikat && dicetakPada
+          ? `Sudah dicetak ${new Date(dicetakPada).toLocaleString('id-ID')} — jangan produksi dua kali.`
+          : `PDF dibuat untuk ${hanyaTerpilih ? dipilih.length : semuaId.length} pesanan (${kodeBatch}).`,
+      );
     } catch (e) {
       setPesan((e as Error).message);
     } finally {
@@ -154,7 +169,13 @@ export default function ProduksiPage() {
     <div>
       <PageHeader
         title="Produksi"
-        subtitle="Pesanan yang barangnya belum ada. Pilih yang mau dikerjakan, lalu cetak lembar kerja untuk tim produksi."
+        subtitle={
+          data?.terakhirDicetak
+            ? `Terakhir dicetak: ${data.terakhirDicetak.kodeBatch} · ${data.terakhirDicetak.totalOrders} pesanan · ${new Date(
+                data.terakhirDicetak.printedAt,
+              ).toLocaleString('id-ID')}.`
+            : 'Pesanan yang masih harus dikerjakan. Pilih yang mau diproses, lalu cetak lembar kerja.'
+        }
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button

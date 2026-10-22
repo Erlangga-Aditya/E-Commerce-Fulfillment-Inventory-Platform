@@ -480,6 +480,24 @@ model OrderStatusHistory {
   @@map("order_status_history")
 }
 
+model ProductionBatch {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  kodeBatch   String   @map("kode_batch")
+  printedAt   DateTime @default(now()) @map("printed_at")
+  printedBy   String?  @map("printed_by")
+  totalOrders Int      @map("total_orders")
+  totalUnits  Int      @map("total_units")
+  /// Identitas isi cetakan (orderId unik terurut, digabung "|"); dipakai
+  /// mendeteksi cetak ulang yang sama dalam satu hari (anti produksi ganda).
+  orderIds    Json     @map("order_ids")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, kodeBatch])
+  @@index([tenantId, printedAt])
+  @@map("production_batches")
+}
+
 // ============================================================
 // FULFILLMENT MODULE
 // ============================================================

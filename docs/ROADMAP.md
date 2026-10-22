@@ -158,7 +158,15 @@ cetak lembar produksi** (lihat Fase 5).
 - [x] Kolom `deferred_until` / `defer_reason` / `deferred_by_id` dibuang lewat migrasi
       `20261020090000_drop_order_defer` (tidak pernah dipakai di produksi)
 
-### Fase 5 — Daftar produksi (PDF) (selesai, kecuali pelacakan batch)
+### Fase 5 — Daftar produksi (PDF) (SELESAI)
+- [x] **Pelacakan batch produksi** (`ProductionBatch`, migrasi `add_production_batch`):
+      setiap cetakan tercatat `PROD-YYYYMMDD-N` + isi (himpunan pesanan) + jumlah +
+      aktor. Deteksi cetak ulang: set pesanan identik di hari yang sama →
+      `duplikat=true`, TIDAK membuat baris baru (anti produksi ganda); pemilihan
+      berbeda → batch baru. UI menampilkan "Terakhir dicetak" di judul halaman dan
+      peringatan "jangan produksi dua kali" saat cetak ulang.
+      Terverifikasi produksi: cetak-sama 3x → 1 batch; cetak-2-pesanan → batch ke-2
+      (`PROD-20261023-1` dan `PROD-20261023-2`).
 - [x] `GET /api/v1/fulfillment/production-list` → PDF A4 (`pdf-lib`), hanya FO `WAITING_STOCK`
 - [x] Dikelompokkan **per SKU** dengan total unit, di dalamnya daftar pesanan urut batas kirim
 - [x] Kolom tanda tangan "diserahkan / diterima tim produksi" + kode batch harian (`PROD-YYYYMMDD`)

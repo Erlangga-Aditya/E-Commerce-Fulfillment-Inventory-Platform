@@ -1,5 +1,9 @@
 import { type NextRequest } from 'next/server';
 import { ambilDataProduksi, buatPdfProduksi } from '@/modules/fulfillment/application/production-pdf';
+import {
+  ambilCetakanTerakhir,
+  catatPencetakan,
+} from '@/modules/fulfillment/application/production-batch';
 import { successResponse, handleRouteError } from '@/shared/application/apiResponse';
 import { getAuthContext, getRequestId, assertPermission } from '@/shared/application/routeHelpers';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
@@ -24,6 +28,8 @@ export async function GET(request: NextRequest) {
         totalUnit: data.totalUnit,
         // Sisa waktu sebelum Shopee membatalkan otomatis (terdekat lebih dulu).
         mendesak: data.mendesak,
+        // Cetakan terakhir — dasar peringatan "sudah pernah dicetak hari ini".
+        terakhirDicetak: await ambilCetakanTerakhir(ctx.tenantId),
         grup: data.grup.map((g) => ({
           nama: g.nama,
           jilid: g.jilid,
@@ -62,28 +68,47 @@ export async function POST(request: NextRequest) {
     const data = await ambilDataProduksi(ctx.tenantId, { orderIds });
     const pdf = await buatPdfProduksi(data);
 
+    // Himpunan pesanan yang BENAR-BENAR masuk PDF (pemilihan bisa kosong =
+    // semua). Identitas inilah yang dipakai deteksi cetak ulang hari ini.
+    const tercetakIds = [...new Set(data.grup.flatMap((g) => g.pesanan.map((p) => p.orderId)))];
+    const cetakan = await catatPencetakan({
+      tenantId: ctx.tenantId,
+      actorId: ctx.userId,
+      orderIds: tercetakIds,
+      totalOrders: data.totalPesanan,
+      totalUnits: data.totalUnit,
+    });
+
     await auditLog({
       tenantId: ctx.tenantId,
       actorId: ctx.userId,
       action: 'production_list_printed',
       entityType: 'Order',
-      entityId: data.kodeBatch,
+      entityId: cetakan.kodeBatch ?? data.kodeBatch,
       metadata: {
-        batch: data.kodeBatch,
+        batch: cetakan.kodeBatch,
         pesanan: data.totalPesanan,
         unit: data.totalUnit,
         dipilih: orderIds.length > 0,
+        duplikat: cetakan.duplikat,
       },
     });
-    logger.info(`Daftar produksi dicetak: ${data.totalPesanan} pesanan`, { batch: data.kodeBatch });
+    logger.info(
+      `Daftar produksi dicetak: ${data.totalPesanan} pesanan${cetakan.duplikat ? ' (DUPLIKAT)' : ''}`,
+      { batch: cetakan.kodeBatch },
+    );
 
     return new Response(new Uint8Array(pdf), {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="daftar-produksi-${data.kodeBatch}.pdf"`,
+        'Content-Disposition': `attachment; filename="daftar-produksi-${cetakan.kodeBatch ?? data.kodeBatch}.pdf"`,
         'Cache-Control': 'no-store',
         'X-Request-Id': requestId,
+        // Info anti produksi ganda dibaca klien untuk menampilkan peringatan.
+        'X-Batch-Duplikat': cetakan.duplikat ? 'true' : 'false',
+        'X-Batch-Kode': cetakan.kodeBatch ?? '',
+        'X-Batch-Dicetak-Pada': cetakan.dicetakPada?.toISOString() ?? '',
       },
     });
   } catch (error) {
