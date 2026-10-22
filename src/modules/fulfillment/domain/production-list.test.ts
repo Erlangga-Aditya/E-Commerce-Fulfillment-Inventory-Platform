@@ -95,6 +95,24 @@ describe('kelompokkan daftar produksi', () => {
     expect(hasil.totalPesanan).toBe(2);
   });
 
+  it('SELURUH produk SET didahulukan, baru semua per-jilid', () => {
+    const hasil = kelompokkanProduksi([
+      baris({ produk: 'HADIST SUNAN ABU DAUD PERJILID DARUL HIKMAH HARD COVER', varian: 'Jilid 1' }),
+      baris({ produk: 'HADIST SOHIH BUKHORI DARUL HIKMAH SET 6 JILID, HARDCOVER.', varian: null }),
+      baris({ produk: 'HADIST SUNAN NASAI DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 2' }),
+      baris({ produk: 'HADIST SUNAN ABU DAWUD SET DARUL HIKMAH HARD COVER', varian: null }),
+      baris({ produk: 'HADIST SOHIH BUKHORI DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 3' }),
+    ]);
+    // Semua SET lebih dulu (urut merek), baru semua jilid (urut merek lalu jilid).
+    expect(hasil.grup.map((g) => g.nama)).toEqual([
+      'Abu Daud Set',
+      'Bukhori Set',
+      'Abu Daud Jilid 1',
+      'Bukhori Jilid 3',
+      'Nasai Jilid 2',
+    ]);
+  });
+
   it('produk dari merek yang sama berdampingan (Muslim Jilid 1 tepat di atas Muslim Jilid 2)', () => {
     const hasil = kelompokkanProduksi([
       baris({ produk: 'HADIST SHOHIH MUSLIM DARUL HIKMAH PERJILID HARD COVER', varian: 'Jilid 2' }),

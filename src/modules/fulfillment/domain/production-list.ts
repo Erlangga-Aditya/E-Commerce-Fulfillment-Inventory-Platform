@@ -164,13 +164,20 @@ export function kelompokkanProduksi(rows: readonly BarisProduksi[]): DaftarProdu
   const grup = [...peta.values()].sort((a, b) => {
     const ka = kunciUrut(a.nama);
     const kb = kunciUrut(b.nama);
-    // 1) merek A→Z supaya produk sejenis berdampingan;
+
+    // 1) SELURUH produk SET lebih dulu (tanpa memandang merek).
+    const tingkatA = ka.jilid === null ? 0 : 1;
+    const tingkatB = kb.jilid === null ? 0 : 1;
+    if (tingkatA !== tingkatB) return tingkatA - tingkatB;
+
+    // 2) Di dalam tingkat yang sama, merek A→Z supaya produk sejenis berdampingan
+    //    (Muslim Jilid 1 tepat di atas Muslim Jilid 2, dst.).
     const bedaMerek = ka.merek.localeCompare(kb.merek);
     if (bedaMerek !== 0) return bedaMerek;
-    // 2) di dalam merek: SET dulu (jilid null), lalu jilid menaik.
-    if (ka.jilid === null && kb.jilid !== null) return -1;
-    if (ka.jilid !== null && kb.jilid === null) return 1;
-    if (ka.jilid !== null && kb.jilid !== null && ka.jilid !== kb.jilid) return ka.jilid - kb.jilid;
+
+    // 3) Jilid menaik.
+    const bedaJilid = (ka.jilid ?? 0) - (kb.jilid ?? 0);
+    if (bedaJilid !== 0) return bedaJilid;
     return a.nama.localeCompare(b.nama);
   });
 

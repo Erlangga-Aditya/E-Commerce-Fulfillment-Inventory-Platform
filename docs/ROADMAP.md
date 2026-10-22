@@ -173,9 +173,12 @@ cetak lembar produksi** (lihat Fase 5).
 - [x] **Urutan: SET dulu**, lalu jilid 1,2,3,… (diuji)
 - [x] PDF disederhanakan: **Produk · Qty · Tanggal** + tanda tangan; **satu baris per produk**
       (semua resi dengan produk sama digabung, qty dijumlahkan, "2 resi" dicatat kecil di bawah nama)
-- [x] Urutan: **merek A→Z**, di dalam merek SET dulu lalu jilid menaik
-      (Abu Daud Set → Abu Daud Jilid 1 → … → Bukhori Set → Bukhori Jilid 1 → …);
-      tanggal kolom menampilkan rentang bila pesanannya beda hari
+- [x] Urutan **dua tingkat**: (1) SELURUH produk SET lebih dulu, urut merek;
+      (2) baru semua per-jilid, urut merek lalu jilid menaik — sehingga Muslim Jilid 1
+      tepat di atas Muslim Jilid 2, 3, 4.
+      Terverifikasi produksi: `Abu Daud Set → Bukhori Set → Ibnu Majah Set → Muslim Set →
+      Tirmidzi Set → Abu Daud Jilid 1 → Bukhori Jilid 1,2,4,5,6 → Ibnu Majah Jilid 1,3 → …`
+- [x] Kolom tanggal menampilkan **rentang** bila pesanannya beda hari (mis. `27 Sep .. 6 Okt`)
 - [x] Terverifikasi produksi: 51 pesanan/67 unit, urutan `Abu Daud Set → Bukhori Set → … → Abu Daud Jilid 1`;
       cetak 3 pesanan terpilih → PDF 1.699 byte (bukan seluruh daftar)
 - [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda
