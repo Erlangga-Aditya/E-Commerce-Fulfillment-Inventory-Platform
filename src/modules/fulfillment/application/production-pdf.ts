@@ -1,22 +1,25 @@
 import { prisma } from '@/shared/infrastructure/prisma';
-import { amanUntukPdf, kelompokkanProduksi, type BarisProduksi } from '../domain/production-list';
+import { amanUntukPdf, kelompokkanProduksi, type BarisProduksi, type DaftarProduksi } from '../domain/production-list';
 
-export interface DataProduksi {
-  grup: ReturnType<typeof kelompokkanProduksi>['grup'];
-  totalPesanan: number;
-  totalUnit: number;
+export interface DataProduksi extends DaftarProduksi {
   kodeBatch: string;
-  dibuatOleh: string;
   dicetakPada: Date;
 }
 
-/** Mengambil pesanan yang barangnya belum ada (pekerjaan gudang WAITING_STOCK). */
+/**
+ * Mengambil pesanan yang barangnya belum ada (pekerjaan gudang WAITING_STOCK).
+ * `orderIds` opsional: dipakai saat owner memilih hanya sebagian pesanan.
+ */
 export async function ambilDataProduksi(
   tenantId: string,
-  opsi: { limit?: number } = {},
+  opsi: { orderIds?: string[]; limit?: number } = {},
 ): Promise<DataProduksi> {
   const fo = await prisma.fulfillmentOrder.findMany({
-    where: { order: { tenantId }, status: 'WAITING_STOCK' },
+    where: {
+      order: { tenantId },
+      status: 'WAITING_STOCK',
+      ...(opsi.orderIds && opsi.orderIds.length > 0 ? { orderId: { in: opsi.orderIds } } : {}),
+    },
     select: {
       order: {
         select: {
@@ -34,7 +37,7 @@ export async function ambilDataProduksi(
       },
     },
     orderBy: { createdAt: 'asc' },
-    take: opsi.limit ?? 200,
+    take: opsi.limit ?? 400,
   });
 
   const baris: BarisProduksi[] = [];
@@ -53,19 +56,18 @@ export async function ambilDataProduksi(
     }
   }
 
-  const ringkas = kelompokkanProduksi(baris);
   const sekarang = new Date();
   return {
-    ...ringkas,
+    ...kelompokkanProduksi(baris),
     kodeBatch: `PROD-${sekarang.toISOString().slice(0, 10).replace(/-/g, '')}`,
-    dibuatOleh: 'Owner',
     dicetakPada: sekarang,
   };
 }
 
 /**
- * Membuat PDF A4 daftar produksi: satu blok per SKU (total unit jelas), daftar
- * pesanan di dalamnya, dan kolom tanda tangan untuk tim produksi.
+ * PDF lembar kerja produksi — sengaja sederhana: **Produk · Qty · Tanggal**.
+ * Nama panjang Shopee sudah diringkas oleh `namaPendek()`, dan urutannya
+ * SET dulu lalu jilid (aturan tim produksi).
  */
 export async function buatPdfProduksi(data: DataProduksi): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
@@ -79,82 +81,80 @@ export async function buatPdfProduksi(data: DataProduksi): Promise<Uint8Array> {
   let page = doc.addPage(A4);
   let y = A4[1] - margin;
 
-  const teks = (isi: string, x: number, size = 9, pakaiBold = false, warna = rgb(0.1, 0.1, 0.1)) => {
-    page.drawText(amanUntukPdf(isi), { x, y, size, font: pakaiBold ? bold : font, color: warna });
+  const tulis = (isi: string, x: number, size = 10, tebal = false, warna = rgb(0.1, 0.1, 0.1)) => {
+    page.drawText(amanUntukPdf(isi), { x, y, size, font: tebal ? bold : font, color: warna });
   };
-
-  const garis = (yGaris: number) => {
+  const garis = (yGaris: number) =>
     page.drawLine({
       start: { x: margin, y: yGaris },
       end: { x: margin + lebarIsi, y: yGaris },
       thickness: 0.5,
       color: rgb(0.75, 0.75, 0.75),
     });
-  };
-
-  const halamanBaru = (lanjutan: boolean) => {
+  const halamanBaru = () => {
     page = doc.addPage(A4);
     y = A4[1] - margin;
-    if (lanjutan) {
-      teks('Daftar Produksi (lanjutan)', margin, 10, true);
-      y -= 16;
-    }
+    tulis('Daftar Produksi (lanjutan)', margin, 10, true);
+    y -= 16;
   };
 
-  teks('DAFTAR PRODUKSI', margin, 16, true);
+  tulis('DAFTAR PRODUKSI', margin, 16, true);
   y -= 22;
-  teks(`Batch: ${data.kodeBatch}`, margin, 10, true);
-  teks(`Dicetak: ${data.dicetakPada.toLocaleString('id-ID')}`, margin + 200, 10);
+  tulis(`Batch ${data.kodeBatch}`, margin, 10, true);
+  tulis(`Dicetak ${data.dicetakPada.toLocaleString('id-ID')}`, margin + 260, 9);
   y -= 14;
-  teks(`Total pesanan: ${data.totalPesanan}   |   Total unit: ${data.totalUnit}`, margin, 10);
-  y -= 8;
+  tulis(`${data.totalPesanan} pesanan · ${data.totalUnit} unit`, margin, 10);
+  y -= 10;
   garis(y);
-  y -= 16;
+  y -= 18;
+
+  // Kepala tabel: Produk · Qty · Tanggal
+  tulis('Produk', margin, 9, true);
+  tulis('Qty', margin + 330, 9, true);
+  tulis('Tanggal', margin + 380, 9, true);
+  y -= 11;
+  garis(y);
+  y -= 14;
 
   for (const g of data.grup) {
-    if (y < 120) halamanBaru(true);
-    teks(`${g.sku}  |  ${g.produk}${g.varian ? ` - ${g.varian}` : ''}`, margin, 10, true);
-    y -= 12;
-    teks(`Total unit: ${g.totalUnit}  (${g.pesanan.length} pesanan)`, margin, 9);
-    y -= 12;
-    teks('No. Pesanan', margin, 8.5, true);
-    teks('Qty', margin + 150, 8.5, true);
-    teks('Batas Kirim', margin + 185, 8.5, true);
-    teks('Masuk', margin + 300, 8.5, true);
-    y -= 10;
-    garis(y);
-    y -= 11;
-
     for (const p of g.pesanan) {
-      if (y < 90) halamanBaru(true);
-      const batas = p.shipByAt ? new Date(p.shipByAt).toLocaleDateString('id-ID') : '-';
-      const masuk = new Date(p.placedAt).toLocaleDateString('id-ID');
-      teks(p.externalOrderId, margin, 8.5);
-      teks(String(p.qty), margin + 150, 8.5);
-      teks(batas, margin + 185, 8.5);
-      teks(masuk, margin + 300, 8.5);
-      y -= 12;
+      if (y < 100) halamanBaru();
+      tulis(g.nama, margin, 9.5);
+      tulis(String(p.qty), margin + 330, 9.5);
+      tulis(new Date(p.placedAt).toLocaleDateString('id-ID'), margin + 380, 9.5);
+      y -= 13;
     }
-    y -= 8;
   }
 
   if (data.grup.length === 0) {
-    teks('Tidak ada pesanan yang menunggu produksi.', margin, 10);
+    tulis('Tidak ada pesanan yang menunggu produksi.', margin, 10);
     y -= 16;
   }
 
-  if (y < 120) halamanBaru(false);
-  y -= 10;
+  if (y < 130) halamanBaru();
+  y -= 6;
   garis(y);
   y -= 16;
-  teks('Diserahkan ke tim produksi oleh:', margin, 9);
-  teks('Diterima tim produksi:', margin + 260, 9);
+  tulis('Rekap per produk', margin, 9.5, true);
+  y -= 13;
+  for (const g of data.grup) {
+    if (y < 110) halamanBaru();
+    tulis(`${g.nama} : ${g.totalUnit} pcs`, margin + 8, 9);
+    y -= 12;
+  }
+
+  if (y < 120) halamanBaru();
+  y -= 12;
+  garis(y);
+  y -= 18;
+  tulis('Diserahkan ke tim produksi:', margin, 9);
+  tulis('Diterima tim produksi:', margin + 260, 9);
   y -= 34;
-  teks('(__________________________)', margin, 9);
-  teks('(__________________________)', margin + 260, 9);
+  tulis('(__________________________)', margin, 9);
+  tulis('(__________________________)', margin + 260, 9);
   y -= 14;
-  teks(data.dibuatOleh, margin, 8.5);
-  teks('Tanggal: ____ / ____ / ______', margin + 260, 8.5);
+  tulis('Tanggal: ____ / ____ / ______', margin, 8.5);
+  tulis('Tanggal: ____ / ____ / ______', margin + 260, 8.5);
 
   return doc.save();
 }

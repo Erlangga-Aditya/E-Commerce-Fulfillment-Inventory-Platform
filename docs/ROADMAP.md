@@ -51,7 +51,9 @@ Prinsip yang tidak boleh dilanggar:
 | Badge menu = kartu Perlu Diproses | 29 = 29 |
 | Layout ponsel 360/393/414 px | 11 halaman × 3 lebar: 0 geser mendatar |
 | Tema terang/gelap | token CSS + `data-theme`, kontras AA |
-| Gate | `tsc` 0 · `lint` 0 · **336 test lulus** · build OK |
+| Gate | `tsc` 0 · `lint` 0 · **377 test lulus** · build OK |
+| Stok | dikosongkan oleh owner: 23 varian / 132 unit → semua 35 varian = 0 |
+| Produksi | halaman Produksi + PDF nama pendek, bisa pilih pesanan |
 | VPS | `efulfill:online`, `health 200`, schema up to date, disk 10% |
 
 ---
@@ -72,7 +74,10 @@ Prinsip yang tidak boleh dilanggar:
 | D10 | Banding/resi simulasi dilarang; angka harus berasal dari API/ledger | Kejujuran data |
 | D11 | Retensi binlog MySQL **2 hari**; server tanpa replikasi | Sempat 34 GB → disk penuh, deploy gagal |
 | D12 | Test integrasi berat (Python/PyMuPDF) dipisah: `npm run test:integration` | Gate harian harus cepat & deterministik |
-| D13 | Pemilihan pesanan oleh owner: **saran otomatis + koreksi manual** | Owner tetap memutuskan, tetapi tidak mulai dari nol |
+| D13 | Panel saran urutan kerja **dibatalkan**; diganti halaman Produksi (pilih → cetak) | Klien menilai panel membingungkan dan menduplikasi kerja otomatis |
+| D14 | **Stok per jilid terpisah** dari stok SET; tidak ada konversi otomatis | Klien memproduksi ulang per jilid, SET adalah barang jadi sendiri |
+| D15 | Stok boleh **negatif** di sistem dan boleh dikoreksi dari negatif ke 0 | Barang sudah dikirim sebelum aplikasi dipakai; menolak angka negatif membuat koreksi mustahil |
+| D16 | Stok awal **dikosongkan** (23 varian / 132 unit) lalu diisi owner sendiri | Angka lama tidak mencerminkan stok fisik |
 
 ---
 
@@ -143,16 +148,15 @@ menyentuh stok.
 - [ ] Tabel jejak per pesanan (timeline) — menyusul bersama Fase 5
 - Ukur keberhasilan: angka `hari ini` cocok dengan hitungan manual satu hari kerja.
 
-### Fase 4 — Pemilihan pesanan oleh owner (selesai)
-- [x] `GET/POST /api/v1/fulfillment/selection` + `domain/owner-selection.ts` (10 test)
-- [x] Urutan dari **batas kirim terdekat**, tanpa batas kirim di belakang, seri → pesanan lebih dulu masuk
-- [x] "Kerjakan" memakai `processOrderForFulfillment` (stok kurang → `WAITING_STOCK`, dilaporkan per pesanan)
-- [x] "Tunda 6 jam" wajib alasan ≥ 8 karakter, disimpan di kolom (`deferred_until`, `defer_reason`,
-      `deferred_by_id`) sehingga saran benar-benar mengecualikannya; "Kerjakan" menghapus penundaan
-- [x] Batas 50 pesanan sekali proses; kegagalan satu pesanan tidak membatalkan yang lain
-- [x] Panel di halaman Pesanan + tombol "Daftar produksi" (lihat Fase 5)
-- [x] Terverifikasi produksi: saran keluar urut (`Terlambat 28 jam → Terlambat 4 jam → Tersisa 3 jam`),
-      validasi menolak TUNDA tanpa alasan dan aksi tak dikenal (HTTP 422)
+### Fase 4 — Pemilihan pesanan oleh owner (DIBATALKAN, diganti halaman Produksi)
+Panel "saran urutan kerja + kerjakan/tunda" sempat dibuat, lalu **dihapus** karena
+pemilik toko menilai membingungkan dan menduplikasi pekerjaan yang sudah otomatis
+dilakukan sinkronisasi Shopee. Yang dipertahankan hanya intinya: **pilih pesanan →
+cetak lembar produksi** (lihat Fase 5).
+- [x] Kode dihapus: `selection-panel.tsx`, route `fulfillment/selection`,
+      `selection.usecase.ts`, `domain/owner-selection.ts` + test
+- [x] Kolom `deferred_until` / `defer_reason` / `deferred_by_id` dibuang lewat migrasi
+      `20261020090000_drop_order_defer` (tidak pernah dipakai di produksi)
 
 ### Fase 5 — Daftar produksi (PDF) (selesai, kecuali pelacakan batch)
 - [x] `GET /api/v1/fulfillment/production-list` → PDF A4 (`pdf-lib`), hanya FO `WAITING_STOCK`
@@ -161,9 +165,16 @@ menyentuh stok.
 - [x] `amanUntukPdf()` membersihkan karakter di luar Latin-1 (emoji, kutip melengkung) — tanpa ini
       `pdf-lib` melempar error dan seluruh dokumen gagal
 - [x] Audit `production_list_printed` setiap unduhan
-- [x] Terverifikasi produksi: HTTP 200, `application/pdf`, 10.433 byte, header `%PDF`
-- [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda —
-      saat ini PDF memuat kode batch tetapi belum mengunci pesanan
+- [x] **Halaman Produksi** (`/dashboard/produksi`, izin `page.production`): daftar dikelompokkan,
+      bisa **centang pesanan mana saja** yang mau dicetak, "Cetak terpilih" / "Cetak semua"
+- [x] **Nama pendek** sesuai permintaan pemilik: `Abu Daud Jilid 1` · `Abu Daud Set` · `ALQURAN COMBI` ·
+      `ALQURAN POCKET` · `Muslim Set` · `Tirmidzi Jilid 5` · `Ibnu Majah Set` · `Nasai Set` ·
+      `Bukhori Jilid 6` · `Bukhori Set` (15 kasus diuji, termasuk varian salah ketik "Jilid i" → Jilid 1)
+- [x] **Urutan: SET dulu**, lalu jilid 1,2,3,… (diuji)
+- [x] PDF disederhanakan: **Produk · Qty · Tanggal** + rekap per produk + tanda tangan
+- [x] Terverifikasi produksi: 51 pesanan/67 unit, urutan `Abu Daud Set → Bukhori Set → … → Abu Daud Jilid 1`;
+      cetak 3 pesanan terpilih → PDF 1.699 byte (bukan seluruh daftar)
+- [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda
 
 ### Fase 6 — Perapian & operasional (sebagian)
 - [x] Hapus route `historical-sync` + tombol "Tarik Data Historis"
