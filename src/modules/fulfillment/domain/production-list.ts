@@ -213,3 +213,18 @@ export function amanUntukPdf(teks: string): string {
     .replace(/[ \t]+/g, ' ')
     .trim();
 }
+
+
+/** Format batas kirim untuk lembar kerja: "16 Okt, 15.23" (ASCII-safe utk PDF). */
+export function formatDeadline(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '-';
+  const jam = String(d.getHours()).padStart(2, '0');
+  const menit = String(d.getMinutes()).padStart(2, '0');
+  return `${d.getDate()} ${NAMA_BULAN_PENDEK[d.getMonth()]}, ${jam}.${menit}`;
+}
+
+const NAMA_BULAN_PENDEK = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
+  'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des',
+];

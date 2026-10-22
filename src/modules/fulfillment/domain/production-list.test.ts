@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   amanUntukPdf,
+  formatDeadline,
   isSet,
   jilidDari,
   kelompokkanProduksi,
@@ -168,5 +169,15 @@ describe('kunci urutan & rentang tanggal', () => {
       baris({ placedAt: '2026-10-20T03:00:00.000Z' }),
     ]);
     expect(hasil).toBe('20 Okt-22 Okt');
+  });
+});
+
+describe('formatDeadline', () => {
+  it('memformat ISO jadi "16 Okt, 15.23"', () => {
+    expect(formatDeadline('2026-10-16T08:23:00.000Z')).toBe('16 Okt, 15.23');
+  });
+
+  it('tanggal tidak valid jadi "-"', () => {
+    expect(formatDeadline('bukan-tanggal')).toBe('-');
   });
 });
