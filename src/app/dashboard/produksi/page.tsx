@@ -21,8 +21,20 @@ interface GrupProduksi {
   pesanan: PesananProduksi[];
 }
 
+interface PesananMendesak {
+  orderId: string;
+  externalOrderId: string;
+  nama: string;
+  qty: number;
+  batasKirim: string;
+  sisaTeks: string;
+  nada: 'lewat' | 'kritis' | 'waspada' | 'aman';
+  jam: number;
+}
+
 interface Daftar {
   kodeBatch: string;
+  mendesak: PesananMendesak[];
   totalPesanan: number;
   totalUnit: number;
   grup: GrupProduksi[];
@@ -35,6 +47,14 @@ interface Daftar {
  * produksi. Tidak ada panel saran yang harus ditafsirkan; urutannya sudah
  * bawaan: produk SET lebih dulu, lalu jilid 1, 2, 3, …
  */
+/** Warna teks hitung mundur sesuai tingkatnya (lewat = paling mendesak). */
+const NADA_WARNA: Record<PesananMendesak['nada'], string> = {
+  lewat: 'var(--danger)',
+  kritis: 'var(--danger)',
+  waspada: 'var(--warning)',
+  aman: 'var(--muted)',
+};
+
 /** Rentang tanggal pesanan pada satu produk ("20 Okt" atau "20-22 Okt"). */
 function rentangTanggal(pesanan: PesananProduksi[]): string {
   if (pesanan.length === 0) return '-';
@@ -176,6 +196,55 @@ export default function ProduksiPage() {
               {dipilih.length === semuaId.length ? 'Batalkan semua' : 'Pilih semua'}
             </button>
           </div>
+
+          {data.mendesak.length > 0 && (
+            <section className="card" style={{ marginBottom: 12 }}>
+              <div className="queue-card-head" style={{ flexWrap: 'wrap', gap: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <h2 style={{ margin: 0, fontSize: 15 }}>Paling dekat dibatalkan otomatis</h2>
+                  <p className="small muted" style={{ margin: '2px 0 0' }}>
+                    Kalau batas kirim terlewat, Shopee membatalkan pesanannya sendiri.
+                  </p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Produk</th>
+                      <th className="num">Qty</th>
+                      <th>Batas kirim</th>
+                      <th>Sisa waktu</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.mendesak.map((m) => (
+                      <tr key={m.orderId}>
+                        <td style={{ fontWeight: 600 }}>
+                          {m.nama}
+                          <span className="small muted" style={{ display: 'block', fontWeight: 400 }}>
+                            {m.externalOrderId}
+                          </span>
+                        </td>
+                        <td className="num">{m.qty}</td>
+                        <td className="small muted">
+                          {new Date(m.batasKirim).toLocaleString('id-ID', {
+                            day: 'numeric',
+                            month: 'short',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </td>
+                        <td className="small" style={{ color: NADA_WARNA[m.nada], fontWeight: 600 }}>
+                          {m.sisaTeks}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
 
           <div className="card">
             <div className="table-wrap">

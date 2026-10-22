@@ -194,6 +194,23 @@ cetak lembar produksi** (lihat Fase 5).
 
 ---
 
+### Fase 7 — Section "Paling dekat dibatalkan otomatis" + perbaikan data (selesai)
+- [x] Section di atas daftar produk: **5 pesanan dengan batas kirim terdekat**,
+      kolom Produk · Qty · Batas kirim · Sisa waktu; nada warna: lewat/kritis/waspada/aman.
+      Unit murni `src/modules/fulfillment/domain/countdown.ts` (hitung dalam menit agar
+      sisa <1 jam tidak salah baca "0 jam") + 7 test.
+- [x] **Anomali produksi**: 28 pesanan yang SUDAH batal di Shopee masih berstatus
+      `WAITING_STOCK` (51 → 23 pesanan, 67 → 31 unit, 21 → 13 baris produk).
+      Akar masalah: webhook `order_status_push` hanya memperbarui `order.status` dan
+      tidak menutup `FulfillmentOrder` (jalur `importOrder` sudah benar sejak awal).
+      Solusi: webhook kini memanggil `releaseReservationsForOrder` +
+      `markFulfillmentOrdersException` (idempoten); data lama dibereskan lewat
+      `scripts/backfill-tutup-fulfillment-batal.sh`.
+- [x] **Verifikasi sumber kebenaran**: full-sync dari Shopee setelah perbaikan →
+      `orders: COMPLETED, recordsWritten=0` — 23 pesanan tersisa memang masih CONFIRMED
+      menurut API Shopee; 5 di antaranya sudah lewat `shipByAt` = isi section (prioritas
+      pertama tim produksi).
+
 ## 6. Aturan kerja (untuk agen & editor)
 
 1. Domain murni di `src/modules/*/domain` — tanpa Prisma, tanpa HTTP; wajib ada test.

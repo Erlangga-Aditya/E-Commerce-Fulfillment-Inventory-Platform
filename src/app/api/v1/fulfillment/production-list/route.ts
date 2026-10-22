@@ -22,6 +22,8 @@ export async function GET(request: NextRequest) {
         kodeBatch: data.kodeBatch,
         totalPesanan: data.totalPesanan,
         totalUnit: data.totalUnit,
+        // Sisa waktu sebelum Shopee membatalkan otomatis (terdekat lebih dulu).
+        mendesak: data.mendesak,
         grup: data.grup.map((g) => ({
           nama: g.nama,
           jilid: g.jilid,

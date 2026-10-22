@@ -1,15 +1,32 @@
 import { prisma } from '@/shared/infrastructure/prisma';
+import { hitungSisaWaktu } from '../domain/countdown';
 import {
   amanUntukPdf,
   kelompokkanProduksi,
+  namaPendek,
   rentangTanggal,
   type BarisProduksi,
   type DaftarProduksi,
 } from '../domain/production-list';
 
+export interface PesananMendesak {
+  orderId: string;
+  externalOrderId: string;
+  /** Nama pendek produk (sama seperti di lembar produksi). */
+  nama: string;
+  qty: number;
+  batasKirim: string;
+  /** Mis. "Sisa 6 jam" / "Lewat 3 jam". */
+  sisaTeks: string;
+  nada: 'lewat' | 'kritis' | 'waspada' | 'aman';
+  jam: number;
+}
+
 export interface DataProduksi extends DaftarProduksi {
   kodeBatch: string;
   dicetakPada: Date;
+  /** 5 pesanan dengan batas kirim paling dekat (paling cepat dibatalkan Shopee). */
+  mendesak: PesananMendesak[];
 }
 
 /**
@@ -63,10 +80,38 @@ export async function ambilDataProduksi(
   }
 
   const sekarang = new Date();
+
+  // Satu baris per PESANAN (bukan per item) untuk hitung mundur: yang penting
+  // "pesanan mana yang paling cepat dibatalkan", beserta total unitnya.
+  const perPesanan = new Map<string, PesananMendesak>();
+  for (const b of baris) {
+    if (!b.shipByAt) continue;
+    const sisa = hitungSisaWaktu(b.shipByAt, sekarang);
+    if (!sisa) continue;
+    const ada = perPesanan.get(b.orderId);
+    if (ada) {
+      ada.qty += b.qty;
+    } else {
+      perPesanan.set(b.orderId, {
+        orderId: b.orderId,
+        externalOrderId: b.externalOrderId,
+        nama: namaPendek(b.produk, b.varian),
+        qty: b.qty,
+        batasKirim: b.shipByAt,
+        sisaTeks: sisa.teks,
+        nada: sisa.nada,
+        jam: sisa.jam,
+      });
+    }
+  }
+
+  const mendesak = [...perPesanan.values()].sort((a, b) => a.jam - b.jam).slice(0, 5);
+
   return {
     ...kelompokkanProduksi(baris),
     kodeBatch: `PROD-${sekarang.toISOString().slice(0, 10).replace(/-/g, '')}`,
     dicetakPada: sekarang,
+    mendesak,
   };
 }
 

@@ -6,7 +6,10 @@ import { ShopeeAdapter } from '../infrastructure/shopee.adapter';
 import { encryptSecret, decryptSecret } from '../infrastructure/crypto.service';
 import { importOrder } from '@/modules/orders/application/order.usecase';
 import { processOrderForFulfillment } from '@/modules/fulfillment/application/fulfillment.usecase';
-import { releaseReservationsForOrder } from '@/modules/inventory/application/inventory.usecase';
+import {
+  markFulfillmentOrdersException,
+  releaseReservationsForOrder,
+} from '@/modules/inventory/application/inventory.usecase';
 import { checkCancelApproval, type CancelApprovalRole } from '@/modules/orders/domain/cancellation';
 import { NotFoundError, ExternalIntegrationError } from '@/shared/errors/AppError';
 import { auditLog } from '@/modules/audit/application/auditLog.service';
@@ -1853,6 +1856,29 @@ async function handleOrderStatusPush(
         },
       });
     });
+    // Pesanan batal via webhook: baris fulfillment yang masih "menunggu stok"
+    // ikut ditutup dan reservasi stoknya dilepas. Tanpa ini, pesanan yang
+    // dibatalkan Shopee tetap dihitung sebagai pekerjaan gudang — angka
+    // "menunggu stok" membengkak palsu dan muncul di daftar produksi dengan
+    // tenggat yang sudah lewat (seperti yang ditemukan di produksi: 5 pesanan
+    // CANCELLED masih berstatus WAITING_STOCK).
+    //
+    // Idempoten: kedua fungsi hanya menyentuh baris yang masih aktif, jadi
+    // aman bila Shopee mengirim CANCELLED berulang kali.
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
+      try {
+        await releaseReservationsForOrder(
+          tenantId,
+          order.id,
+          null,
+          'Pesanan dibatalkan di Shopee (webhook)',
+        );
+        await markFulfillmentOrdersException(tenantId, order.id);
+      } catch (e) {
+        logger.warn(`Gagal membersihkan fulfillment pesanan batal ${orderSn}: ${(e as Error).message}`);
+      }
+    }
+
     logger.info(`Order ${orderSn} status diupdate via webhook: ${order.status} → ${status}`);
     broadcastSystemEvent('order:updated', {
       tenantId,
