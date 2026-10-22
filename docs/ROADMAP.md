@@ -126,12 +126,22 @@ menyentuh stok.
 - Catatan: pesanan **lama** tidak punya jejak ini (kolomnya baru) — terisi untuk aksi
   berikutnya, bukan hasil backfill.
 
-### Fase 3 — Dashboard operasional owner (belum)
-- [ ] Kartu: Perlu Produksi · Siap Diambil · Sedang Dipacking · Siap Diserahkan · Diserahkan ke Kurir · Diterima Kurir Shopee · Gagal
-- [ ] Filter tanggal per **tanggal kejadian tahap** (bukan tanggal pesanan)
-- [ ] Laporan per orang: jumlah paket dipacking & diserahkan per periode (D4: jumlah saja)
-- [ ] Tabel jejak per pesanan: masuk → dipilih → produksi → diambil → dipacking → diserahkan → diterima Shopee
-- Selesai bila: angka dashboard cocok dengan hitungan manual satu hari kerja.
+### Fase 3 — Ringkasan operasional owner (selesai)
+- [x] `GET /api/v1/reports/operations?range=` + `domain/operation-metrics.ts` (7 test)
+- [x] Kartu keadaan sekarang: Perlu Produksi · Siap Diambil · Sedang Dipacking · Siap Diserahkan · Gagal
+      (angka "diterima kurir Shopee" dipisah karena itu kejadian, bukan keadaan)
+- [x] Kejadian dalam rentang: dipacking · diserahkan · diterima kurir Shopee — disaring
+      **tanggal kejadian** (packedAt / handedOverAt), bukan tanggal pesanan
+- [x] Tabel per pelaku: paket dipacking & diserahkan per orang (D4: jumlah saja, tanpa rupiah)
+      + penanda `tanpaNama` untuk data lama agar laporan tidak terlihat lebih rapi dari kenyataan
+- [x] Tampil di halaman Laporan (izin `page.reports`), tanpa menu baru
+- [x] Terverifikasi produksi: `range=today` → perlu produksi 50 · siap diambil 19 · gagal 10 ·
+      diterima kurir Shopee 25; `range=all` → dipacking 166 · diserahkan 166 (semuanya `tanpaNama`,
+      karena kolom aktor baru ada)
+- Catatan UX: jejak aktor **tidak** ditampilkan di kartu antrean kerja (mengganggu saat
+  memproses); tempatnya di halaman Laporan & detail pesanan. Data tetap dikirim API.
+- [ ] Tabel jejak per pesanan (timeline) — menyusul bersama Fase 5
+- Ukur keberhasilan: angka `hari ini` cocok dengan hitungan manual satu hari kerja.
 
 ### Fase 4 — Pemilihan pesanan oleh owner (belum)
 - [ ] Daftar "Menunggu dipilih" dengan saran urutan: batas kirim terdekat, stok tersedia, prioritas

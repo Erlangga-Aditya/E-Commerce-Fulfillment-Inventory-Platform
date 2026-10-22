@@ -240,14 +240,6 @@ export function OrderCard({
               {o.buyerName ?? 'Pembeli Shopee'} · {o.shopName} · masuk {formatDate(o.placedAt)} · batas kirim{' '}
               {formatDate(o.shipByAt)} · {o.totalUnits} barang
             </div>
-            {(o.aktor.pickedByNama || o.aktor.packedByNama || o.aktor.handedOverByNama) && (
-              <div className="small muted" style={{ marginTop: 4 }}>
-                {/* Jejak aktor: dasar pembayaran packer & kurir internal per paket. */}
-                {o.aktor.pickedByNama ? <>Diambil: {o.aktor.pickedByNama} · </> : null}
-                {o.aktor.packedByNama ? <>Dipacking: {o.aktor.packedByNama} · </> : null}
-                {o.aktor.handedOverByNama ? <>Diserahkan: {o.aktor.handedOverByNama}</> : null}
-              </div>
-            )}
             {o.cancelCategory && (
               <div className="small" style={{ marginTop: 4 }}>
                 {o.cancelCategory === 'DIAJUKAN' ? (

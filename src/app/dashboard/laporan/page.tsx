@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, useMemo } from 'react';
 import { RefreshCw, Search, BookOpen, Layers } from 'lucide-react';
 import { api, formatDate } from '@/lib/api';
 import { PageHeader, StatusBadge, LoadingState, ErrorState, EmptyState } from '@/components/ui';
+import { OperasionalSection } from './operasional-section';
 
 interface Movement {
   id: string;
@@ -63,7 +64,7 @@ export default function LaporanPage() {
     <div>
       <PageHeader
         title="Laporan & Buku Besar (Ledger)"
-        subtitle="Riwayat audit mutasi stok lengkap dan distribusi prioritas pesanan aktif"
+        subtitle="Ringkasan operasional gudang, riwayat audit mutasi stok, dan distribusi prioritas pesanan"
         actions={
           <button
             type="button"
@@ -74,6 +75,8 @@ export default function LaporanPage() {
               load();
             }}
           >
+
+      <OperasionalSection />
             <RefreshCw size={14} aria-hidden />
             <span>Muat Ulang</span>
           </button>
