@@ -191,14 +191,30 @@ cetak lembar produksi** (lihat Fase 5).
       cetak 3 pesanan terpilih → PDF 1.699 byte (bukan seluruh daftar)
 - [ ] Pelacakan batch (tabel `production_batches`) agar cetak dua kali tidak memicu produksi ganda
 
-### Fase 6 — Perapian & operasional (sebagian)
+### Fase 6 — Perapian & operasional (selesai)
 - [x] Hapus route `historical-sync` + tombol "Tarik Data Historis"
 - [x] Hapus 12 skrip sekali-pakai; sisakan `vps-health.sh` + helper deploy
 - [x] Purge binlog + retensi 2 hari (disk 100% → 10%)
 - [x] Pisahkan test integrasi dari gate harian
 - [x] `pm2-logrotate`: 10 MB per berkas, simpan 5, kompres, rotasi harian (`scripts/vps-setup-logrotate.sh`)
-- [ ] Cek disk mingguan otomatis (cron) — alatnya sudah ada: `scripts/vps-health.sh`
-- [ ] Backfill `external_status` **tidak perlu** (0 pesanan aktif tanpa status — terukur)
+- [x] Cek disk mingguan otomatis (cron) — alatnya sudah ada: `scripts/vps-health.sh`
+- [x] Backfill `external_status` **tidak perlu** (0 pesanan aktif tanpa status — terukur)
+- [x] **Ringkasan operasional dipindah dari Laporan ke halaman Pesanan** (issue user):
+  - Section `OperasionalSection` lama dicabut dari `laporan/page.tsx` (sebelumnya
+    tersarang di dalam `<button>` aksi `PageHeader` — HTML invalid, tombol & chip
+    bocor keluar, layout rusak).
+  - Komponen baru `OperasionalSectionPesanan` di `dashboard/pesanan/operasional-section.tsx`:
+    grup "Keadaan SEKARANG" (5 kartu: Perlu Produksi, Siap Diambil, Sedang Dipacking,
+    Siap Diserahkan, Gagal/Tertahan) + grup "Kejadian DALAM RENTANG" (Dipacking,
+    Diserahkan ke kurir, Diterima kurir Shopee), tiap kartu berlabel + hint definisi,
+    filter rentang Hari ini/Kemarin/7 hari/30 hari/Semua, gate `page.reports`.
+  - Bug kritis saat deploy: versi lama komponen menaruh `if (!can('page.reports')) return null`
+    SEBELUM hook `useState`/`useEffect` → React #310 (hooks berubah antar render) →
+    seluruh halaman Pesanan error "This page couldn't load". Diperbaiki: semua hook
+    dipanggil sebelum gate. Verifikasi produksi: halaman render penuh, console 0 error,
+    filter kemarin mengubah angka (12 → 13 diterima Shopee).
+  - Test domain `operation-metrics.test.ts`: 7 test `hitungTahap` & `TAHAP_OPERASIONAL`.
+  - Bukti gate: `tsc` 0 error, `lint` 0 error, test 396 passed, HEALTH=200, DEPLOY_OK.
 
 ---
 
