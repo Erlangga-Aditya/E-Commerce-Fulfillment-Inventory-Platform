@@ -197,3 +197,80 @@ Konsol Shopee hanya menerima Redirect URL berupa **domain utama**
 ke endpoint callback — tanpa itu kode otorisasi hilang di halaman depan.
 `SHOPEE_REDIRECT_URL` (.env) dan `marketplace_app_configs.redirect_url`
 (database) keduanya di-set ke domain utama agar cocok dengan konsol.
+
+---
+
+## 8. Pesanan batal ≠ "Gagal kirim" (migrasi 2026-10-28)
+
+**Gejala yang dilaporkan pemilik toko:** pesanan yang dibatalkan muncul di
+halaman **Lacak Kiriman** dengan status **Gagal kirim**, dan kartu pesanannya
+memakai badge merah `Gagal kirim`.
+
+**Akar masalahnya di data, bukan tampilan.** Fungsi `mapLogisticsStatus()`
+dipakai untuk dua bahasa status yang berbeda: status **pesanan** dan status
+**paket**. Akibatnya status pesanan `CANCELLED` ditulis ke `shipments.status`
+sebagai `FAILED` pada setiap putaran sinkronisasi.
+
+Perbaikannya:
+
+- `ShipmentStatus` mendapat nilai baru `CANCELLED` (migrasi
+  `20261028090000_shipment_cancelled_status`, aditif — tidak ada kolom berubah).
+- Pemetaan pesanan→paket dipisah ke `src/modules/shipping/domain/shipment-status.ts`
+  (`mapOrderStatusToShipment`), dan aturan "status hanya boleh maju" ikut pindah
+  ke sana (`shouldAdvanceShipmentStatus`) supaya sinkronisasi, webhook, dan
+  pembatalan memakai satu definisi.
+- Sekalian ditutup: nomor resi yang datang **setelah** pesanan batal tidak lagi
+  membuat baris pengiriman baru.
+
+**Perbaikan data lama ikut di migrasi**, dengan batas yang ketat: hanya baris
+`FAILED` milik pesanan `CANCELLED` yang **tidak punya** peristiwa pelacakan
+`PICKED_UP` / `IN_TRANSIT` / `DELIVERED`. Paket yang nyata-nyata keluar gudang
+lalu gagal diantar tetap `FAILED` — itu kenyataan yang tidak boleh dihapus.
+
+Cara memeriksa setelah deploy (di VPS):
+
+```sql
+SELECT s.status, COUNT(*) FROM shipments s JOIN orders o ON o.id = s.order_id
+WHERE o.status = 'CANCELLED' GROUP BY 1;
+```
+
+Yang diharapkan: `CANCELLED` untuk paket yang tidak pernah dijemput, dan tidak
+ada lagi `FAILED` tanpa jejak perjalanan. Halaman Lacak Kiriman kini punya chip
+**Gagal Kirim**, **Dikembalikan**, dan **Dibatalkan** yang terpisah — sebelumnya
+`FAILED` tidak bisa disaring sama sekali.
+
+Catatan operasional: pesanan yang dibatalkan **setelah** paket dijemput kurir
+tidak diubah menjadi `CANCELLED`; paket seperti itu mengikuti jalur retur
+(`RETURNED`), bukan pembatalan.
+
+---
+
+## 9. Catatan fulfillment otomatis (2026-10-28)
+
+Dulu catatan fulfillment (antrean kerja gudang) hanya dibuat untuk pesanan
+yang **baru diimpor** (`result.created`). Pesanan yang sudah ada di database
+lalu berubah menjadi siap dikerjakan — mis. `UNPAID` menjadi `READY_TO_SHIP`
+setelah pembeli membayar — tidak pernah mendapat catatan, sehingga:
+
+- tidak muncul di antrean kerja halaman Pesanan,
+- tidak ikut dihitung sebagai pekerjaan gudang,
+- tidak masuk daftar produksi,
+
+sampai seseorang menekan **"Proses ke Fulfillment"** secara manual.
+
+Sekarang `ensureFulfillmentForOrder()` dipanggil oleh sinkronisasi **dan**
+webhook setiap kali pesanan berstatus `CONFIRMED`. Keputusannya ada di domain
+`fulfillment-gate.ts` dan sengaja **tidak** membuat catatan bila:
+
+| Keadaan | Alasan |
+|---|---|
+| Pesanan `CANCELLED` | paketnya tidak akan pernah dikirim |
+| Pesanan masih `NEW` / belum dibayar | belum jadi pekerjaan gudang |
+| Paket sudah `PICKED_UP`/`IN_TRANSIT`/`DELIVERED`/`FAILED`/`RETURNED` | barang sudah keluar gudang |
+| Sudah ada catatan aktif | idempoten |
+
+Karena idempoten, aman dijalankan setiap putaran sinkronisasi (60 detik) tanpa
+membuat catatan kembar. Kalau stok belum cukup, catatan tetap dibuat dengan
+status `WAITING_STOCK` — itu memang pekerjaan yang menunggu stok, bukan
+kegagalan.
+
