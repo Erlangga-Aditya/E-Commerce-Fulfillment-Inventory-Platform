@@ -295,8 +295,23 @@ lanjut ke cycle berikutnya.
       kosong tanpa penjelasan.
 - [x] **Cycle 8 — Dokumentasi.** `deploy/RUNBOOK-OPERASIONAL.md` §8–§9 (gejala,
       akar, cara memeriksa di VPS, batas perbaikan data) dan bagian ini.
-- [ ] **Deploy ke produksi + verifikasi angka nyata** — menunggu `VPS_PASS`
-      (helper deploy meminta password lewat environment; tidak tersimpan di repo).
+- [x] **Deploy produksi + verifikasi angka nyata** (2026-10-28).
+      `DEPLOY_OK`, `HEALTH=200`, schema *up to date*.
+      Angka produksi saat verifikasi:
+      - paket milik pesanan dibatalkan: **47 `CANCELLED`**, sisa `FAILED` tanpa
+        jejak perjalanan: **0**
+      - `?status=CANCELLED` = 47 · `?status=RETURNED` = 2 · `?status=FAILED` = 0
+      - pesanan siap kerja tanpa catatan fulfillment: **0**
+      - kartu antrean: `perluDiproses 23 (baru 16 + sudahResi 7)`; filter tahap
+        `perluProduksi` = 23 (sama dengan kartu)
+      - halaman Lacak Kiriman: HTTP 200, chip `Gagal Kirim` / `Dikembalikan` /
+        `Dibatalkan` tampil, 0 error React
+- [x] **Perbaikan susulan: `?status=ALL` membalas kosong.** Ditemukan justru
+      saat verifikasi produksi (191 kiriman, tapi `status=ALL` → 0). Penyebabnya
+      cast TypeScript `as ShipmentStatus` yang tidak berlaku saat berjalan,
+      sehingga nilai asing sampai ke Prisma. `getEnumQueryParam()` sekarang
+      dipakai `/api/v1/shipments`, `/api/v1/returns`, `/api/v1/orders`.
+      Terverifikasi di produksi: `status=ALL` = 191 = tanpa filter.
 
 ## 6. Aturan kerja (untuk agen & editor)
 

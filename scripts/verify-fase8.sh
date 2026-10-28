@@ -67,3 +67,21 @@ if [ "$ASING" = "$SEMUA" ]; then echo "  → OK: nilai asing diabaikan, data tid
 echo "== [API] kartu antrean kerja =="
 curl -s -b "$J" "$B/api/v1/fulfillment/station?range=all&bucket=perluDiproses&pageSize=1" -o /tmp/v8-kartu.json
 j "JSON.stringify(d.kartu)" < /tmp/v8-kartu.json | sed 's/^/  /'
+
+echo
+echo "== [C3] filter tahap (klik kartu ringkasan) =="
+for t in perluProduksi siapDiambil sedangDipacking siapDiserahkan; do
+  curl -s -b "$J" "$B/api/v1/fulfillment/station?range=all&bucket=semua&tahap=$t&pageSize=1" -o /tmp/v8-t.json
+  printf '  %-16s total=%s\n' "$t" "$(j 'd.total??(d.orders||[]).length' < /tmp/v8-t.json)"
+done
+# Nilai tahap asing harus diabaikan, bukan mengosongkan daftar.
+curl -s -b "$J" "$B/api/v1/fulfillment/station?range=all&bucket=semua&tahap=NGARANG&pageSize=1" -o /tmp/v8-t2.json
+printf '  %-16s total=%s (harus sama dengan bucket=semua)\n' "NGARANG" "$(j 'd.total??(d.orders||[]).length' < /tmp/v8-t2.json)"
+
+echo
+echo "== [UI] halaman Lacak Kiriman benar-benar render =="
+curl -s -b "$J" "$B/dashboard/pengiriman" -o /tmp/v8-pg.html -w '  HTTP=%{http_code}\n'
+for teks in "Gagal Kirim" "Dikembalikan" "Dibatalkan"; do
+  printf '  chip "%s" ada: %s\n' "$teks" "$(grep -c "$teks" /tmp/v8-pg.html)"
+done
+printf '  halaman error React: %s\n' "$(grep -c "couldn't load" /tmp/v8-pg.html)"
