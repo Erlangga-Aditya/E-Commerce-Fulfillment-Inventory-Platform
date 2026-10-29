@@ -722,6 +722,49 @@ describe('ShopeeAdapter', () => {
       expect(result.message).toContain('Seller Centre');
       expect(result.message).toContain('sudah pernah dijadwalkan');
     });
+
+    /**
+     * Regresi PRODUKSI 2026-10-29 (order 261027QHEBBY8Q, toko 275991637).
+     *
+     * Shopee menjawab `info_needed: { dropoff: [] }` + `dropoff.branch_list:
+     * null` — drop-off didukung TANPA cabang. `ship_order` harus mengirim
+     * `dropoff: {}` (bukan `pickup`, bukan `non_integrated`), lalu AWB diambil.
+     */
+    it('mengirim ship_order dropoff kosong saat Shopee tidak meminta cabang', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              error: '',
+              message: '',
+              response: { info_needed: { dropoff: [] }, dropoff: { branch_list: null } },
+            }),
+        })
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () => JSON.stringify({ error: '', message: '', response: {} }),
+        })
+        .mockResolvedValueOnce({
+          status: 200,
+          text: async () =>
+            JSON.stringify({ error: '', response: { tracking_number: 'OFG246809009243506' } }),
+        });
+
+      global.fetch = fetchMock;
+
+      const result = await adapter.arrangeShipment(creds, { orderSn: '261027QHEBBY8Q' });
+
+      expect(result.success).toBe(true);
+      expect(result.trackingNumber).toBe('OFG246809009243506');
+
+      const body = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string);
+      expect(body.order_sn).toBe('261027QHEBBY8Q');
+      expect(body.dropoff).toEqual({});
+      expect(body.pickup).toBeUndefined();
+      expect(body.non_integrated).toBeUndefined();
+    });
   });
 
   describe('HTTP Method validation (GET vs POST)', () => {

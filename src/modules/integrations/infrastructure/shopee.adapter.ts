@@ -1246,8 +1246,12 @@ export class ShopeeAdapter implements MarketplaceAdapter {
       }
       const channels = extractSupportedChannels(paramRes);
       if (channels.length === 0) {
+        // Cetak jawaban mentahnya. Tanpa ini, pesan "tidak ada kanal" tidak
+        // bisa ditindaklanjuti: operator tidak tahu apakah Shopee menjawab
+        // `info_needed` yang tidak kita kenali, atau memang menolak.
         logger.warn(`Tidak ada kanal pengiriman yang didukung untuk order ${input.orderSn}`, {
           shopId: creds.shopId,
+          jawabanShopee: JSON.stringify(paramRes).slice(0, 1500),
         });
         throw describeNoChannel(input.orderSn);
       }
