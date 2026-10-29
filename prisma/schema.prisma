@@ -530,6 +530,9 @@ model FulfillmentOrder {
   @@index([orderId])
   @@index([warehouseId])
   @@index([status])
+  // Indeks laporan Rekap Kerja Staf: query rentang waktu per pelaku.
+  @@index([packedAt])
+  @@index([handedOverAt])
   @@map("fulfillment_orders")
 }
 
