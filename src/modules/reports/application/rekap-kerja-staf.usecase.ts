@@ -30,8 +30,8 @@ export type JenisKerjaan = 'packing' | 'serahKirim';
 export const JENIS_KERJAAN: readonly JenisKerjaan[] = ['packing', 'serahKirim'] as const;
 
 export const LABEL_JENIS_KERJAAN: Record<JenisKerjaan, string> = {
-  packing: 'Packing (scan resi)',
-  serahKirim: 'Serah Kurir (serahkan ke kurir)',
+  packing: 'Packing',
+  serahKirim: 'Kirim',
 };
 
 /** Satu baris rekap harian seorang staf pada satu jenis kerjaan. */
@@ -219,6 +219,31 @@ function ringkaskanJejak(
 
   // Urut: total terbanyak dulu, kedua berdasarkan nama.
   return daftar.sort((a, b) => b.total - a.total || a.nama.localeCompare(b.nama));
+}
+
+/**
+ * Ambil rentang tahun yang memiliki catatan kerja staf — dipakai dropdown
+ * filter tahun di UI. Tahun tanpa catatan apa pun tidak perlu ditampilkan.
+ *
+ * Selalu menyertakan tahun berjalan: owner wajib bisa membuka tahun ini
+ * walau belum ada aksi (mis. 1 Januari tahun baru).
+ */
+export async function getTahunTersedia(tenantId: string): Promise<{ min: number; max: number }> {
+  const tahunIni = new Date().getFullYear();
+  const hasil = await prisma.fulfillmentOrder.aggregate({
+    where: { order: { tenantId } },
+    _min: { packedAt: true, handedOverAt: true },
+    _max: { packedAt: true, handedOverAt: true },
+  });
+  const kandidatMin = [hasil._min.packedAt, hasil._min.handedOverAt].filter(
+    (v): v is Date => v !== null,
+  );
+  const kandidatMax = [hasil._max.packedAt, hasil._max.handedOverAt].filter(
+    (v): v is Date => v !== null,
+  );
+  const minData = kandidatMin.length > 0 ? Math.min(...kandidatMin.map((d) => d.getUTCFullYear())) : tahunIni;
+  const maxData = kandidatMax.length > 0 ? Math.max(...kandidatMax.map((d) => d.getUTCFullYear())) : tahunIni;
+  return { min: Math.min(minData, tahunIni), max: Math.max(maxData, tahunIni) };
 }
 
 /**
